@@ -25,9 +25,10 @@ class SYTGenerator {
 public:
     explicit SYTGenerator() noexcept = default;
 
-    /// Initialize timing for given sample rate
+    /// Initialize timing for given sample rate and frames per DATA packet.
     /// @param sampleRate Sample rate in Hz (e.g., 48000.0)
-    void initialize(double sampleRate) noexcept;
+    /// @param framesPerPacket Data blocks per DATA packet (8 for blocking, 6 for non-blocking at 48kHz)
+    void initialize(double sampleRate, uint32_t framesPerPacket = 6) noexcept;
 
     /// Reset running state (call on stream start)
     void reset() noexcept;
@@ -66,15 +67,17 @@ private:
     /// Ticks per audio sample at 48 kHz: 24576000 / 48000 = 512
     static constexpr uint32_t kTicksPerSample48k = 512;
 
-    /// Samples per DATA packet at 48 kHz (IEC 61883-6 blocking)
+    /// Non-blocking SYT interval: number of data packets between valid SYT events
+    /// (IEC 61883-6 Table B.3, 48kHz non-blocking mode).
+    /// NOT the same as framesPerDataPacket (which is 48000/8000 = 6 at 48kHz).
     static constexpr uint32_t kSytInterval = 8;
 
     // =========================================================================
     // Per-rate computed values (set in initialize())
     // =========================================================================
 
-    /// Ticks per SYT interval: kSytInterval * ticksPerSample = 8 * 512 = 4096
-    uint32_t sytIntervalTicks_{4096};
+    /// Ticks per DATA packet: framesPerPacket * ticksPerSample = 6 * 512 = 3072
+    uint32_t sytIntervalTicks_{kTicksPerCycle};
 
     /// Wrap point for sytOffsetTicks_: 16 * kTicksPerCycle = 49152
     /// Matches the 4-bit cycle field in SYT format

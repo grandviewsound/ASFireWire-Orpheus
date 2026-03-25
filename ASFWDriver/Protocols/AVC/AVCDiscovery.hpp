@@ -11,6 +11,7 @@
 #include <DriverKit/IODispatchQueue.h>
 #include <DriverKit/IOLib.h>
 #include <DriverKit/OSSharedPtr.h>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -71,6 +72,12 @@ public:
 
     ASFWAudioNub* GetFirstAudioNub();
 
+    // Optional callback invoked when a previously-suspended device resumes
+    // (e.g. after a BeBoB bus reset). Called from the DeviceManager observer
+    // notification — must not block.
+    void SetDeviceResumedCallback(
+        std::function<void(std::shared_ptr<Discovery::FWDevice>)> cb);
+
     // Create audio nub from hardcoded profile for known non-AV/C bring-up.
     void EnsureHardcodedAudioNubForDevice(const Discovery::DeviceRecord& deviceRecord);
 
@@ -118,6 +125,8 @@ private:
     OSSharedPtr<IODispatchQueue> rescanQueue_;
 
     os_log_t log_{OS_LOG_DEFAULT};
+
+    std::function<void(std::shared_ptr<Discovery::FWDevice>)> deviceResumedCallback_;
 };
 
 } // namespace ASFW::Protocols::AVC

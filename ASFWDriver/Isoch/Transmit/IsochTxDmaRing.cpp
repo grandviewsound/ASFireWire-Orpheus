@@ -86,15 +86,17 @@ IsochTxDmaRing::PrimeStats IsochTxDmaRing::Prime(IIsochTxPacketProvider& provide
         }
 
         const uint32_t isochHeaderQ0 = BuildIsochHeaderQ0(channel_);
-        const uint32_t isochHeaderQ1 = (static_cast<uint32_t>(static_cast<uint16_t>(pkt.sizeBytes)) << 16);
 
         auto* immDesc = reinterpret_cast<OHCIDescriptorImmediate*>(slab_.GetDescriptorPtr(descBase));
-        immDesc->common.control = (0x0200u << 16) | 8;
+        // Fix #28: reqCount=4 (isoch header only). Previously reqCount=8 injected
+        // 4 garbage bytes (isochHeaderQ1) before the CIP payload, shifting
+        // CIP Q0/Q1 by one quadlet so the device could never parse them.
+        immDesc->common.control = (0x0200u << 16) | 4;
         immDesc->common.dataAddress = 0;
         immDesc->common.branchWord = (nextBlockIOVA & 0xFFFFFFF0u) | Layout::kBlocksPerPacket;
         immDesc->common.statusWord = 0;
         immDesc->immediateData[0] = isochHeaderQ0;
-        immDesc->immediateData[1] = isochHeaderQ1;
+        immDesc->immediateData[1] = 0;
         immDesc->immediateData[2] = 0;
         immDesc->immediateData[3] = 0;
 
@@ -128,8 +130,10 @@ IsochTxDmaRing::PrimeStats IsochTxDmaRing::Prime(IIsochTxPacketProvider& provide
     ringPacketsAhead_ = numPackets;
     lastHwPacketIndex_ = 0;
 
+    // Fix #27: IoBarrier ensures initial descriptor+payload writes are committed
+    // to the system domain before OHCI DMA is started.
     std::atomic_thread_fence(std::memory_order_release);
-    ASFW::Driver::WriteBarrier();
+    ASFW::Driver::IoBarrier();
 
     return stats;
 }
@@ -274,9 +278,9 @@ IsochTxDmaRing::RefillOutcome IsochTxDmaRing::Refill(Driver::HardwareInterface& 
             lastDesc->dataAddress = payloadIOVA;
             lastDesc->statusWord = 0;
 
-            auto* immDesc = reinterpret_cast<OHCIDescriptorImmediate*>(slab_.GetDescriptorPtr(descBase));
-            const uint32_t isochHeaderQ1 = (static_cast<uint32_t>(pkt.sizeBytes) & 0xFFFFu) << 16;
-            immDesc->immediateData[1] = isochHeaderQ1;
+            // Fix #28: No isochHeaderQ1 update needed — reqCount=4 means only
+            // the isoch header (immediateData[0]) is sent from OMI. The CIP payload
+            // starts entirely from the OUTPUT_LAST data buffer.
 
             out.packetsFilled++;
             if (pkt.isData) {
@@ -289,8 +293,10 @@ IsochTxDmaRing::RefillOutcome IsochTxDmaRing::Refill(Driver::HardwareInterface& 
         softwareFillIndex_ = (softwareFillIndex_ + toFill) % Layout::kNumPackets;
         ringPacketsAhead_ += toFill;
 
+        // Fix #27: Use IoBarrier (dsb sy) to ensure descriptor/payload writes
+        // are visible to the PCIe FireWire OHCI DMA engine before Phase 3.
         std::atomic_thread_fence(std::memory_order_release);
-        ASFW::Driver::WriteBarrier();
+        ASFW::Driver::IoBarrier();
 
         counters_.packetsRefilled.fetch_add(toFill, std::memory_order_relaxed);
     }

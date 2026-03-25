@@ -180,7 +180,7 @@ void FWDevice::Suspend()
 
 void FWDevice::Resume(Generation newGen, uint16_t newNodeId, const LinkPolicy& newLink)
 {
-    if (state_ != State::Suspended) {
+    if (state_ == State::Terminated) {
         return;
     }
 

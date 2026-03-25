@@ -519,10 +519,13 @@ void RxPath::HandlePhyRequestPacket(const ARPacketView& view) {
                  xferStatus);
 
         if (currentBusResetCapture_) {
-            // Reuse existing handler – header holds q0/q1 quadlets
-            const uint32_t* quadlets_raw =
-                reinterpret_cast<const uint32_t*>(view.header.data());
-            HandleSyntheticBusResetPacket(quadlets_raw,
+            // Copy header to local buffer before passing — view.header DMA memory
+            // may be recycled by OHCI before CapturePacket's memcpy executes (SIGBUS fix)
+            uint32_t quadlets_local[4] = {};
+            const size_t copyBytes = std::min(view.header.size() * sizeof(uint8_t),
+                                              sizeof(quadlets_local));
+            __builtin_memcpy(quadlets_local, view.header.data(), copyBytes);
+            HandleSyntheticBusResetPacket(quadlets_local,
                                           genFromPacket,
                                           currentBusResetCapture_);
         }

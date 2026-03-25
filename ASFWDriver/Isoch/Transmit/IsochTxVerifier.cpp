@@ -242,7 +242,7 @@ void IsochTxVerifier::RunWork() noexcept {
         const uint16_t expectedNoDataReq = static_cast<uint16_t>(Encoding::kCIPHeaderSize);
         const uint16_t expectedDataReq = static_cast<uint16_t>(
             Encoding::kCIPHeaderSize +
-            inputs_.framesPerPacket * inputs_.channels * sizeof(uint32_t));
+            inputs_.framesPerPacket * inputs_.wireDbs * sizeof(uint32_t));
 
         const bool isNoDataByReq = (e.reqCount == expectedNoDataReq);
         const bool isDataByReq = (e.reqCount > expectedNoDataReq);
@@ -273,7 +273,7 @@ void IsochTxVerifier::RunWork() noexcept {
             ASFW_LOG_RL(Isoch, "txverify/reqcount", 1000, OS_LOG_TYPE_DEFAULT,
                         "IT TX VERIFY: unexpected DATA reqCount pkt=%u req=%u expected=%u (framesPerData=%u ch=%u)",
                         e.packetIndex, e.reqCount, expectedDataReq,
-                        inputs_.framesPerPacket, inputs_.channels);
+                        inputs_.framesPerPacket, inputs_.wireDbs);
             restartReasons |= IsochTxRecoveryController::kReasonCipAnomaly;
         }
 
@@ -301,10 +301,10 @@ void IsochTxVerifier::RunWork() noexcept {
                         e.packetIndex, cip.fdf, Encoding::kSFC_48kHz);
             restartReasons |= IsochTxRecoveryController::kReasonCipAnomaly;
         }
-        if (cip.dbs != inputs_.channels) {
+        if (cip.dbs != inputs_.wireDbs) {
             ASFW_LOG_RL(Isoch, "txverify/cip_dbs", 1000, OS_LOG_TYPE_DEFAULT,
                         "IT TX VERIFY: CIP DBS mismatch pkt=%u dbs=%u expected=%u",
-                        e.packetIndex, cip.dbs, inputs_.channels);
+                        e.packetIndex, cip.dbs, inputs_.wireDbs);
             restartReasons |= IsochTxRecoveryController::kReasonCipAnomaly;
         }
         if (isData && cip.syt == Encoding::kSYTNoData) {
@@ -358,7 +358,9 @@ void IsochTxVerifier::RunWork() noexcept {
                 if (q == 0) {
                     sawAllZero = true;
                 }
-                if (!ASFW::Isoch::TxVerify::HasValidAM824Label(q, Encoding::kAM824LabelMBLA)) {
+                // Fix 29: Accept both MBLA (0x40) and MIDI (0x80) labels as valid.
+                if (!ASFW::Isoch::TxVerify::HasValidAM824Label(q, Encoding::kAM824LabelMBLA) &&
+                    !ASFW::Isoch::TxVerify::HasValidAM824Label(q, Encoding::kAM824LabelMIDI)) {
                     if (!sawInvalidLabel) {
                         badLabel = ASFW::Isoch::TxVerify::AM824LabelByte(q);
                         badWord = q;

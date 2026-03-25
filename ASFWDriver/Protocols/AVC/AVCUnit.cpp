@@ -61,12 +61,11 @@ void AVCUnit::ProbeUnitInfo(std::function<void(bool)> completion) {
 
     SubmitCommand(cdb, [this, completion](AVCResult result, const AVCCdb&) {
         if (!IsSuccess(result)) {
-            ASFW_LOG_V1(AVC, "AVCUnit: UNIT_INFO failed: result=%d",
+            ASFW_LOG_V1(AVC, "AVCUnit: UNIT_INFO failed (result=%d) - continuing anyway",
                          static_cast<int>(result));
-            completion(false);
-            return;
+        } else {
+            ASFW_LOG_V2(AVC, "AVCUnit: UNIT_INFO succeeded");
         }
-        ASFW_LOG_V2(AVC, "AVCUnit: UNIT_INFO succeeded");
         completion(true);
     });
 }
@@ -162,9 +161,9 @@ void AVCUnit::ProbeSubunits(std::function<void(bool)> completion) {
     cmd->Submit([this, completion, cmd](AVCResult result,
                                          const AVCSubunitInfoCommand::SubunitInfo& info) {
         if (!IsSuccess(result)) {
-        ASFW_LOG_V1(AVC, "AVCUnit: SUBUNIT_INFO failed: result=%d",
+            ASFW_LOG_V1(AVC, "AVCUnit: SUBUNIT_INFO failed (result=%d) - continuing without subunit info",
                          static_cast<int>(result));
-            completion(false);
+            completion(true);  // Non-fatal: device may still be booting after BeBoB format reset
             return;
         }
 
@@ -260,9 +259,13 @@ void AVCUnit::ProbePlugs(std::function<void(bool)> completion) {
                                          const UnitPlugCounts& info) {
         if (!IsSuccess(result)) {
             ASFW_LOG_V1(AVC,
-                         "AVCUnit: PLUG_INFO failed: result=%d",
+                         "AVCUnit: PLUG_INFO failed (result=%d) - using defaults (1 iso in/out)",
                          static_cast<int>(result));
-            completion(false);
+            // Non-fatal: assume 1 iso in + 1 iso out; the BeBoB hardcoded path
+            // doesn't need accurate plug counts to set up streaming.
+            plugCounts_.isoInputPlugs = 1;
+            plugCounts_.isoOutputPlugs = 1;
+            completion(true);
             return;
         }
 

@@ -85,7 +85,7 @@ final class ASFWDriverConnector: ObservableObject {
     // MARK: - Connection State
 
     var connection: io_connect_t = 0
-    let connectionQueue = DispatchQueue(label: "net.mrmidi.ASFWDriverConnector.connection")
+    let connectionQueue = DispatchQueue(label: "com.kevinpeters.ASFWDriverConnector.connection")
     let serviceName = "ASFWDriver"
 
     var notificationPort: IONotificationPortRef?

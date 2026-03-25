@@ -154,9 +154,9 @@ static void AutoStartStreamsIfNeeded(const ASFWAudioNub* self, const ASFWAudioNu
             ASFW_LOG(Audio, "ASFWAudioNub: ✅ IR started");
         } else {
             ASFW_LOG(Audio, "ASFWAudioNub: StartIsochReceive failed: 0x%x", irKr);
+            return;  // Can't start IT without IR
         }
-        // Stage IR first; IT is retried on later RPC once RX SYT has progressed.
-        return;
+        // Fall through to start IT immediately — IT pipeline sends silence until SYT established.
     }
 
     if (!itRunning) {
@@ -270,13 +270,13 @@ static kern_return_t CreateRxQueue(ASFWAudioNub_IVars* iv)
         return kIOReturnSuccess;
     }
 
-    if (iv->channelCount == 0 || iv->channelCount > 16) {
-        ASFW_LOG(Audio, "ASFWAudioNub: CreateRxQueue: invalid channelCount=%u (SetChannelCount not called?)",
-                 iv->channelCount);
+    const uint32_t rxCh = (iv->rxChannelCount > 0) ? iv->rxChannelCount : iv->channelCount;
+    if (rxCh == 0 || rxCh > 16) {
+        ASFW_LOG(Audio, "ASFWAudioNub: CreateRxQueue: invalid rxChannelCount=%u", rxCh);
         return kIOReturnNotReady;
     }
 
-    const uint64_t bytes = ASFW::Shared::TxSharedQueueSPSC::RequiredBytes(kRxQueueCapacityFrames, iv->channelCount);
+    const uint64_t bytes = ASFW::Shared::TxSharedQueueSPSC::RequiredBytes(kRxQueueCapacityFrames, rxCh);
 
     // Allocate IOBufferMemoryDescriptor
     IOBufferMemoryDescriptor* mem = nullptr;
@@ -317,7 +317,7 @@ static kern_return_t CreateRxQueue(ASFWAudioNub_IVars* iv)
     // Initialize SPSC queue in shared memory
     auto* base = reinterpret_cast<void*>(map->GetAddress());
     if (const bool initOk = ASFW::Shared::TxSharedQueueSPSC::InitializeInPlace(
-            base, bytes, kRxQueueCapacityFrames, iv->channelCount);
+            base, bytes, kRxQueueCapacityFrames, rxCh);
         !initOk) {
         ASFW_LOG(Audio, "ASFWAudioNub: RX shared queue initialization failed");
         map->release();
@@ -653,6 +653,21 @@ void ASFWAudioNub::SetChannelCount(uint32_t channels)
 uint32_t ASFWAudioNub::GetChannelCount() const
 {
     return ivars ? ivars->channelCount : 0;
+}
+
+// LOCALONLY: Set RX (input) channel count independently from TX channel count
+void ASFWAudioNub::SetInputChannelCount(uint32_t channels)
+{
+    if (!ivars) return;
+    ivars->rxChannelCount = channels;
+    ASFW_LOG(Audio, "ASFWAudioNub: RX channel count set to %u", channels);
+}
+
+// LOCALONLY: Get RX channel count (falls back to TX channel count if unset)
+uint32_t ASFWAudioNub::GetInputChannelCount() const
+{
+    if (!ivars) return 0;
+    return (ivars->rxChannelCount > 0) ? ivars->rxChannelCount : ivars->channelCount;
 }
 
 void ASFWAudioNub::SetGuid(uint64_t guid)

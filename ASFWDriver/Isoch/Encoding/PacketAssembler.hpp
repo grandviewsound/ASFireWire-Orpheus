@@ -83,16 +83,25 @@ public:
     /// Construct a packet assembler.
     /// @param channels Number of audio channels (1..kMaxSupportedChannels)
     /// @param sid Source node ID (6 bits)
-    explicit PacketAssembler(uint32_t channels = 2, uint8_t sid = 0) noexcept
+    /// @param midiChannels Number of MIDI channels per data block (0 or 1)
+    explicit PacketAssembler(uint32_t channels = 2, uint8_t sid = 0, uint32_t midiChannels = 0) noexcept
         : channelCount_(channels)
-        , cipBuilder_(sid, static_cast<uint8_t>(channels)) {}
+        , midiChannels_(midiChannels)
+        , cipBuilder_(sid, static_cast<uint8_t>(channels + midiChannels)) {}
 
-    /// Get channel count.
+    /// Get audio channel count (what CoreAudio sees).
     uint32_t channelCount() const noexcept { return channelCount_; }
 
-    /// Get runtime data packet size in bytes.
+    /// Get MIDI channel count (0 or 1, wire-only).
+    uint32_t midiChannels() const noexcept { return midiChannels_; }
+
+    /// Wire DBS = audio channels + MIDI channels. This is the CIP DBS field.
+    uint32_t wireDbs() const noexcept { return channelCount_ + midiChannels_; }
+
+    /// Get runtime data packet size in bytes (CIP header + data blocks).
+    /// Each data block = wireDbs quadlets (audio + MIDI).
     uint32_t dataPacketSize() const noexcept {
-        return kCIPHeaderSize + samplesPerDataPacket() * channelCount_ * sizeof(uint32_t);
+        return kCIPHeaderSize + samplesPerDataPacket() * wireDbs() * sizeof(uint32_t);
     }
 
     /// Get DATA packet frame count for the active stream mode (48k paths only).
@@ -106,11 +115,12 @@ public:
         return kSamplesPerDataPacket;
     }
 
-    /// Reconfigure channel count and SID (resets all state).
+    /// Reconfigure channel count, MIDI channels, and SID (resets all state).
     /// Use this instead of assignment since atomics prevent copy/move.
-    void reconfigure(uint32_t channels, uint8_t sid) noexcept {
+    void reconfigure(uint32_t channels, uint8_t sid, uint32_t midiChannels = 0) noexcept {
         channelCount_ = channels;
-        cipBuilder_ = CIPHeaderBuilder(sid, static_cast<uint8_t>(channels));
+        midiChannels_ = midiChannels;
+        cipBuilder_ = CIPHeaderBuilder(sid, static_cast<uint8_t>(channels + midiChannels));
         ringBuffer_.reconfigure(channels);
         blockingCadence_.reset();
         nonBlockingCadence_.reset();
@@ -298,11 +308,20 @@ private:
             std::memset(&samples[samplesRead], 0, (totalSamples - samplesRead) * sizeof(int32_t));
         }
 
-        // Encode samples to AM824 format
-        uint32_t* audioQuadlets = reinterpret_cast<uint32_t*>(packet.data + kCIPHeaderSize);
+        // Fix 29: Encode samples to AM824 format, interleaving MIDI no-data quadlets.
+        // Each data block = channelCount_ audio quadlets + midiChannels_ MIDI quadlets.
+        uint32_t* quadlets = reinterpret_cast<uint32_t*>(packet.data + kCIPHeaderSize);
+        const uint32_t dbs = wireDbs();
 
-        for (uint32_t i = 0; i < framesPerPacket * channelCount_; ++i) {
-            audioQuadlets[i] = AM824Encoder::encode(samples[i]);
+        for (uint32_t f = 0; f < framesPerPacket; ++f) {
+            // Audio quadlets for this data block
+            for (uint32_t ch = 0; ch < channelCount_; ++ch) {
+                quadlets[f * dbs + ch] = AM824Encoder::encode(samples[f * channelCount_ + ch]);
+            }
+            // MIDI no-data quadlet(s) at end of data block
+            for (uint32_t m = 0; m < midiChannels_; ++m) {
+                quadlets[f * dbs + channelCount_ + m] = AM824Encoder::encodeMidiNoData();
+            }
         }
     }
     
@@ -316,13 +335,19 @@ private:
         std::memcpy(packet.data, &cip.q0, 4);
         std::memcpy(packet.data + 4, &cip.q1, 4);
 
-        // IMPORTANT: Silent audio must still be valid AM824/MBLA (label 0x40),
-        // otherwise some devices interpret it as garbage (audible noise).
-        uint32_t* audioQuadlets = reinterpret_cast<uint32_t*>(packet.data + kCIPHeaderSize);
+        // Fix 29: Silent audio = valid AM824/MBLA (label 0x40) + MIDI no-data (label 0x80).
+        uint32_t* quadlets = reinterpret_cast<uint32_t*>(packet.data + kCIPHeaderSize);
         const uint32_t silence = AM824Encoder::encodeSilence();
-        const uint32_t quadlets = framesPerPacket * channelCount_;
-        for (uint32_t i = 0; i < quadlets; ++i) {
-            audioQuadlets[i] = silence;
+        const uint32_t midiNoData = AM824Encoder::encodeMidiNoData();
+        const uint32_t dbs = wireDbs();
+
+        for (uint32_t f = 0; f < framesPerPacket; ++f) {
+            for (uint32_t ch = 0; ch < channelCount_; ++ch) {
+                quadlets[f * dbs + ch] = silence;
+            }
+            for (uint32_t m = 0; m < midiChannels_; ++m) {
+                quadlets[f * dbs + channelCount_ + m] = midiNoData;
+            }
         }
     }
 
@@ -339,6 +364,7 @@ private:
     }
     
     uint32_t channelCount_{2};               ///< Number of audio channels
+    uint32_t midiChannels_{0};               ///< Number of MIDI channels per data block (0 or 1)
     uint64_t currentCycleNumber() const noexcept {
         switch (streamMode_) {
             case StreamMode::kBlocking:

@@ -16,7 +16,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "3A1693EC2E808765000BD368"
-               BuildableName = "net.mrmidi.ASFW.ASFWDriver.dext"
+               BuildableName = "com.kevinpeters.ASFW.ASFWDriver.dext"
                BlueprintName = "ASFWDriver"
                ReferencedContainer = "container:ASFW.xcodeproj">
             </BuildableReference>
@@ -51,7 +51,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "3A1693EC2E808765000BD368"
-            BuildableName = "net.mrmidi.ASFW.ASFWDriver.dext"
+            BuildableName = "com.kevinpeters.ASFW.ASFWDriver.dext"
             BlueprintName = "ASFWDriver"
             ReferencedContainer = "container:ASFW.xcodeproj">
          </BuildableReference>

@@ -162,16 +162,16 @@ kern_return_t IsochHandler::TestCMPConnectOPCR(IOUserClientMethodArguments* args
 
     auto* driver = driver_; 
 
-    cmpClient->ConnectOPCR(kTestPlug,
+    constexpr uint8_t kTestChannel = 0;
+    cmpClient->ConnectOPCR(kTestPlug, kTestChannel,
         [driver](ASFW::CMP::CMPStatus status) {
             if (status == ASFW::CMP::CMPStatus::Success) {
                 ASFW_LOG(UserClient, "✅ CMP oPCR connect succeeded!");
-                
+
                 // AUTO-START ISOCH RECEIVE
-                // Hardcode Channel 0 for now as per test requirement
                 ASFW_LOG(UserClient, "[Auto-Start] Triggering Isoch Receive on Channel 0...");
                 driver->StartIsochReceive(0);
-                
+
             } else {
                 ASFW_LOG(UserClient, "❌ CMP oPCR connect failed: %d", static_cast<int>(status));
             }

@@ -70,6 +70,11 @@ public:
     void SetChannelCount(uint32_t channels) LOCALONLY;
     uint32_t GetChannelCount() const LOCALONLY;
 
+    // Set RX queue channel count (may differ from TX; e.g. 10 audio vs 12 output)
+    // If not called, RX queue falls back to channelCount
+    void SetInputChannelCount(uint32_t channels) LOCALONLY;
+    uint32_t GetInputChannelCount() const LOCALONLY;
+
     // Stream mode selected during discovery:
     //   0 = non-blocking, 1 = blocking
     void SetStreamMode(uint32_t modeRaw) LOCALONLY;
@@ -115,7 +120,8 @@ struct ASFWAudioNub_IVars {
 
     // Audio channel count (read from ASFWDriver properties)
     uint64_t guid{0};
-    uint32_t channelCount{2};
+    uint32_t channelCount{2};   // TX/output channel count
+    uint32_t rxChannelCount{0}; // RX/input channel count (0 = fallback to channelCount)
     uint32_t streamModeRaw{0};             // 0=non-blocking, 1=blocking
 
     // ZERO-COPY: Shared output audio buffer for IOUserAudioStream AND IT DMA

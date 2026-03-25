@@ -272,8 +272,11 @@ std::shared_ptr<FWDevice> DeviceManager::UpsertDevice(
         // Device exists - resume it
         auto device = it->second;
         if (device) {
-            if (device->IsSuspended()) {
-                // Resume existing device with new generation info
+            if (!device->IsTerminated()) {
+                // Always update gen/nodeId and fire resume notification on re-discovery.
+                // After every bus reset the Orpheus resets its PCR p2p count to 0 and
+                // may change node number. We must reconnect CMP and refresh FCP routing
+                // regardless of whether the device was Suspended or already Ready.
                 device->Resume(record.gen, record.nodeId, record.link);
 
                 // Update secondary index
@@ -290,7 +293,6 @@ std::shared_ptr<FWDevice> DeviceManager::UpsertDevice(
                     }
                 }
             }
-            // If already Ready, this is redundant discovery - ignore
             IOLockUnlock(mutex_);
             return device;
         }
@@ -329,9 +331,36 @@ std::shared_ptr<FWDevice> DeviceManager::UpsertDevice(
 
 void DeviceManager::MarkDeviceLost(Guid64 guid)
 {
-    // Immediate-unplug policy for audio stability/cleanup.
-    // TODO: check suspend+timeout policy if needed
-    TerminateDevice(guid);
+    // Suspend policy: BeBoB and other AV/C audio devices perform mandatory bus
+    // resets after SetFormat. Immediately terminating the device kills the audio
+    // driver. Suspend it instead so it can be resumed when it reappears in the
+    // next generation scan. TerminateDevice() is still available for explicit
+    // permanent removal (e.g. physical unplug detected via timeout).
+    IOLockLock(mutex_);
+
+    auto it = devicesByGuid_.find(guid);
+    if (it == devicesByGuid_.end()) {
+        IOLockUnlock(mutex_);
+        return;
+    }
+
+    auto device = it->second;
+    if (!device || !device->IsReady()) {
+        IOLockUnlock(mutex_);
+        return;
+    }
+
+    device->Suspend();
+
+    for (const auto& unit : device->GetUnits()) {
+        if (unit && !unit->IsTerminated()) {
+            NotifyUnitSuspended(unit);
+        }
+    }
+
+    NotifyDeviceSuspended(device);
+
+    IOLockUnlock(mutex_);
 }
 
 void DeviceManager::TerminateDevice(Guid64 guid)

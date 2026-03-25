@@ -10,13 +10,15 @@
 
 namespace ASFW::Encoding {
 
-void SYTGenerator::initialize(double sampleRate) noexcept {
-    // TODO: Support sample rates beyond 48kHz
+void SYTGenerator::initialize(double sampleRate, uint32_t framesPerPacket) noexcept {
+    // SYT advance per DATA packet = framesPerPacket * ticksPerSample.
+    // Blocking mode:     8 frames/packet → 8 * 512 = 4096 ticks
+    // Non-blocking mode: 6 frames/packet → 6 * 512 = 3072 ticks
     if (sampleRate == 48000.0) {
-        sytIntervalTicks_ = kSytInterval * kTicksPerSample48k;  // 8 * 512 = 4096
+        sytIntervalTicks_ = framesPerPacket * kTicksPerSample48k;
     } else {
         ASFW_LOG(Isoch, "SYTGenerator: Unsupported rate %.0f Hz, using 48kHz params", sampleRate);
-        sytIntervalTicks_ = kSytInterval * kTicksPerSample48k;
+        sytIntervalTicks_ = framesPerPacket * kTicksPerSample48k;  // fallback
     }
 
     sytOffsetWrap_ = 16 * kTicksPerCycle;  // 49152

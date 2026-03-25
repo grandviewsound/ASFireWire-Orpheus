@@ -213,7 +213,8 @@ void LogPeriodicMetrics(AudioClockEngineState& state,
     const uint64_t dp = state.encodingMetrics->packetsGenerated - state.encodingMetrics->lastLogPackets;
     const double packetsPerSec = (dt > 0.0) ? static_cast<double>(dp) / dt : 0.0;
 
-    if (::ASFW::LogConfig::Shared().GetIsochVerbosity() >= 3) {
+    // Fix #24: Always print IO metrics (was gated by verbosity >= 3)
+    {
         ASFW_LOG(Audio,
                  "IO: %.1fs recv=%llu sent=%llu (%.0f/s) cb=%llu ring=%u rxFill=%u overruns=%llu underruns=%llu/%llu | LocalEnc:%{public}s %llu pkts (%.0f/s, D:%llu N:%llu)",
                  elapsedSec,

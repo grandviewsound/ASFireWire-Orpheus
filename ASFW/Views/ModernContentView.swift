@@ -46,6 +46,7 @@ struct ModernContentView: View {
         case audio = "Core Audio"
         case saffire = "Saffire"
         case duet = "Duet"
+        case orpheus = "Orpheus"
 
         var id: String { rawValue }
 
@@ -67,6 +68,7 @@ struct ModernContentView: View {
             case .audio: return "hifispeaker.fill"
             case .saffire: return "slider.vertical.3"
             case .duet: return "slider.horizontal.below.square.filled.and.square"
+            case .orpheus: return "hifispeaker.2.fill"
             }
         }
 
@@ -119,6 +121,8 @@ struct ModernContentView: View {
                     SaffireMixerView(connector: debugVM.connector)
                 case .duet:
                     DuetControlView(connector: debugVM.connector)
+                case .orpheus:
+                    OrpheusControlView(connector: debugVM.connector)
                 case .none:
                     Text("Select a section")
                         .foregroundStyle(.secondary)

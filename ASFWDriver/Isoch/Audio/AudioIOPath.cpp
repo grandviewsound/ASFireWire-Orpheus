@@ -46,9 +46,12 @@ kern_return_t HandleBeginRead(AudioIOPathState& state,
         secondFrames = ioBufferFrameSize - firstFrames;
     }
 
-    const uint64_t offsetBytes = uint64_t(offsetFrames) * sizeof(int32_t) * state.channelCount;
-    const size_t firstBytes = size_t(firstFrames) * sizeof(int32_t) * state.channelCount;
-    const size_t secondBytes = size_t(secondFrames) * sizeof(int32_t) * state.channelCount;
+    // Use inputChannelCount for input buffer stride; fall back to channelCount if not set.
+    const uint32_t inChCount = (state.inputChannelCount > 0) ? state.inputChannelCount : state.channelCount;
+
+    const uint64_t offsetBytes = uint64_t(offsetFrames) * sizeof(int32_t) * inChCount;
+    const size_t firstBytes = size_t(firstFrames) * sizeof(int32_t) * inChCount;
+    const size_t secondBytes = size_t(secondFrames) * sizeof(int32_t) * inChCount;
 
     MaybeDrainRxStartup(state);
 
@@ -56,9 +59,9 @@ kern_return_t HandleBeginRead(AudioIOPathState& state,
         auto* pcmFirst = reinterpret_cast<int32_t*>(segment.address + offsetBytes);
         const uint32_t read1 = state.rxQueueReader->Read(pcmFirst, firstFrames);
         if (read1 < firstFrames) {
-            memset(pcmFirst + read1 * state.channelCount,
+            memset(pcmFirst + read1 * inChCount,
                    0,
-                   size_t(firstFrames - read1) * sizeof(int32_t) * state.channelCount);
+                   size_t(firstFrames - read1) * sizeof(int32_t) * inChCount);
         }
 
         if (secondFrames > 0) {
@@ -66,9 +69,9 @@ kern_return_t HandleBeginRead(AudioIOPathState& state,
             if (read1 == firstFrames) {
                 const uint32_t read2 = state.rxQueueReader->Read(pcmSecond, secondFrames);
                 if (read2 < secondFrames) {
-                    memset(pcmSecond + read2 * state.channelCount,
+                    memset(pcmSecond + read2 * inChCount,
                            0,
-                           size_t(secondFrames - read2) * sizeof(int32_t) * state.channelCount);
+                           size_t(secondFrames - read2) * sizeof(int32_t) * inChCount);
                 }
             } else {
                 memset(pcmSecond, 0, secondBytes);
@@ -162,6 +165,11 @@ uint32_t WriteEndZeroCopyPublish(AudioIOPathState& state,
     return framesWritten;
 }
 
+// Diagnostic counters for HandleWriteEnd (Fix #24)
+static uint64_t sWriteEndCallCount = 0;
+static uint64_t sWriteEndNonZeroFrames = 0;
+static int32_t  sWriteEndPeakSample = 0;
+
 kern_return_t HandleWriteEnd(AudioIOPathState& state,
                              uint32_t ioBufferFrameSize,
                              uint64_t sampleTime) {
@@ -187,6 +195,20 @@ kern_return_t HandleWriteEnd(AudioIOPathState& state,
 
     const auto* pcmDataFirst = reinterpret_cast<const int32_t*>(segment.address + offsetBytes);
     const auto* pcmDataSecond = reinterpret_cast<const int32_t*>(segment.address);
+
+    // Fix #24: Diagnostic — scan for non-zero audio and track peak sample
+    {
+        const uint32_t totalSamples = firstFrames * state.channelCount;
+        bool hasNonZero = false;
+        for (uint32_t i = 0; i < totalSamples; ++i) {
+            int32_t s = pcmDataFirst[i];
+            if (s != 0) hasNonZero = true;
+            int32_t abs_s = (s < 0) ? -s : s;
+            if (abs_s > sWriteEndPeakSample) sWriteEndPeakSample = abs_s;
+        }
+        if (hasNonZero) sWriteEndNonZeroFrames += firstFrames;
+    }
+
     uint32_t framesWritten = 0;
     uint32_t framesRequested = ioBufferFrameSize;
 
@@ -213,6 +235,25 @@ kern_return_t HandleWriteEnd(AudioIOPathState& state,
 
     if (framesWritten < framesRequested && state.encodingOverruns) {
         (*state.encodingOverruns)++;
+    }
+
+    // Fix #24: Periodic diagnostic log (every ~500 calls ≈ every 5 seconds at 48kHz/512)
+    ++sWriteEndCallCount;
+    if (sWriteEndCallCount % 500 == 1) {
+        ASFW_LOG(Audio,
+                 "WriteEnd[%llu]: frames=%u written=%u txQ=%{public}s zc=%{public}s "
+                 "nonZeroFrames=%llu peak=0x%08x samples=[%08x,%08x,%08x,%08x]",
+                 sWriteEndCallCount,
+                 ioBufferFrameSize,
+                 framesWritten,
+                 (state.txQueueValid && state.txQueueWriter) ? "YES" : "NO",
+                 state.zeroCopyEnabled ? "YES" : "NO",
+                 sWriteEndNonZeroFrames,
+                 static_cast<uint32_t>(sWriteEndPeakSample),
+                 static_cast<uint32_t>(pcmDataFirst[0]),
+                 static_cast<uint32_t>(state.channelCount > 1 ? pcmDataFirst[1] : 0),
+                 static_cast<uint32_t>(state.channelCount > 0 ? pcmDataFirst[state.channelCount] : 0),
+                 static_cast<uint32_t>(state.channelCount > 1 ? pcmDataFirst[state.channelCount + 1] : 0));
     }
 
     return kIOReturnSuccess;

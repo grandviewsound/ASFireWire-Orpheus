@@ -150,6 +150,8 @@ public:
     uint32_t CapacityFrames() const { return capacity_; }
     uint32_t Channels() const { return IsValid() ? hdr_->channels : 0; }
 
+    uint32_t ChannelCount() const { return IsValid() ? hdr_->channels : 0; }
+
     uint32_t WriteIndexFrames() const {
         if (!IsValid()) return 0;
         return hdr_->writeIndexFrames.v.load(std::memory_order_acquire);

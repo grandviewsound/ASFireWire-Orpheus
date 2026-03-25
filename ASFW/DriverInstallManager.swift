@@ -5,7 +5,7 @@ final class DriverInstallManager: NSObject, OSSystemExtensionRequestDelegate {
     static let shared = DriverInstallManager()
     private override init() {}
 
-    private let extensionIdentifier = "net.mrmidi.ASFW.ASFWDriver" // matches driver bundle id
+    private let extensionIdentifier = "com.kevinpeters.ASFW.ASFWDriver" // matches driver bundle id
 
     enum ActivationError: Error { case unknown, rejected, requiresUserApproval }
     enum OperationKind { case activation, deactivation }

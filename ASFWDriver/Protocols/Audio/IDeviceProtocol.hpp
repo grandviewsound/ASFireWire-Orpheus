@@ -45,6 +45,12 @@ public:
     /// Implementations should be idempotent and return quickly.
     virtual IOReturn StartDuplex48k() { return kIOReturnUnsupported; }
 
+    /// Returns true once StartDuplex48k() has completed successfully at least once.
+    /// Used by the bus-reset recovery path to decide whether to retry SetFormat
+    /// before reconnecting CMP PCR connections.
+    /// Non-BeBoB protocols that don't need SetFormat should return true always.
+    virtual bool IsFormatDone() const { return true; }
+
     /// Update volatile runtime context that can change across bus resets.
     virtual void UpdateRuntimeContext(uint16_t nodeId,
                                       Protocols::AVC::FCPTransport* transport) {

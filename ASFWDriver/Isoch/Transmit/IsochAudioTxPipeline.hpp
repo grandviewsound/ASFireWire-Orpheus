@@ -62,6 +62,8 @@ public:
 
     [[nodiscard]] uint32_t FramesPerDataPacket() const noexcept { return assembler_.samplesPerDataPacket(); }
     [[nodiscard]] uint32_t ChannelCount() const noexcept { return assembler_.channelCount(); }
+    [[nodiscard]] uint32_t MidiChannels() const noexcept { return assembler_.midiChannels(); }
+    [[nodiscard]] uint32_t WireDbs() const noexcept { return assembler_.wireDbs(); }
     [[nodiscard]] uint64_t DbcDiscontinuityCount() const noexcept { return dbcTracker_.discontinuityCount.load(std::memory_order_relaxed); }
 
     void ResetForStart() noexcept;

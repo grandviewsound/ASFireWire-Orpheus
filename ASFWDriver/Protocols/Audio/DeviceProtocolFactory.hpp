@@ -33,6 +33,8 @@ public:
     static constexpr uint32_t kSPro24DspModelId = 0x000008;
     static constexpr uint32_t kApogeeVendorId = 0x0003db;
     static constexpr uint32_t kApogeeDuetModelId = 0x01dddd;
+    static constexpr uint32_t kPrismSoundVendorId = 0x001198;
+    static constexpr uint32_t kOrpheusModelId = 0x010048;
 
     /// Resolve integration mode for a known vendor/model pair.
     static constexpr DeviceIntegrationMode LookupIntegrationMode(
@@ -44,6 +46,9 @@ public:
         }
         if (vendorId == kApogeeVendorId && modelId == kApogeeDuetModelId) {
             return DeviceIntegrationMode::kAVCDriven;
+        }
+        if (vendorId == kPrismSoundVendorId && modelId == kOrpheusModelId) {
+            return DeviceIntegrationMode::kHardcodedNub;
         }
         return DeviceIntegrationMode::kNone;
     }

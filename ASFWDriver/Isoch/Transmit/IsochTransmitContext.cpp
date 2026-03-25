@@ -368,7 +368,7 @@ void IsochTransmitContext::KickTxVerifier() noexcept {
 
     IsochTxVerifier::Inputs in{};
     in.framesPerPacket = audio_.FramesPerDataPacket();
-    in.channels = audio_.ChannelCount();
+    in.wireDbs = audio_.WireDbs();
     in.zeroCopyEnabled = audio_.IsZeroCopyEnabled();
     in.sharedTxQueueValid = audio_.SharedTxQueueValid();
     in.sharedTxQueueFillFrames = audio_.SharedTxFillLevelFrames();

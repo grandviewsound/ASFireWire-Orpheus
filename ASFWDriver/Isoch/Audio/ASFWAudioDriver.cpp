@@ -62,8 +62,8 @@ struct AudioDriverDeviceState {
 
     char inputPlugName[64]{};
     char outputPlugName[64]{};
-    char inputChannelNames[8][64]{};
-    char outputChannelNames[8][64]{};
+    char inputChannelNames[ASFW::Isoch::Audio::kMaxNamedChannels][64]{};
+    char outputChannelNames[ASFW::Isoch::Audio::kMaxNamedChannels][64]{};
 };
 
 struct AudioDriverSharedMemoryState {
@@ -354,8 +354,11 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
         }
     }
     
-    // Create audio device
-    auto deviceUID = OSSharedPtr(OSString::withCString("ASFWAudioDevice"), OSNoRetain);
+    // Create audio device — UID includes GUID so CoreAudio treats each physical device distinctly.
+    // This prevents stale per-channel names from a previous device/session bleeding through.
+    char uidStr[64];
+    snprintf(uidStr, sizeof(uidStr), "ASFWAudioDevice-%016llx", ivars->device.guid);
+    auto deviceUID = OSSharedPtr(OSString::withCString(uidStr), OSNoRetain);
     auto modelUID = OSSharedPtr(OSString::withCString(ivars->device.deviceName), OSNoRetain);
     auto manufacturerUID = OSSharedPtr(OSString::withCString("ASFireWire"), OSNoRetain);
     
@@ -395,6 +398,7 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
             .inputBuffer = driverIvars->inputBuffer.get(),
             .outputBuffer = driverIvars->outputBuffer.get(),
             .channelCount = driverIvars->device.channelCount,
+            .inputChannelCount = driverIvars->device.inputChannelCount,
             .ioBufferPeriodFrames = kZeroTimestampPeriod,
             .rxStartupDrained = &driverIvars->runtime.rxStartupDrained,
             .rxQueueValid = driverIvars->shared.rxQueueValid,
@@ -439,33 +443,51 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
     ivars->audioDevice->SetSampleRate(ivars->device.currentSampleRate);
     ASFW_LOG(Audio, "ASFWAudioDriver: Initial sample rate set to %.0f Hz", ivars->device.currentSampleRate);
     
-    // Create stream formats - one for each supported sample rate
-    // This populates the Format dropdown in Audio MIDI Setup
-    // Using 24-bit audio as expected by FireWire hardware (packed in 32-bit container)
-    IOUserAudioStreamBasicDescription formats[8] = {};
-    uint32_t formatCount = ivars->device.sampleRateCount > 8 ? 8 : ivars->device.sampleRateCount;
-    
+    // Create separate stream formats for input and output.
+    // Output: channelCount channels (e.g. 12 for Orpheus iPCR, DBS=12).
+    // Input:  inputChannelCount channels (e.g. 10 for Orpheus oPCR, DBS=11 minus MIDI slot).
+    const uint32_t formatCount = ivars->device.sampleRateCount > 8 ? 8 : ivars->device.sampleRateCount;
+    const uint32_t inCh = (ivars->device.inputChannelCount > 0)
+                          ? ivars->device.inputChannelCount
+                          : ivars->device.channelCount;
+
+    IOUserAudioStreamBasicDescription outputFormats[8] = {};
     for (uint32_t i = 0; i < formatCount; i++) {
-        formats[i].mSampleRate = ivars->device.sampleRates[i];
-        formats[i].mFormatID = IOUserAudioFormatID::LinearPCM;
-        formats[i].mFormatFlags = static_cast<IOUserAudioFormatFlags>(
+        outputFormats[i].mSampleRate = ivars->device.sampleRates[i];
+        outputFormats[i].mFormatID = IOUserAudioFormatID::LinearPCM;
+        outputFormats[i].mFormatFlags = static_cast<IOUserAudioFormatFlags>(
             static_cast<uint32_t>(IOUserAudioFormatFlags::FormatFlagIsSignedInteger) |
             static_cast<uint32_t>(IOUserAudioFormatFlags::FormatFlagsNativeEndian));
-        // 24-bit audio in 32-bit containers (standard for pro audio)
-        formats[i].mBytesPerPacket = sizeof(int32_t) * ivars->device.channelCount;
-        formats[i].mFramesPerPacket = 1;
-        formats[i].mBytesPerFrame = sizeof(int32_t) * ivars->device.channelCount;
-        formats[i].mChannelsPerFrame = ivars->device.channelCount;
-        formats[i].mBitsPerChannel = 24;  // 24-bit audio for hardware
+        outputFormats[i].mBytesPerPacket = sizeof(int32_t) * ivars->device.channelCount;
+        outputFormats[i].mFramesPerPacket = 1;
+        outputFormats[i].mBytesPerFrame = sizeof(int32_t) * ivars->device.channelCount;
+        outputFormats[i].mChannelsPerFrame = ivars->device.channelCount;
+        outputFormats[i].mBitsPerChannel = 24;
     }
-    
-    ASFW_LOG(Audio, "ASFWAudioDriver: Created %u stream formats (24-bit)", formatCount);
-    
-    // Buffer size (still use 32-bit containers for 24-bit audio)
-    const uint32_t bufferBytes = kZeroTimestampPeriod * sizeof(int32_t) * ivars->device.channelCount;
+
+    IOUserAudioStreamBasicDescription inputFormats[8] = {};
+    for (uint32_t i = 0; i < formatCount; i++) {
+        inputFormats[i].mSampleRate = ivars->device.sampleRates[i];
+        inputFormats[i].mFormatID = IOUserAudioFormatID::LinearPCM;
+        inputFormats[i].mFormatFlags = static_cast<IOUserAudioFormatFlags>(
+            static_cast<uint32_t>(IOUserAudioFormatFlags::FormatFlagIsSignedInteger) |
+            static_cast<uint32_t>(IOUserAudioFormatFlags::FormatFlagsNativeEndian));
+        inputFormats[i].mBytesPerPacket = sizeof(int32_t) * inCh;
+        inputFormats[i].mFramesPerPacket = 1;
+        inputFormats[i].mBytesPerFrame = sizeof(int32_t) * inCh;
+        inputFormats[i].mChannelsPerFrame = inCh;
+        inputFormats[i].mBitsPerChannel = 24;
+    }
+
+    ASFW_LOG(Audio, "ASFWAudioDriver: Stream formats: output %u ch, input %u ch, %u rate(s) (24-bit)",
+             ivars->device.channelCount, inCh, formatCount);
+
+    // Separate buffer sizes for input (inCh) and output (channelCount)
+    const uint32_t outputBufferBytes = kZeroTimestampPeriod * sizeof(int32_t) * ivars->device.channelCount;
+    const uint32_t inputBufferBytes  = kZeroTimestampPeriod * sizeof(int32_t) * inCh;
     
     // Create input buffer and stream
-    error = IOBufferMemoryDescriptor::Create(kIOMemoryDirectionInOut, bufferBytes, 0,
+    error = IOBufferMemoryDescriptor::Create(kIOMemoryDirectionInOut, inputBufferBytes, 0,
                                               ivars->inputBuffer.attach());
     if (error != kIOReturnSuccess) {
         ASFW_LOG(Audio, "ASFWAudioDriver: Failed to create input buffer: %d", error);
@@ -483,8 +505,8 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
     // Use plug name for stream name (e.g., "Analog In")
     auto inputName = OSSharedPtr(OSString::withCString(ivars->device.inputPlugName), OSNoRetain);
     ivars->inputStream->SetName(inputName.get());
-    ivars->inputStream->SetAvailableStreamFormats(formats, formatCount);
-    ivars->inputStream->SetCurrentStreamFormat(&formats[0]);  // Initial format
+    ivars->inputStream->SetAvailableStreamFormats(inputFormats, formatCount);
+    ivars->inputStream->SetCurrentStreamFormat(&inputFormats[0]);  // Initial format
     
     // ========================================================================
     // ZERO-COPY: Try to get shared output buffer from ASFWAudioNub
@@ -518,7 +540,7 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
     
     // Fallback: Create local output buffer if ZERO-COPY not available
     if (!ivars->shared.zeroCopyEnabled) {
-        error = IOBufferMemoryDescriptor::Create(kIOMemoryDirectionInOut, bufferBytes, 0,
+        error = IOBufferMemoryDescriptor::Create(kIOMemoryDirectionInOut, outputBufferBytes, 0,
                                                   ivars->outputBuffer.attach());
         if (error != kIOReturnSuccess) {
             ASFW_LOG(Audio, "ASFWAudioDriver: Failed to create output buffer: %d", error);
@@ -539,8 +561,8 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
     // Use plug name for stream name (e.g., "Analog Out")
     auto outputName = OSSharedPtr(OSString::withCString(ivars->device.outputPlugName), OSNoRetain);
     ivars->outputStream->SetName(outputName.get());
-    ivars->outputStream->SetAvailableStreamFormats(formats, formatCount);
-    ivars->outputStream->SetCurrentStreamFormat(&formats[0]);  // Initial format
+    ivars->outputStream->SetAvailableStreamFormats(outputFormats, formatCount);
+    ivars->outputStream->SetCurrentStreamFormat(&outputFormats[0]);  // Initial format
 
     // Stream-level latency (no additional latency beyond device-level)
     ivars->outputStream->SetLatency(0);
@@ -561,7 +583,7 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
     
     // Set channel names on the device (elements are 1-based)
     // This gives us "Analog Out 1", "Analog Out 2" etc. in Audio MIDI Setup
-    for (uint32_t ch = 1; ch <= ivars->device.channelCount && ch <= 8; ch++) {
+    for (uint32_t ch = 1; ch <= ivars->device.channelCount && ch <= ASFW::Isoch::Audio::kMaxNamedChannels; ch++) {
         auto outChName = OSSharedPtr(OSString::withCString(ivars->device.outputChannelNames[ch-1]), OSNoRetain);
         ivars->audioDevice->SetElementName(ch, IOUserAudioObjectPropertyScope::Output, outChName.get());
         
