@@ -9,7 +9,7 @@
 #include <DriverKit/IOLib.h>
 #include <DriverKit/IOBufferMemoryDescriptor.h>
 #include <DriverKit/OSSharedPtr.h>
-#include <net.mrmidi.ASFW.ASFWDriver/ASFWAudioNub.h>
+#include <com.kevinpeters.ASFW.ASFWDriver/ASFWAudioNub.h>
 
 namespace ASFW::Audio {
 
@@ -151,7 +151,7 @@ IOReturn AVCAudioBackend::StartStreaming(uint64_t guid) noexcept {
     {
         std::atomic<bool> done{false};
         std::atomic<ASFW::CMP::CMPStatus> status{ASFW::CMP::CMPStatus::Failed};
-        cmpClient_->ConnectOPCR(0, [&done, &status](ASFW::CMP::CMPStatus s) {
+        cmpClient_->ConnectOPCR(0, kDefaultIrChannel, [&done, &status](ASFW::CMP::CMPStatus s) {
             status.store(s, std::memory_order_release);
             done.store(true, std::memory_order_release);
         });
