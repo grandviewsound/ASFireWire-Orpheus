@@ -14,6 +14,10 @@ constexpr uint32_t kApogeeDuetModelId = 0x01DDDD;
 // Focusrite DICE devices — Linux kernel dice-stream.c unconditionally uses CIP_BLOCKING.
 constexpr uint32_t kFocusriteVendorId = 0x00130e;
 constexpr uint32_t kSPro24DspModelId  = 0x000008;
+
+// Prism Sound Orpheus (BeBoB/BridgeCo DM1500) — Linux firewire-bebob always uses CIP_BLOCKING.
+constexpr uint32_t kPrismSoundVendorId = 0x001198;
+constexpr uint32_t kOrpheusModelId     = 0x010048;
 } // namespace
 
 std::optional<Model::StreamMode> LookupForcedStreamMode(
@@ -31,6 +35,13 @@ std::optional<Model::StreamMode> LookupForcedStreamMode(
     // Linux kernel DICE driver unconditionally uses CIP_BLOCKING (dice-stream.c:508).
     // DICE devices expect blocking cadence (8 samples/packet + NO-DATA packets).
     if (vendorId == kFocusriteVendorId && modelId == kSPro24DspModelId) {
+        return Model::StreamMode::kBlocking;
+    }
+
+    // Prism Sound Orpheus (BeBoB/BridgeCo DM1500):
+    // Linux firewire-bebob driver always sets CIP_BLOCKING (bebob_stream.c).
+    // BridgeCo devices expect blocking cadence (8 data blocks/packet).
+    if (vendorId == kPrismSoundVendorId && modelId == kOrpheusModelId) {
         return Model::StreamMode::kBlocking;
     }
 

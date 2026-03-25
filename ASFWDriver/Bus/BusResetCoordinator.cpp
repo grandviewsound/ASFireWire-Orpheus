@@ -326,6 +326,23 @@ void BusResetCoordinator::RunStateMachine() {
                 }
                 A_BuildTopology();
                 if (lastTopology_.has_value()) {
+                    // Set/clear LinkControl.cycleMaster based on root status.
+                    // Per OHCI §5.10 / Linux ohci.c handle_selfid():
+                    //   cycleMaster=1 + isRoot → generates cycle-start packets every 125μs
+                    //   cycleMaster=0 + !isRoot → accepts cycle-starts from external cycle master
+                    // Without cycle start, isochronous DMA contexts never fire.
+                    if (hardware_) {
+                        const bool isRoot = lastTopology_->localNodeId.has_value() &&
+                                            lastTopology_->rootNodeId.has_value() &&
+                                            *lastTopology_->localNodeId == *lastTopology_->rootNodeId;
+                        if (isRoot) {
+                            hardware_->SetLinkControlBits(LinkControlBits::kCycleMaster);
+                            ASFW_LOG(BusReset, "[Action] Local node IS root → CycleMaster enabled");
+                        } else {
+                            hardware_->ClearLinkControlBits(LinkControlBits::kCycleMaster);
+                            ASFW_LOG(BusReset, "[Action] Local node is NOT root → CycleMaster cleared");
+                        }
+                    }
                     EvaluateRootDelegation(*lastTopology_);
                 }
 

@@ -30,7 +30,7 @@ class IsochTxVerifier final : public Tx::IsochTxCaptureHook {
 public:
     struct Inputs {
         uint32_t framesPerPacket{0};
-        uint32_t channels{0};
+        uint32_t wireDbs{0};           // CIP DBS = audio channels + MIDI channels
         bool zeroCopyEnabled{false};
         bool sharedTxQueueValid{false};
         uint32_t sharedTxQueueFillFrames{0};

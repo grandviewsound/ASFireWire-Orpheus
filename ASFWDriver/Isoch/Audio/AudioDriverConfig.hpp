@@ -14,7 +14,7 @@ namespace ASFW::Isoch::Audio {
 constexpr double kDefaultSampleRate = 48000.0;
 constexpr uint32_t kDefaultChannelCount = 2;
 constexpr uint32_t kMaxSampleRates = 8;
-constexpr uint32_t kMaxNamedChannels = 8;
+constexpr uint32_t kMaxNamedChannels = 16;
 constexpr uint32_t kMaxBoolControls = 16;
 
 constexpr uint32_t kClassIdPhantomPower = static_cast<uint32_t>('phan');

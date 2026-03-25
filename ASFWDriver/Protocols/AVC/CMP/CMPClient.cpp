@@ -131,15 +131,20 @@ void CMPClient::ReadOPCR(uint8_t plugNum, PCRReadCallback callback) {
     ReadPCRQuadlet(PCRRegisters::GetOPCRAddress(plugNum), callback);
 }
 
-void CMPClient::ConnectOPCR(uint8_t plugNum, CMPCallback callback) {
+void CMPClient::ConnectOPCR(uint8_t plugNum, uint8_t channel, CMPCallback callback) {
     if (plugNum > 30) {
         ASFW_LOG(CMP, "CMPClient: Invalid oPCR plug number %u", plugNum);
         callback(CMPStatus::Failed);
         return;
     }
-    
-    ASFW_LOG(CMP, "CMPClient: Connecting oPCR[%u]", plugNum);
-    PerformConnect(PCRRegisters::GetOPCRAddress(plugNum), plugNum, std::nullopt, callback);
+    if (channel > 63) {
+        ASFW_LOG(CMP, "CMPClient: Invalid channel %u for oPCR", channel);
+        callback(CMPStatus::Failed);
+        return;
+    }
+
+    ASFW_LOG(CMP, "CMPClient: Connecting oPCR[%u] on channel %u", plugNum, channel);
+    PerformConnect(PCRRegisters::GetOPCRAddress(plugNum), plugNum, channel, callback);
 }
 
 void CMPClient::DisconnectOPCR(uint8_t plugNum, CMPCallback callback) {
@@ -249,7 +254,7 @@ void CMPClient::PerformDisconnect(uint32_t pcrAddress, uint8_t plugNum, CMPCallb
             callback(CMPStatus::Failed);
             return;
         }
-        
+
         // Step 2: Check p2p count
         uint8_t p2p = PCRBits::GetP2P(current);
         if (p2p == 0) {
@@ -257,13 +262,14 @@ void CMPClient::PerformDisconnect(uint32_t pcrAddress, uint8_t plugNum, CMPCallb
             callback(CMPStatus::Success);  // Already disconnected
             return;
         }
-        
-        // Step 3: Compute new value (decrement p2p)
-        uint32_t newVal = PCRBits::SetP2P(current, p2p - 1);
-        
-        ASFW_LOG(CMP, "CMPClient: Disconnect PCR 0x%08X: p2p %u→%u (0x%08X → 0x%08X)",
-                 pcrAddress, p2p, p2p - 1, current, newVal);
-        
+
+        // Step 3: Force p2p to 0 (reset all connections) so subsequent ConnectOPCR/IPCR
+        // starts from a clean state. This handles stale connections from unclean shutdowns.
+        uint32_t newVal = PCRBits::SetP2P(current, 0);
+
+        ASFW_LOG(CMP, "CMPClient: Disconnect PCR 0x%08X: p2p %u→0 (0x%08X → 0x%08X) [full reset]",
+                 pcrAddress, p2p, current, newVal);
+
         // Step 4: Lock-compare-swap
         CompareSwapPCR(pcrAddress, current, newVal, callback);
     });

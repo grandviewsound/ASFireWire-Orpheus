@@ -14,7 +14,7 @@
 #include "../Protocols/AVC/AVCDiscovery.hpp"
 #include "../Protocols/AVC/CMP/CMPClient.hpp"
 #include "../Logging/Logging.hpp"
-#include <net.mrmidi.ASFW.ASFWDriver/ASFWAudioNub.h>
+#include <com.kevinpeters.ASFW.ASFWDriver/ASFWAudioNub.h>
 
 namespace ASFW::Driver {
 
@@ -23,6 +23,13 @@ kern_return_t IsochService::StartReceive(uint8_t channel,
                                          ASFW::Discovery::DeviceManager* deviceManager,
                                          ASFW::CMP::CMPClient* cmpClient,
                                          ASFW::Protocols::AVC::AVCDiscovery* avcDiscovery) {
+    // Idempotent: if IR is already running, do not re-configure (would overflow the DMA slab).
+    if (isochReceiveContext_ &&
+        isochReceiveContext_->GetState() == ASFW::Isoch::IRPolicy::State::Running) {
+        ASFW_LOG(Controller, "[Isoch] IR already running; StartReceive is idempotent");
+        return kIOReturnSuccess;
+    }
+
     if (!isochReceiveContext_) {
         ASFW::Isoch::Memory::IsochMemoryConfig config;
         config.numDescriptors = ASFW::Isoch::IsochReceiveContext::kNumDescriptors;
@@ -78,6 +85,8 @@ kern_return_t IsochService::StartReceive(uint8_t channel,
 
     ASFW_LOG(Controller, "[Isoch] ✅ Started IR Context 0 for Channel %u!", channel);
 
+    irChannel_ = channel;
+
     if (deviceManager && cmpClient) {
         auto devices = deviceManager->GetReadyDevices();
         if (!devices.empty()) {
@@ -86,12 +95,19 @@ kern_return_t IsochService::StartReceive(uint8_t channel,
             ASFW::IRM::Generation gen = target->GetGeneration();
 
             cmpClient->SetDeviceNode(static_cast<uint8_t>(nodeId & 0x3F), gen);
-            cmpClient->ConnectOPCR(0, [](ASFW::CMP::CMPStatus status) {
-                if (status == ASFW::CMP::CMPStatus::Success) {
-                    ASFW_LOG(Controller, "[Isoch] ✅ CMP ConnectOPCR Success!");
-                } else {
-                    ASFW_LOG(Controller, "[Isoch] ❌ CMP ConnectOPCR Failed: %d", static_cast<int>(status));
-                }
+
+            // Disconnect first to clear any stale p2p connection from a previous
+            // driver load that didn't cleanly disconnect. Then connect on our IR channel.
+            const uint8_t irChannel = channel;
+            cmpClient->DisconnectOPCR(0, [cmpClient, irChannel](ASFW::CMP::CMPStatus) {
+                // Ignore disconnect result — p2p may already be 0, that's fine.
+                cmpClient->ConnectOPCR(0, irChannel, [](ASFW::CMP::CMPStatus status) {
+                    if (status == ASFW::CMP::CMPStatus::Success) {
+                        ASFW_LOG(Controller, "[Isoch] ✅ CMP ConnectOPCR Success!");
+                    } else {
+                        ASFW_LOG(Controller, "[Isoch] ❌ CMP ConnectOPCR Failed: %d", static_cast<int>(status));
+                    }
+                });
             });
         } else {
             ASFW_LOG(Controller, "[Isoch] ⚠️ No devices ready for CMP oPCR connection");
@@ -107,6 +123,11 @@ kern_return_t IsochService::StopReceive(ASFW::CMP::CMPClient* cmpClient) {
     }
 
     isochReceiveContext_->Stop();
+    // Release the context so the next StartReceive() allocates a fresh DMA slab.
+    // The bump allocator inside IsochDMAMemoryManager cannot be reset in-place;
+    // releasing here is the simplest way to avoid slab exhaustion on restart.
+    isochReceiveContext_.reset();
+    externalSyncBridge_.Reset();
     ASFW_LOG(Controller, "[Isoch] Stopped IR Context 0");
 
     if (cmpClient) {
@@ -218,41 +239,14 @@ kern_return_t IsochService::StartTransmit(uint8_t channel,
         return kIOReturnNotReady;
     }
 
-    constexpr uint32_t kSytGateTimeoutMs = 500;
-    constexpr uint32_t kSytGatePollMs = 5;
-    bool sytClockEstablished = false;
-    for (uint32_t waitedMs = 0; waitedMs < kSytGateTimeoutMs; waitedMs += kSytGatePollMs) {
-        if (externalSyncBridge_.clockEstablished.load(std::memory_order_acquire)) {
-            sytClockEstablished = true;
-            break;
-        }
-        IOSleep(kSytGatePollMs);
-    }
-    if (!sytClockEstablished) {
-        const uint32_t seq = externalSyncBridge_.updateSeq.load(std::memory_order_acquire);
-        const uint32_t packed = externalSyncBridge_.lastPackedRx.load(std::memory_order_acquire);
-        const uint16_t lastSyt = ASFW::Isoch::Core::ExternalSyncBridge::UnpackSYT(packed);
-        const uint8_t lastFdf = ASFW::Isoch::Core::ExternalSyncBridge::UnpackFDF(packed);
-        const uint8_t lastDbs = ASFW::Isoch::Core::ExternalSyncBridge::UnpackDBS(packed);
-        const uint64_t lastTicks = externalSyncBridge_.lastUpdateHostTicks.load(std::memory_order_acquire);
-        uint64_t ageMs = 0;
-        if (lastTicks != 0) {
-            const uint64_t nowTicks = mach_absolute_time();
-            if (nowTicks >= lastTicks) {
-                ageMs = ASFW::Timing::hostTicksToNanos(nowTicks - lastTicks) / 1'000'000ULL;
-            }
-        }
-        ASFW_LOG(Controller,
-                 "[Isoch] ❌ StartTransmit timeout: missing established IR SYT clock (waited %ums seq=%u syt=0x%04x fdf=0x%02x dbs=%u ageMs=%llu active=%d established=%d)",
-                 kSytGateTimeoutMs,
-                 seq,
-                 lastSyt,
-                 lastFdf,
-                 lastDbs,
-                 ageMs,
-                 externalSyncBridge_.active.load(std::memory_order_acquire),
-                 externalSyncBridge_.clockEstablished.load(std::memory_order_acquire));
-        return kIOReturnTimeout;
+    // SYT gate: IT pipeline handles "no SYT" gracefully by sending silence until
+    // IR SYT clock is established (ExternalSyncBridge discipline activates automatically).
+    // We start IT immediately rather than blocking — this avoids timing out during the
+    // BeBoB bus reset window (which delays SYT establishment by 2-8 seconds).
+    if (externalSyncBridge_.clockEstablished.load(std::memory_order_acquire)) {
+        ASFW_LOG(Controller, "[Isoch] IT starting with IR SYT already established");
+    } else {
+        ASFW_LOG(Controller, "[Isoch] IT starting before IR SYT established — will sync once IR clock ready");
     }
 
     isochTransmitContext_->SetExternalSyncBridge(&externalSyncBridge_);
@@ -305,6 +299,8 @@ kern_return_t IsochService::StartTransmit(uint8_t channel,
 
     ASFW_LOG(Controller, "[Isoch] ✅ Started IT Context for Channel %u!", channel);
 
+    itChannel_ = channel;
+
     if (deviceManager && cmpClient) {
         auto devices = deviceManager->GetReadyDevices();
         if (!devices.empty()) {
@@ -313,12 +309,18 @@ kern_return_t IsochService::StartTransmit(uint8_t channel,
             ASFW::IRM::Generation gen = target->GetGeneration();
 
             cmpClient->SetDeviceNode(static_cast<uint8_t>(nodeId & 0x3F), gen);
-            cmpClient->ConnectIPCR(0, channel, [](ASFW::CMP::CMPStatus status) {
-                if (status == ASFW::CMP::CMPStatus::Success) {
-                    ASFW_LOG(Controller, "[Isoch] ✅ CMP ConnectIPCR Success!");
-                } else {
-                    ASFW_LOG(Controller, "[Isoch] ❌ CMP ConnectIPCR Failed: %d", static_cast<int>(status));
-                }
+
+            // Disconnect first to clear any stale p2p connection, then connect on IT channel.
+            const uint8_t itChannel = channel;
+            cmpClient->DisconnectIPCR(0, [cmpClient, itChannel](ASFW::CMP::CMPStatus) {
+                // Ignore disconnect result — p2p may already be 0, that's fine.
+                cmpClient->ConnectIPCR(0, itChannel, [](ASFW::CMP::CMPStatus status) {
+                    if (status == ASFW::CMP::CMPStatus::Success) {
+                        ASFW_LOG(Controller, "[Isoch] ✅ CMP ConnectIPCR Success!");
+                    } else {
+                        ASFW_LOG(Controller, "[Isoch] ❌ CMP ConnectIPCR Failed: %d", static_cast<int>(status));
+                    }
+                });
             });
         }
     }
@@ -345,6 +347,42 @@ kern_return_t IsochService::StopTransmit(ASFW::CMP::CMPClient* cmpClient) {
     }
 
     return kIOReturnSuccess;
+}
+
+void IsochService::ReconnectOPCR(ASFW::CMP::CMPClient* cmpClient) {
+    if (!cmpClient || irChannel_ == 0xFF || !isochReceiveContext_) {
+        return;
+    }
+    const uint8_t ch = irChannel_;
+    ASFW_LOG(Controller, "[Isoch] Reconnecting CMP oPCR on channel %u after device resume", ch);
+    cmpClient->DisconnectOPCR(0, [cmpClient, ch](ASFW::CMP::CMPStatus) {
+        cmpClient->ConnectOPCR(0, ch, [](ASFW::CMP::CMPStatus status) {
+            if (status == ASFW::CMP::CMPStatus::Success) {
+                ASFW_LOG(Controller, "[Isoch] ✅ CMP oPCR reconnected after device resume");
+            } else {
+                ASFW_LOG(Controller, "[Isoch] ❌ CMP oPCR reconnect failed: %d",
+                         static_cast<int>(status));
+            }
+        });
+    });
+}
+
+void IsochService::ReconnectIPCR(ASFW::CMP::CMPClient* cmpClient) {
+    if (!cmpClient || itChannel_ == 0xFF || !isochTransmitContext_) {
+        return;
+    }
+    const uint8_t ch = itChannel_;
+    ASFW_LOG(Controller, "[Isoch] Reconnecting CMP iPCR on channel %u after device resume", ch);
+    cmpClient->DisconnectIPCR(0, [cmpClient, ch](ASFW::CMP::CMPStatus) {
+        cmpClient->ConnectIPCR(0, ch, [](ASFW::CMP::CMPStatus status) {
+            if (status == ASFW::CMP::CMPStatus::Success) {
+                ASFW_LOG(Controller, "[Isoch] ✅ CMP iPCR reconnected after device resume");
+            } else {
+                ASFW_LOG(Controller, "[Isoch] ❌ CMP iPCR reconnect failed: %d",
+                         static_cast<int>(status));
+            }
+        });
+    });
 }
 
 void IsochService::StopAll() {

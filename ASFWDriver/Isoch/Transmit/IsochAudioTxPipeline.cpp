@@ -82,7 +82,11 @@ kern_return_t IsochAudioTxPipeline::Configure(uint8_t sid, uint32_t streamModeRa
         return kIOReturnBadArgument;
     }
 
-    assembler_.reconfigure(queueChannels, sid);
+    // Fix 29: BeBoB convention — 1 MIDI channel per data block on the wire.
+    // Audio channels (queueChannels) drive CoreAudio/ring buffer sizing.
+    // Wire DBS = audio + MIDI, used for CIP header and packet sizing.
+    constexpr uint32_t kMidiChannels = 1;
+    assembler_.reconfigure(queueChannels, sid, kMidiChannels);
 
     requestedStreamMode_ = (streamModeRaw == 1u)
         ? Encoding::StreamMode::kBlocking
@@ -95,11 +99,12 @@ kern_return_t IsochAudioTxPipeline::Configure(uint8_t sid, uint32_t streamModeRa
              effectiveStreamMode_ == Encoding::StreamMode::kBlocking ? "blocking" : "non-blocking");
 
     const uint32_t framesPerDataPacket = assembler_.samplesPerDataPacket();
-    const uint32_t payloadBytes = framesPerDataPacket * queueChannels * sizeof(uint32_t);
+    const uint32_t wDbs = assembler_.wireDbs();
+    const uint32_t payloadBytes = framesPerDataPacket * wDbs * sizeof(uint32_t);
     const uint32_t packetBytes = Encoding::kCIPHeaderSize + payloadBytes;
     ASFW_LOG(Isoch,
-             "IT: Channel geometry resolved channels=%u dbs=%u framesPerData=%u payloadBytes=%u packetBytes=%u",
-             queueChannels, queueChannels, framesPerDataPacket, payloadBytes, packetBytes);
+             "IT: Channel geometry resolved audioCh=%u midi=%u wireDBS=%u framesPerData=%u payloadBytes=%u packetBytes=%u",
+             queueChannels, kMidiChannels, wDbs, framesPerDataPacket, payloadBytes, packetBytes);
 
     return kIOReturnSuccess;
 }
@@ -137,7 +142,7 @@ void IsochAudioTxPipeline::ResetForStart() noexcept {
     dbcTracker_.discontinuityCount.store(0, std::memory_order_relaxed);
 
     // SYT generator (cycle-based, Linux approach). TODO: derive rate from stream formats.
-    sytGenerator_.initialize(48000.0);
+    sytGenerator_.initialize(48000.0, assembler_.samplesPerDataPacket());
     sytGenerator_.reset();
     cycleTrackingValid_ = false;
 }
@@ -203,6 +208,9 @@ void IsochAudioTxPipeline::PrePrimeFromSharedQueue() noexcept {
              primeLimitHit ? "YES" : "NO");
 }
 
+// Fix #24: Diagnostic counter for OnRefillTickPreHW
+static uint64_t sRefillTickCount = 0;
+
 void IsochAudioTxPipeline::OnRefillTickPreHW() noexcept {
     if (sharedTxQueue_.IsValid() && sharedTxQueue_.ConsumerApplyPendingResync()) {
         counters_.resyncApplied.fetch_add(1, std::memory_order_relaxed);
@@ -210,6 +218,7 @@ void IsochAudioTxPipeline::OnRefillTickPreHW() noexcept {
 
     // Legacy (non-zero-copy) path: keep assembler ring near a target fill.
     if (!zeroCopyEnabled_ && sharedTxQueue_.IsValid()) {
+        ++sRefillTickCount;
         const uint32_t targetRbFillFrames = adaptiveFill_.currentTarget;
         constexpr uint32_t kMaxRbFillFrames = Config::kTxBufferProfile.legacyRbMaxFrames;
         constexpr uint32_t kTransferChunkFrames = Config::kTransferChunkFrames;
@@ -255,6 +264,18 @@ void IsochAudioTxPipeline::OnRefillTickPreHW() noexcept {
             counters_.legacyPumpSkipped.fetch_add(1, std::memory_order_relaxed);
         } else {
             counters_.legacyPumpMovedFrames.fetch_add(pumpedFrames, std::memory_order_relaxed);
+        }
+
+        // Fix #24: Periodic pump diagnostic (every ~8000 ticks ≈ every 1s)
+        if (sRefillTickCount % 8000 == 1) {
+            ASFW_LOG(Isoch,
+                     "Pump[%llu]: rbFill=%u target=%u txFill=%u pumped=%u skipped=%{public}s",
+                     sRefillTickCount,
+                     assembler_.bufferFillLevel(),
+                     targetRbFillFrames,
+                     sharedTxQueue_.FillLevelFrames(),
+                     pumpedFrames,
+                     skipped ? "YES" : "NO");
         }
 
         // Fill level threshold alerts (with hysteresis) - non-zero-copy only
@@ -411,6 +432,12 @@ Tx::IsochTxPacket IsochAudioTxPipeline::NextSilentPacket(uint32_t transmitCycle)
     return out;
 }
 
+// Fix #24: Diagnostic counters for InjectNearHw
+static uint64_t sInjectCallCount = 0;
+static uint64_t sInjectPacketsWritten = 0;
+static uint64_t sInjectNonZeroPackets = 0;
+static int32_t  sInjectPeakSample = 0;
+
 void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescriptorSlab& slab) noexcept {
     constexpr uint32_t numPackets = Tx::Layout::kNumPackets;
 
@@ -434,8 +461,17 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
         return;
     }
 
+    ++sInjectCallCount;
+
     const uint32_t framesPerPacket = assembler_.samplesPerDataPacket();
     const uint32_t channels = assembler_.channelCount();
+
+    // Fix #24: Capture first packet's samples for diagnostic
+    int32_t diagSample0 = 0, diagSample1 = 0;
+    uint32_t diagAM824_0 = 0, diagAM824_1 = 0;
+    uint32_t diagFramesRead = 0;
+    uint32_t dataPacketsThisCall = 0;
+    bool hasNonZeroThisCall = false;
 
     for (uint32_t i = 0; i < toInject; ++i) {
         const uint32_t idx = (audioWriteIndex_ + i) % numPackets;
@@ -503,17 +539,98 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
         if (!payloadVirt) {
             continue;
         }
-        uint32_t* audioQuadlets = reinterpret_cast<uint32_t*>(payloadVirt + Encoding::kCIPHeaderSize);
+        uint32_t* quadlets = reinterpret_cast<uint32_t*>(payloadVirt + Encoding::kCIPHeaderSize);
 
+        // Fix 29: Encode per data block — audio quadlets then MIDI no-data.
+        // Data block layout: [ch0][ch1]...[ch(N-1)][MIDI]
+        const uint32_t dbs = assembler_.wireDbs();
+        const uint32_t midi = assembler_.midiChannels();
+        const uint32_t midiNoData = Encoding::AM824Encoder::encodeMidiNoData();
+
+        for (uint32_t f = 0; f < framesPerPacket; ++f) {
+            for (uint32_t ch = 0; ch < channels; ++ch) {
+                quadlets[f * dbs + ch] = Encoding::AM824Encoder::encode(samples[f * channels + ch]);
+            }
+            for (uint32_t m = 0; m < midi; ++m) {
+                quadlets[f * dbs + channels + m] = midiNoData;
+            }
+        }
+
+        // Fix #24: Track diagnostics
+        ++dataPacketsThisCall;
+        ++sInjectPacketsWritten;
+        if (dataPacketsThisCall == 1) {
+            diagSample0 = samples[0];
+            diagSample1 = (channels > 1) ? samples[1] : 0;
+            diagAM824_0 = quadlets[0];
+            diagAM824_1 = (channels > 1) ? quadlets[1] : 0;
+            diagFramesRead = framesRead;
+        }
         for (uint32_t s = 0; s < framesPerPacket * channels; ++s) {
-            audioQuadlets[s] = Encoding::AM824Encoder::encode(samples[s]);
+            if (samples[s] != 0) {
+                hasNonZeroThisCall = true;
+                int32_t abs_s = (samples[s] < 0) ? -samples[s] : samples[s];
+                if (abs_s > sInjectPeakSample) sInjectPeakSample = abs_s;
+            }
         }
     }
 
+    if (hasNonZeroThisCall) sInjectNonZeroPackets += dataPacketsThisCall;
+
     audioWriteIndex_ = audioTarget;
 
+    // Fix #27: Use IoBarrier (dsb sy) instead of WriteBarrier (dmb ish) to ensure
+    // audio payload writes are visible to the PCIe FireWire DMA engine.
+    // dmb ish only orders within CPU cores; dsb sy commits to the full system domain.
     std::atomic_thread_fence(std::memory_order_release);
-    ASFW::Driver::WriteBarrier();
+    ASFW::Driver::IoBarrier();
+
+    // Fix #24: Periodic diagnostic log (every ~4000 calls ≈ every 0.5s)
+    if (sInjectCallCount % 4000 == 1) {
+        const uint32_t rbFill = assembler_.bufferFillLevel();
+        const uint32_t txFill = sharedTxQueue_.IsValid() ? sharedTxQueue_.FillLevelFrames() : 0;
+        ASFW_LOG(Isoch,
+                 "InjectNearHw[%llu]: toInject=%u data=%u framesRead=%u rbFill=%u txFill=%u "
+                 "nonZeroPkts=%llu peak=0x%08x | pcm=[%08x,%08x] am824=[%08x,%08x]",
+                 sInjectCallCount,
+                 toInject,
+                 dataPacketsThisCall,
+                 diagFramesRead,
+                 rbFill,
+                 txFill,
+                 sInjectNonZeroPackets,
+                 static_cast<uint32_t>(sInjectPeakSample),
+                 static_cast<uint32_t>(diagSample0),
+                 static_cast<uint32_t>(diagSample1),
+                 diagAM824_0,
+                 diagAM824_1);
+
+        // Dump CIP headers + first AM824 quadlet from one DATA packet's DMA buffer
+        // to verify actual wire-level payload.
+        for (uint32_t i = 0; i < toInject; ++i) {
+            const uint32_t idx = (audioWriteIndex_ + numPackets - toInject + i) % numPackets;
+            const uint32_t descBase = idx * Tx::Layout::kBlocksPerPacket;
+            auto* olDesc = slab.GetDescriptorPtr(descBase + 2);
+            const uint16_t olReq = static_cast<uint16_t>(olDesc->control & 0xFFFF);
+            if (olReq <= Encoding::kCIPHeaderSize) continue; // skip NO-DATA
+            uint8_t* pv = slab.PayloadPtr(idx);
+            if (!pv) continue;
+            const uint32_t* q = reinterpret_cast<const uint32_t*>(pv);
+            // Also read OMI descriptor
+            auto* omiDesc = reinterpret_cast<ASFW::Async::HW::OHCIDescriptorImmediate*>(slab.GetDescriptorPtr(descBase));
+            ASFW_LOG(Isoch,
+                     "DMA-DUMP pkt=%u: OMI ctrl=0x%08x imm0=0x%08x imm1=0x%08x | "
+                     "OL ctrl=0x%08x req=%u | CIP Q0=0x%08x Q1=0x%08x AM824[0]=0x%08x AM824[1]=0x%08x",
+                     idx,
+                     omiDesc->common.control,
+                     omiDesc->immediateData[0],
+                     omiDesc->immediateData[1],
+                     olDesc->control,
+                     olReq,
+                     q[0], q[1], q[2], q[3]);
+            break; // one DATA packet is enough
+        }
+    }
 }
 
 } // namespace ASFW::Isoch

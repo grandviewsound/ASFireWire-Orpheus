@@ -58,7 +58,7 @@ struct OverviewView: View {
                     
                     InfoRow(label: "Target Hardware", value: "pci11c1,5901 (Agere FW800)")
                     InfoRow(label: "Protocol", value: "IEEE 1394 OHCI 1.1")
-                    InfoRow(label: "Bundle ID", value: "net.mrmidi.ASFW.ASFWDriver")
+                    InfoRow(label: "Bundle ID", value: "com.kevinpeters.ASFW.ASFWDriver")
                 }
                 .padding()
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))

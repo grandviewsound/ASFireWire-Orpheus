@@ -27,8 +27,8 @@
 #include <new>
 #include <string>
 
-#include <net.mrmidi.ASFW.ASFWDriver/ASFWDriver.h> // generated from .iig
-#include <net.mrmidi.ASFW.ASFWDriver/ASFWDriverUserClient.h> // generated from .iig
+#include <com.kevinpeters.ASFW.ASFWDriver/ASFWDriver.h> // generated from .iig
+#include <com.kevinpeters.ASFW.ASFWDriver/ASFWDriverUserClient.h> // generated from .iig
 
 #include "Logging/Logging.hpp"
 #include "Logging/LogConfig.hpp"
@@ -48,12 +48,14 @@
 #include "Bus/SelfIDCapture.hpp"
 #include "Controller/ControllerStateMachine.hpp"
 #include "Diagnostics/MetricsSink.hpp"
+#include "Discovery/DeviceRegistry.hpp"
 #include "Discovery/FWDevice.hpp"
+#include "Protocols/Audio/IDeviceProtocol.hpp"
 #include "Service/DriverContext.hpp"
 #include "Protocols/AVC/AVCDiscovery.hpp"
 #include "Isoch/IsochReceiveContext.hpp"
 #include "Isoch/Transmit/IsochTransmitContext.hpp"
-#include <net.mrmidi.ASFW.ASFWDriver/ASFWAudioNub.h>
+#include <com.kevinpeters.ASFW.ASFWDriver/ASFWAudioNub.h>
 
 using namespace ASFW::Driver;
 
@@ -189,6 +191,48 @@ kern_return_t IMPL(ASFWDriver, Start) {
         ctx.deps.cmpClient = std::make_shared<ASFW::CMP::CMPClient>(ctx.controller->Bus());
         ctx.controller->SetCMPClient(ctx.deps.cmpClient);
         ASFW_LOG(Controller, "✅ CMPClient initialized");
+    }
+
+    // Wire automatic CMP oPCR/iPCR reconnect for BeBoB bus-reset recovery.
+    // After SetFormat, BeBoB devices do a mandatory bus reset. The device is
+    // suspended through the reset and resumed when it reappears. On resume,
+    // OnTopologyReady has already updated the CMPClient's node/gen, so we just
+    // need to re-establish the PCR p2p connections on the same IR/IT channels.
+    //
+    // Special case: if SetFormat failed during init (e.g., device was already
+    // mid-BeBoB-reset when the driver started), retry it now before connecting CMP.
+    // A successful retry triggers another BeBoB bus reset; the next resume call
+    // will see IsFormatDone()=true and proceed directly to CMP connect.
+    if (ctx.deps.avcDiscovery && ctx.deps.cmpClient) {
+        ASFW::CMP::CMPClient* rawCmp = ctx.deps.cmpClient.get();
+        ASFW::Driver::IsochService* isochPtr = &ctx.isoch;
+        ctx.deps.avcDiscovery->SetDeviceResumedCallback(
+            [this, isochPtr, rawCmp](std::shared_ptr<ASFW::Discovery::FWDevice> device) {
+                // Check whether SetFormat has already been confirmed for this device.
+                // If not, retry it with the current node ID before touching CMP.
+                auto* ctrl = static_cast<ASFW::Driver::ControllerCore*>(GetControllerCore());
+                if (ctrl) {
+                    auto* reg = ctrl->GetDeviceRegistry();
+                    if (reg) {
+                        auto* rec = reg->FindByGuid(device->GetGUID());
+                        if (rec && rec->protocol && !rec->protocol->IsFormatDone()) {
+                            rec->protocol->UpdateRuntimeContext(device->GetNodeID(), nullptr);
+                            ASFW_LOG(Controller,
+                                "[Isoch] SetFormat not confirmed — retrying before CMP connect "
+                                "(node=0x%04x)", device->GetNodeID());
+                            rec->protocol->StartDuplex48k();
+                            // Return without CMP connect. The SetFormat will trigger
+                            // another BeBoB bus reset; OnDeviceResumed fires again,
+                            // and at that point IsFormatDone()=true → CMP connect.
+                            return;
+                        }
+                    }
+                }
+                isochPtr->ReconnectOPCR(rawCmp);
+                isochPtr->ReconnectIPCR(rawCmp);
+            }
+        );
+        ASFW_LOG(Controller, "✅ CMP oPCR+iPCR auto-reconnect wired for device resume");
     }
 
     ASFW::LogConfig::Shared().Initialize(this);

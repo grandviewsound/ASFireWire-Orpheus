@@ -1,6 +1,6 @@
 #include "DriverContext.hpp"
 
-#include <net.mrmidi.ASFW.ASFWDriver/ASFWDriver.h>
+#include <com.kevinpeters.ASFW.ASFWDriver/ASFWDriver.h>
 
 #include <PCIDriverKit/IOPCIFamilyDefinitions.h>
 
@@ -86,6 +86,10 @@ void DriverWiring::EnsureDeps(ASFWDriver* driver, ::ServiceContext& ctx) {
     }
     if (!d.busManager) {
         d.busManager = std::make_shared<BusManager>();
+        // The Mac must remain root/cycle master for isochronous audio streaming.
+        // Delegating root to the Orpheus triggers a full bus reset ~3-4s after
+        // audio starts, which kills the connection. Disable it.
+        d.busManager->SetDelegateMode(false);
     }
 
     if (!d.asyncSubsystem) {

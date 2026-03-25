@@ -57,10 +57,21 @@ public:
     ASFW::Isoch::IsochReceiveContext* ReceiveContext() const { return isochReceiveContext_.get(); }
     ASFW::Isoch::IsochTransmitContext* TransmitContext() const { return isochTransmitContext_.get(); }
 
+    // Reconnect oPCR on the IR channel after a device resume (e.g. BeBoB bus reset recovery).
+    // No-op if StartReceive has not been called yet.
+    void ReconnectOPCR(ASFW::CMP::CMPClient* cmpClient);
+
+    // Reconnect iPCR on the IT channel after a device resume.
+    // Called alongside ReconnectOPCR so both directions are re-established after a BeBoB bus reset.
+    // No-op if StartTransmit has not been called yet.
+    void ReconnectIPCR(ASFW::CMP::CMPClient* cmpClient);
+
 private:
     ASFW::Isoch::Core::ExternalSyncBridge externalSyncBridge_{};
     OSSharedPtr<ASFW::Isoch::IsochReceiveContext> isochReceiveContext_;
     std::unique_ptr<ASFW::Isoch::IsochTransmitContext> isochTransmitContext_;
+    uint8_t irChannel_{0xFF};  // channel passed to StartReceive; 0xFF = not started
+    uint8_t itChannel_{0xFF};  // channel passed to StartTransmit; 0xFF = not started
 };
 
 } // namespace ASFW::Driver

@@ -2,14 +2,48 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleShortVersionString</key>
-	<string>$(MARKETING_VERSION)</string>
-	<key>CFBundleVersion</key>
-	<string>1</string>
 	<key>IOKitPersonalities</key>
 	<dict>
+		<key>ASFWAudioDriverService</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+			<key>IOClass</key>
+			<string>IOUserService</string>
+			<key>IOPropertyMatch</key>
+			<dict>
+				<key>ASFWNubType</key>
+				<string>Audio</string>
+			</dict>
+			<key>IOProviderClass</key>
+			<string>IOUserService</string>
+			<key>IOUserAudioDriverUserClientProperties</key>
+			<dict>
+				<key>IOClass</key>
+				<string>IOUserUserClient</string>
+				<key>IOUserClass</key>
+				<string>IOUserAudioDriverUserClient</string>
+			</dict>
+			<key>IOUserClass</key>
+			<string>ASFWAudioDriver</string>
+			<key>IOUserServerName</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+		</dict>
 		<key>ASFWDriverService</key>
 		<dict>
+			<key>ASFWAsyncVerbosity</key>
+			<integer>1</integer>
+			<key>ASFWAudioNubProperties</key>
+			<dict>
+				<key>ASFWNubType</key>
+				<string>Audio</string>
+				<key>IOClass</key>
+				<string>IOUserService</string>
+				<key>IOUserClass</key>
+				<string>ASFWAudioNub</string>
+			</dict>
+			<key>ASFWControllerVerbosity</key>
+			<integer>1</integer>
 			<key>ASFWDriverUserClientProperties</key>
 			<dict>
 				<key>IOClass</key>
@@ -17,29 +51,16 @@
 				<key>IOUserClass</key>
 				<string>ASFWDriverUserClient</string>
 			</dict>
-			<key>ASFWAudioNubProperties</key>
-			<dict>
-				<key>IOClass</key>
-				<string>IOUserService</string>
-				<key>IOUserClass</key>
-				<string>ASFWAudioNub</string>
-				<key>ASFWNubType</key>
-				<string>Audio</string>
-			</dict>
-			<key>ASFWTraceDMACoherency</key>
+			<key>ASFWEnableHexDumps</key>
 			<false/>
-			<key>ASFWAsyncVerbosity</key>
-			<integer>1</integer>
-			<key>ASFWControllerVerbosity</key>
-			<integer>1</integer>
+			<key>ASFWEnableIsochTxVerifier</key>
+			<false/>
 			<key>ASFWHardwareVerbosity</key>
 			<integer>1</integer>
-				<key>ASFWEnableHexDumps</key>
-				<false/>
-				<key>ASFWEnableIsochTxVerifier</key>
-				<false/>
-				<key>ASFWLogStatistics</key>
-				<true/>
+			<key>ASFWLogStatistics</key>
+			<true/>
+			<key>ASFWTraceDMACoherency</key>
+			<false/>
 			<key>CFBundleIdentifier</key>
 			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 			<key>IOClass</key>
@@ -57,33 +78,6 @@
 			<key>IOUserServerName</key>
 			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 		</dict>
-		<key>ASFWAudioDriverService</key>
-		<dict>
-			<key>IOUserAudioDriverUserClientProperties</key>
-			<dict>
-				<key>IOClass</key>
-				<string>IOUserUserClient</string>
-				<key>IOUserClass</key>
-				<string>IOUserAudioDriverUserClient</string>
-			</dict>
-			<key>CFBundleIdentifier</key>
-			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-			<key>IOClass</key>
-			<string>IOUserService</string>
-			<key>IOProviderClass</key>
-			<string>IOUserService</string>
-			<key>IOPropertyMatch</key>
-			<dict>
-				<key>ASFWNubType</key>
-				<string>Audio</string>
-			</dict>
-			<key>IOUserClass</key>
-			<string>ASFWAudioDriver</string>
-			<key>IOUserServerName</key>
-			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-		</dict>
 	</dict>
-	<key>OSBundleUsageDescription</key>
-	<string>AS FireWire Driver</string>
 </dict>
 </plist>

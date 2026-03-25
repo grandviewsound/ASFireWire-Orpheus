@@ -88,7 +88,7 @@ using PCRReadCallback = std::function<void(bool success, uint32_t value)>;
  * Usage:
  *   CMPClient cmpClient(busOps);
  *   cmpClient.SetDeviceNode(deviceNodeId, generation);
- *   cmpClient.ConnectOPCR(0, [](CMPStatus status) { ... });
+ *   cmpClient.ConnectOPCR(0, irChannel, [](CMPStatus status) { ... });
  *
  * Reference: Apple's LockRq to 0xF000.0904 in FireBug logs
  */
@@ -138,14 +138,17 @@ public:
     
     /**
      * CMP ESTABLISH on oPCR - connect to device's output plug.
-     * Increments p2p connection count via lock-compare-swap.
-     * 
-     * After success, device should start isochronous transmission.
-     * 
+     * Increments p2p connection count and sets the channel via lock-compare-swap.
+     * The device will transmit on the specified channel after connect.
+     *
+     * Per IEC 61883-1: host MUST set the channel in oPCR so the device
+     * knows which isochronous channel to transmit on.
+     *
      * @param plugNum Output plug number (usually 0)
+     * @param channel Isochronous channel the IR context listens on
      * @param callback Completion callback
      */
-    void ConnectOPCR(uint8_t plugNum, CMPCallback callback);
+    void ConnectOPCR(uint8_t plugNum, uint8_t channel, CMPCallback callback);
     
     /**
      * CMP BREAK on oPCR - disconnect from device's output plug.

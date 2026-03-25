@@ -6,6 +6,8 @@
 #include "DeviceProtocolFactory.hpp"
 #include "DICE/Focusrite/SPro24DspProtocol.hpp"
 #include "Oxford/Apogee/ApogeeDuetProtocol.hpp"
+#include "BeBoB/BeBoBProtocol.hpp"
+#include "BeBoB/BeBoBTypes.hpp"
 #include "../../Logging/Logging.hpp"
 
 namespace ASFW::Audio {
@@ -28,12 +30,20 @@ std::unique_ptr<IDeviceProtocol> DeviceProtocolFactory::Create(
         ASFW_LOG(Audio,
                  "Creating ApogeeDuetProtocol for vendor=0x%06x model=0x%06x node=0x%04x",
                  vendorId, modelId, nodeId);
-        // Factory path intentionally does not bind FCP transport yet.
-        // AVCDiscovery wires transport for live command execution.
         return std::make_unique<Oxford::Apogee::ApogeeDuetProtocol>(subsystem, nodeId, nullptr);
     }
-    
+
+    // Prism Sound Orpheus (BeBoB protocol)
+    if (vendorId == BeBoB::kPrismSoundVendorId && modelId == BeBoB::kOrpheusModelId) {
+        ASFW_LOG(Audio, "Creating BeBoBProtocol for Prism Sound Orpheus "
+                 "vendor=0x%06x model=0x%06x node=0x%04x",
+                 vendorId, modelId, nodeId);
+        return std::make_unique<BeBoB::BeBoBProtocol>(subsystem, nodeId);
+    }
+
     // Unknown device
+    ASFW_LOG(Audio, "DeviceProtocolFactory: no protocol for vendor=0x%06x model=0x%06x",
+             vendorId, modelId);
     return nullptr;
 }
 

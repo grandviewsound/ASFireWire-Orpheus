@@ -12,7 +12,7 @@
 #include "../Audio/Oxford/Apogee/ApogeeDuetProtocol.hpp"
 #include "../Audio/DeviceStreamModeQuirks.hpp"
 #include "../../Discovery/DiscoveryTypes.hpp"
-#include <net.mrmidi.ASFW.ASFWDriver/ASFWAudioNub.h>
+#include <com.kevinpeters.ASFW.ASFWDriver/ASFWAudioNub.h>
 #include "Music/MusicSubunit.hpp"
 #include "StreamFormats/AVCSignalFormatCommand.hpp"
 #include <DriverKit/IOService.h>
@@ -625,6 +625,7 @@ bool AVCDiscovery::CreateAudioNubFromModel(uint64_t guid,
         return false;
     }
     audioNub->SetChannelCount(config.channelCount);
+    audioNub->SetInputChannelCount(config.inputChannelCount);
     audioNub->SetStreamMode(static_cast<uint32_t>(config.streamMode));
     audioNub->SetGuid(config.guid);
 
@@ -954,7 +955,17 @@ void AVCDiscovery::OnDeviceAdded(std::shared_ptr<Discovery::FWDevice> device) {
 }
 
 void AVCDiscovery::OnDeviceResumed(std::shared_ptr<Discovery::FWDevice> device) {
-    (void)device;
+    // Called (under DeviceManager mutex) when a suspended device reappears —
+    // e.g. after the mandatory BeBoB bus reset that follows SetFormat.
+    if (deviceResumedCallback_) {
+        deviceResumedCallback_(device);
+    }
+}
+
+void AVCDiscovery::SetDeviceResumedCallback(
+    std::function<void(std::shared_ptr<Discovery::FWDevice>)> cb)
+{
+    deviceResumedCallback_ = std::move(cb);
 }
 
 void AVCDiscovery::OnDeviceSuspended(std::shared_ptr<Discovery::FWDevice> device) {
@@ -1034,23 +1045,31 @@ void AVCDiscovery::EnsureHardcodedAudioNubForDevice(const Discovery::DeviceRecor
     hardcoded.guid = deviceRecord.guid;
     hardcoded.vendorId = deviceRecord.vendorId;
     hardcoded.modelId = deviceRecord.modelId;
-    if (!deviceRecord.vendorName.empty() || !deviceRecord.modelName.empty()) {
-        hardcoded.deviceName = deviceRecord.vendorName + " " + deviceRecord.modelName;
-    } else {
-        hardcoded.deviceName = "Focusrite Saffire Pro 24 DSP";
+    {
+        // Match Apple's naming: "Orpheus (0818)" where suffix is last 2 GUID bytes as decimal
+        uint16_t deviceNum = static_cast<uint16_t>(deviceRecord.guid & 0xFFFF);
+        char nameBuf[64];
+        snprintf(nameBuf, sizeof(nameBuf), "Orpheus (%04u)", deviceNum);
+        hardcoded.deviceName = nameBuf;
     }
 
     // Hardcoded bring-up profile (v1):
     // - advertise single 48kHz / 24-bit stream format
-    // - use 16 channels end-to-end until asymmetric in/out is modeled in ADK path
-    hardcoded.channelCount = 16;
-    hardcoded.inputChannelCount = 16;
-    hardcoded.outputChannelCount = 16;
+    // Orpheus channel layout (from fw_diag Music subunit dest plug 0):
+    //   10 ins  = 8 analog + 2 S/PDIF  (device oPCR sends DBS=11: 10 audio + 1 MIDI)
+    //   10 outs = 8 analog + 2 S/PDIF  (device iPCR expects DBS=11: 10 audio + 1 MIDI)
+    //   (Headphone pair is on separate iPCR[1] via Music subunit dest plug 1)
+    // channelCount drives the TX queue, HAL stream format, and buffer sizing.
+    // fw_diag confirmed: Orpheus returns NOT_IMPLEMENTED for SetFormat CONTROL.
+    // Music subunit dest plug 0: 5×(2ch MBLA) + 1×(1ch MIDI) = DBS=11.
+    hardcoded.channelCount = 10;
+    hardcoded.inputChannelCount = 10;   // 10 audio channels (device oPCR DBS=11 = 10 audio + 1 MIDI; MIDI not exposed to HAL)
+    hardcoded.outputChannelCount = 10;  // 10 audio channels on wire (DBS=11, matching Orpheus iPCR[0] expectation)
     hardcoded.sampleRates = {48000};
     hardcoded.currentSampleRate = 48000;
-    hardcoded.inputPlugName = "Saffire Input";
-    hardcoded.outputPlugName = "Saffire Output";
-    hardcoded.streamMode = Audio::Model::StreamMode::kNonBlocking;
+    hardcoded.inputPlugName = "Orpheus Input";
+    hardcoded.outputPlugName = "Orpheus Output";
+    hardcoded.streamMode = Audio::Model::StreamMode::kBlocking;
 
     ASFW_LOG(Audio,
              "AVCDiscovery[Hardcoded]: ensuring audio nub for GUID=%llx (%{public}s)",
