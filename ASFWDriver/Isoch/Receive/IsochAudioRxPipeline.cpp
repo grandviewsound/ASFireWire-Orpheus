@@ -65,9 +65,10 @@ void IsochAudioRxPipeline::OnPacket(const uint8_t* payload, size_t length) noexc
     }
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 void IsochAudioRxPipeline::OnPollEnd(Driver::HardwareInterface& hw,
-                                    uint32_t packetsProcessed,
-                                    uint64_t pollStartMachTicks) noexcept {
+                                     uint32_t packetsProcessed, // NOLINT(bugprone-easily-swappable-parameters)
+                                     uint64_t pollStartMachTicks) noexcept {
     if (packetsProcessed > 0) {
         const uint64_t end = mach_absolute_time();
         const uint64_t deltaTicks = end - pollStartMachTicks;
@@ -114,11 +115,20 @@ void IsochAudioRxPipeline::OnPollEnd(Driver::HardwareInterface& hw,
 }
 
 void IsochAudioRxPipeline::SetSharedRxQueue(void* base, uint64_t bytes) noexcept {
-    if (base && bytes > 0 && rxSharedQueue_.Attach(base, bytes)) {
+    if (!base || bytes == 0) {
+        (void)rxSharedQueue_.Attach(nullptr, 0);
+        streamProcessor_.SetOutputSharedQueue(nullptr);
+        ASFW_LOG(Isoch, "[Isoch] IR: Shared RX queue detached");
+        return;
+    }
+
+    if (rxSharedQueue_.Attach(base, bytes)) {
         streamProcessor_.SetOutputSharedQueue(&rxSharedQueue_);
         ASFW_LOG(Isoch, "[Isoch] IR: Shared RX queue attached (%llu bytes)", bytes);
     } else {
         ASFW_LOG(Isoch, "[Isoch] IR: Failed to attach shared RX queue (base=%p bytes=%llu)", base, bytes);
+        (void)rxSharedQueue_.Attach(nullptr, 0);
+        streamProcessor_.SetOutputSharedQueue(nullptr);
     }
 }
 
@@ -131,4 +141,3 @@ void IsochAudioRxPipeline::SetExternalSyncBridge(Core::ExternalSyncBridge* bridg
 }
 
 } // namespace ASFW::Isoch::Rx
-

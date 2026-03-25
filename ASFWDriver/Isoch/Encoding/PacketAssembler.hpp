@@ -20,6 +20,7 @@
 #include "NonBlockingCadence48k.hpp"
 #include "BlockingDbcGenerator.hpp"
 #include "AudioRingBuffer.hpp"
+#include "../Config/AudioConstants.hpp"
 #include "../../Logging/Logging.hpp"
 
 #include <atomic>
@@ -34,20 +35,18 @@ enum class StreamMode : uint8_t {
     kBlocking = 1,
 };
 
-/// Maximum supported channel count (compile-time buffer sizing)
-constexpr uint32_t kMaxSupportedChannels = 16;
-
 /// Compile-time maximum frames per DATA packet (48k blocking path).
 constexpr uint32_t kSamplesPerDataPacket = 8;
 
 /// CIP header size in bytes
 constexpr uint32_t kCIPHeaderSize = 8;
 
-/// Compile-time max audio data size (8 frames × 16 channels × 4 bytes)
-constexpr uint32_t kMaxAudioDataSize = kSamplesPerDataPacket * kMaxSupportedChannels * sizeof(uint32_t);
+/// Compile-time max audio payload size (8 frames × max AM824 slots × 4 bytes)
+constexpr size_t kMaxAudioDataSize =
+    static_cast<size_t>(kSamplesPerDataPacket) * Isoch::Config::kMaxAmdtpDbs * sizeof(uint32_t);
 
 /// Compile-time max assembled packet size (CIP header + max audio data)
-constexpr uint32_t kMaxAssembledPacketSize = kCIPHeaderSize + kMaxAudioDataSize;
+constexpr size_t kMaxAssembledPacketSize = kCIPHeaderSize + kMaxAudioDataSize;
 
 /// Underrun diagnostic snapshot (1A: detection).
 /// All fields atomically updated in assembleDataPacket() hot path.
@@ -78,30 +77,41 @@ struct AssembledPacket {
 ///   3. Call assembleNext() for each FireWire cycle (8000/sec)
 ///   4. Transmit or validate the assembled packet
 ///
+// Hot-path layout intentionally keeps cadence, DBC, ring-buffer, and diagnostics separate.
+// NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 class PacketAssembler {
 public:
     /// Construct a packet assembler.
-    /// @param channels Number of audio channels (1..kMaxSupportedChannels)
+    /// @param channels Number of PCM audio channels (1..Isoch::Config::kMaxPcmChannels)
     /// @param sid Source node ID (6 bits)
     /// @param midiChannels Number of MIDI channels per data block (0 or 1)
     explicit PacketAssembler(uint32_t channels = 2, uint8_t sid = 0, uint32_t midiChannels = 0) noexcept
         : channelCount_(channels)
-        , midiChannels_(midiChannels)
+        , am824SlotCount_(channels + midiChannels)
+        , midiSlotsPerEvent_(midiChannels)
         , cipBuilder_(sid, static_cast<uint8_t>(channels + midiChannels)) {}
 
     /// Get audio channel count (what CoreAudio sees).
     uint32_t channelCount() const noexcept { return channelCount_; }
 
-    /// Get MIDI channel count (0 or 1, wire-only).
-    uint32_t midiChannels() const noexcept { return midiChannels_; }
+    /// Get AM824 slot count per event (CIP DBS on wire).
+    /// For BeBoB devices: am824SlotCount = channelCount + midiSlotsPerEvent.
+    uint32_t am824SlotCount() const noexcept { return am824SlotCount_; }
 
-    /// Wire DBS = audio channels + MIDI channels. This is the CIP DBS field.
-    uint32_t wireDbs() const noexcept { return channelCount_ + midiChannels_; }
+    /// Wire DBS = am824SlotCount (alias for backwards compatibility).
+    uint32_t wireDbs() const noexcept { return am824SlotCount_; }
 
-    /// Get runtime data packet size in bytes (CIP header + data blocks).
-    /// Each data block = wireDbs quadlets (audio + MIDI).
+    /// Get additional non-audio AM824 slots (e.g. MIDI) per event.
+    uint32_t midiSlotsPerEvent() const noexcept { return midiSlotsPerEvent_; }
+
+    /// Get MIDI channel count (alias for midiSlotsPerEvent).
+    uint32_t midiChannels() const noexcept { return midiSlotsPerEvent_; }
+
+    /// Get runtime data packet size in bytes.
     uint32_t dataPacketSize() const noexcept {
-        return kCIPHeaderSize + samplesPerDataPacket() * wireDbs() * sizeof(uint32_t);
+        const size_t payloadBytes =
+            static_cast<size_t>(samplesPerDataPacket()) * am824SlotCount_ * sizeof(uint32_t);
+        return static_cast<uint32_t>(kCIPHeaderSize + payloadBytes);
     }
 
     /// Get DATA packet frame count for the active stream mode (48k paths only).
@@ -118,9 +128,21 @@ public:
     /// Reconfigure channel count, MIDI channels, and SID (resets all state).
     /// Use this instead of assignment since atomics prevent copy/move.
     void reconfigure(uint32_t channels, uint8_t sid, uint32_t midiChannels = 0) noexcept {
+        reconfigureAM824(channels, channels + midiChannels, sid);
+    }
+
+    /// Reconfigure PCM channels and wire AM824 slot count (CIP DBS).
+    /// `am824Slots` may exceed `channels` when the stream carries non-audio slots
+    /// such as MIDI conformant data.
+    // Positional arguments mirror PCM-channels / wire-slots / SID reconfiguration.
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+    void reconfigureAM824(uint32_t channels, uint32_t am824Slots, uint8_t sid) noexcept {
         channelCount_ = channels;
-        midiChannels_ = midiChannels;
-        cipBuilder_ = CIPHeaderBuilder(sid, static_cast<uint8_t>(channels + midiChannels));
+        am824SlotCount_ = am824Slots;
+        midiSlotsPerEvent_ = (am824SlotCount_ > channelCount_)
+            ? (am824SlotCount_ - channelCount_)
+            : 0;
+        cipBuilder_ = CIPHeaderBuilder(sid, static_cast<uint8_t>(am824SlotCount_));
         ringBuffer_.reconfigure(channels);
         blockingCadence_.reset();
         nonBlockingCadence_.reset();
@@ -269,7 +291,7 @@ private:
         std::memcpy(packet.data + 4, &cip.q1, 4);
 
         // Read audio samples - ZERO-COPY path or ring buffer fallback
-        int32_t samples[kSamplesPerDataPacket * kMaxSupportedChannels];
+        int32_t samples[kSamplesPerDataPacket * Isoch::Config::kMaxPcmChannels];
         uint32_t framesRead = 0;
 
         if (zeroCopyEnabled_ && zeroCopyBase_) {
@@ -303,26 +325,14 @@ private:
             underrunDiag_.lastDbc.store(packet.dbc, std::memory_order_relaxed);
 
             // SAFETY: Zero remaining samples to prevent encoding stale stack data
-            size_t samplesRead = framesRead * channelCount_;
-            size_t totalSamples = framesPerPacket * channelCount_;
+            size_t samplesRead = static_cast<size_t>(framesRead) * channelCount_;
+            size_t totalSamples = static_cast<size_t>(framesPerPacket) * channelCount_;
             std::memset(&samples[samplesRead], 0, (totalSamples - samplesRead) * sizeof(int32_t));
         }
 
-        // Fix 29: Encode samples to AM824 format, interleaving MIDI no-data quadlets.
-        // Each data block = channelCount_ audio quadlets + midiChannels_ MIDI quadlets.
-        uint32_t* quadlets = reinterpret_cast<uint32_t*>(packet.data + kCIPHeaderSize);
-        const uint32_t dbs = wireDbs();
-
-        for (uint32_t f = 0; f < framesPerPacket; ++f) {
-            // Audio quadlets for this data block
-            for (uint32_t ch = 0; ch < channelCount_; ++ch) {
-                quadlets[f * dbs + ch] = AM824Encoder::encode(samples[f * channelCount_ + ch]);
-            }
-            // MIDI no-data quadlet(s) at end of data block
-            for (uint32_t m = 0; m < midiChannels_; ++m) {
-                quadlets[f * dbs + channelCount_ + m] = AM824Encoder::encodeMidiNoData();
-            }
-        }
+        // Encode samples to AM824 format (includes MIDI placeholder slots if am824SlotCount > channelCount)
+        uint32_t* audioQuadlets = reinterpret_cast<uint32_t*>(packet.data + kCIPHeaderSize);
+        encodeInterleavedFramesToAm824(samples, framesPerPacket, audioQuadlets);
     }
     
     /// Assemble a silent DATA packet (CIP header + zero-filled audio).
@@ -335,20 +345,10 @@ private:
         std::memcpy(packet.data, &cip.q0, 4);
         std::memcpy(packet.data + 4, &cip.q1, 4);
 
-        // Fix 29: Silent audio = valid AM824/MBLA (label 0x40) + MIDI no-data (label 0x80).
-        uint32_t* quadlets = reinterpret_cast<uint32_t*>(packet.data + kCIPHeaderSize);
-        const uint32_t silence = AM824Encoder::encodeSilence();
-        const uint32_t midiNoData = AM824Encoder::encodeMidiNoData();
-        const uint32_t dbs = wireDbs();
-
-        for (uint32_t f = 0; f < framesPerPacket; ++f) {
-            for (uint32_t ch = 0; ch < channelCount_; ++ch) {
-                quadlets[f * dbs + ch] = silence;
-            }
-            for (uint32_t m = 0; m < midiChannels_; ++m) {
-                quadlets[f * dbs + channelCount_ + m] = midiNoData;
-            }
-        }
+        // IMPORTANT: Silent audio must still be valid AM824/MBLA (label 0x40),
+        // and MIDI slots must be valid conformant data (label 0x80+).
+        uint32_t* audioQuadlets = reinterpret_cast<uint32_t*>(packet.data + kCIPHeaderSize);
+        fillSilentAm824Frames(framesPerPacket, audioQuadlets);
     }
 
     /// Assemble a NO-DATA packet (8 bytes: CIP only).
@@ -363,8 +363,44 @@ private:
         std::memcpy(packet.data + 4, &cip.q1, 4);
     }
     
-    uint32_t channelCount_{2};               ///< Number of audio channels
-    uint32_t midiChannels_{0};               ///< Number of MIDI channels per data block (0 or 1)
+    static constexpr uint32_t encodeMidiPlaceholder(uint32_t midiSlotIndex) noexcept {
+        const uint8_t label = static_cast<uint8_t>(
+            kAM824LabelMIDIConformantBase + (midiSlotIndex & 0x03u));
+        return AM824Encoder::encodeLabelOnly(label);
+    }
+
+    void encodeInterleavedFramesToAm824(const int32_t* pcmInterleaved,
+                                        uint32_t frames,
+                                        uint32_t* outWireQuadlets) const noexcept {
+        for (uint32_t f = 0; f < frames; ++f) {
+            const int32_t* frameIn = pcmInterleaved + (static_cast<size_t>(f) * channelCount_);
+            uint32_t* frameOut = outWireQuadlets + (static_cast<size_t>(f) * am824SlotCount_);
+
+            for (uint32_t ch = 0; ch < channelCount_; ++ch) {
+                frameOut[ch] = AM824Encoder::encode(frameIn[ch]);
+            }
+            for (uint32_t s = 0; s < midiSlotsPerEvent_; ++s) {
+                frameOut[channelCount_ + s] = encodeMidiPlaceholder(s);
+            }
+        }
+    }
+
+    void fillSilentAm824Frames(uint32_t frames, uint32_t* outWireQuadlets) const noexcept {
+        const uint32_t silence = AM824Encoder::encodeSilence();
+        for (uint32_t f = 0; f < frames; ++f) {
+            uint32_t* frameOut = outWireQuadlets + (static_cast<size_t>(f) * am824SlotCount_);
+            for (uint32_t ch = 0; ch < channelCount_; ++ch) {
+                frameOut[ch] = silence;
+            }
+            for (uint32_t s = 0; s < midiSlotsPerEvent_; ++s) {
+                frameOut[channelCount_ + s] = encodeMidiPlaceholder(s);
+            }
+        }
+    }
+
+    uint32_t channelCount_{2};               ///< Number of PCM audio channels
+    uint32_t am824SlotCount_{2};             ///< Wire AM824 slots per event (CIP DBS)
+    uint32_t midiSlotsPerEvent_{0};          ///< Extra AM824 slots after PCM (MIDI, etc.)
     uint64_t currentCycleNumber() const noexcept {
         switch (streamMode_) {
             case StreamMode::kBlocking:
@@ -408,6 +444,7 @@ private:
     
 public:
     /// Snapshot debug counters for 1Hz logging (resets counters atomically)
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     void snapshotDebug(uint64_t& dataPkts, uint64_t& underruns) noexcept {
         dataPkts = dbgDataPackets_.exchange(0, std::memory_order_relaxed);
         underruns = dbgUnderrunPackets_.exchange(0, std::memory_order_relaxed);
@@ -415,8 +452,9 @@ public:
 
     /// 1A: Record an underrun from external caller (zero-copy path).
     /// Called by IsochTransmitContext when zeroCopyFillBefore < framesPerPacket.
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     void recordUnderrun(uint32_t fillLevel, uint32_t requestedFrames,
-                        uint32_t availableFrames, uint64_t cycleNumber,
+                        uint32_t availableFrames, uint64_t cycleNumber, // NOLINT(bugprone-easily-swappable-parameters)
                         uint8_t dbc) noexcept {
         underrunDiag_.underrunCount.fetch_add(1, std::memory_order_relaxed);
         underrunDiag_.lastFillLevel.store(fillLevel, std::memory_order_relaxed);

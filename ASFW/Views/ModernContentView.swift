@@ -106,7 +106,7 @@ struct ModernContentView: View {
                 case .topology:
                     TopologyView(viewModel: topologyVM)
                 case .romExplorer:
-                    ROMExplorerView(viewModel: debugVM)
+                    ROMExplorerView(viewModel: romExplorerVM)
                 case .metrics:
                     MetricsView(connector: debugVM.connector)
                 case .busReset:

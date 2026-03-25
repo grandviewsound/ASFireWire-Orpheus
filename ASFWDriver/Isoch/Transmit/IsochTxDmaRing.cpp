@@ -367,7 +367,7 @@ void IsochTxDmaRing::DumpPayloadBuffers(uint32_t numPackets) const noexcept {
 
     for (uint32_t pktIdx = 0; pktIdx < numPackets; ++pktIdx) {
         const uint8_t* payloadVirt = reinterpret_cast<const uint8_t*>(buf.virtualBase) +
-                                     (pktIdx * Layout::kMaxPacketSize);
+                                     (static_cast<size_t>(pktIdx) * Layout::kMaxPacketSize);
         const uint32_t* payload32 = reinterpret_cast<const uint32_t*>(payloadVirt);
 
         const uint32_t cip0 = payload32[0];
@@ -381,7 +381,7 @@ void IsochTxDmaRing::DumpPayloadBuffers(uint32_t numPackets) const noexcept {
         const bool isNoData = (aud0 == 0 && aud1 == 0);
         const bool isSilence = ((aud0 & 0xFFFFFF) == 0) && ((aud1 & 0xFFFFFF) == 0);
 
-        ASFW_LOG(Isoch, "  Pkt[%u] CIP=[%08x %08x] Audio=[%08x %08x %08x %08x] %s%s",
+        ASFW_LOG(Isoch, "  Pkt[%u] CIP=[%08x %08x] Audio=[%08x %08x %08x %08x] %{public}s%{public}s",
                  pktIdx, cip0, cip1, aud0, aud1, aud2, aud3,
                  isNoData ? "NO-DATA" : "DATA",
                  (isSilence && !isNoData) ? " (SILENCE!)" : "");
@@ -456,4 +456,3 @@ void IsochTxDmaRing::DumpDescriptorRing(uint32_t startPacket, uint32_t numPacket
 }
 
 } // namespace ASFW::Isoch::Tx
-

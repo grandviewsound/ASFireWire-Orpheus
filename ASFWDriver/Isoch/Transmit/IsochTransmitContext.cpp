@@ -60,7 +60,8 @@ void IsochTransmitContext::SetZeroCopyOutputBuffer(void* base, uint64_t bytes, u
 kern_return_t IsochTransmitContext::Configure(uint8_t channel,
                                               uint8_t sid,
                                               uint32_t streamModeRaw,
-                                              uint32_t requestedChannels) noexcept {
+                                              uint32_t requestedChannels,
+                                              uint32_t requestedAm824Slots) noexcept {
     if (state_ != State::Unconfigured && state_ != State::Stopped) {
         return kIOReturnBusy;
     }
@@ -70,16 +71,20 @@ kern_return_t IsochTransmitContext::Configure(uint8_t channel,
     channel_ = channel;
     ring_.SetChannel(channel_);
 
-    const kern_return_t krAudio = audio_.Configure(sid, streamModeRaw, requestedChannels);
+    const kern_return_t krAudio = audio_.Configure(sid, streamModeRaw, requestedChannels, requestedAm824Slots);
     if (krAudio != kIOReturnSuccess) {
         return krAudio;
     }
 
     if (dmaMemory_) {
-        const kern_return_t kr = ring_.SetupRings(*dmaMemory_);
-        if (kr != kIOReturnSuccess) {
-            ASFW_LOG(Isoch, "IT: SetupRings failed");
-            return kr;
+        // Allocate-once policy: IsochService keeps the IT context (and its DMA slabs) alive
+        // across start/stop. Re-allocating on every Configure() exhausts the bump allocator.
+        if (!ring_.HasRings()) {
+            const kern_return_t kr = ring_.SetupRings(*dmaMemory_);
+            if (kr != kIOReturnSuccess) {
+                ASFW_LOG(Isoch, "IT: SetupRings failed");
+                return kr;
+            }
         }
     }
 
@@ -368,7 +373,8 @@ void IsochTransmitContext::KickTxVerifier() noexcept {
 
     IsochTxVerifier::Inputs in{};
     in.framesPerPacket = audio_.FramesPerDataPacket();
-    in.wireDbs = audio_.WireDbs();
+    in.pcmChannels = audio_.ChannelCount();
+    in.am824Slots = audio_.Am824SlotCount();
     in.zeroCopyEnabled = audio_.IsZeroCopyEnabled();
     in.sharedTxQueueValid = audio_.SharedTxQueueValid();
     in.sharedTxQueueFillFrames = audio_.SharedTxFillLevelFrames();
@@ -439,14 +445,8 @@ void IsochTransmitContext::DumpPayloadBuffers(uint32_t numPackets) const noexcep
     ring_.DumpPayloadBuffers(numPackets);
 }
 
-void IsochTransmitContext::PrimeOnly() noexcept {
-    if (!ring_.HasRings()) return;
-    ring_.Prime(audio_);
-}
-
 void IsochTransmitContext::DumpDescriptorRing(uint32_t startPacket, uint32_t numPackets) const noexcept {
     ring_.DumpDescriptorRing(startPacket, numPackets);
 }
 
 } // namespace ASFW::Isoch
-

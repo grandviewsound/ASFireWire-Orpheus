@@ -15,7 +15,7 @@ namespace {
 
 [[nodiscard]] bool ReadOSBoolValue(OSObject* object, bool fallback) {
     auto* booleanObject = OSDynamicCast(OSBoolean, object);
-    if (!booleanObject) {
+    if (booleanObject == nullptr) {
         return fallback;
     }
     return booleanObject == kOSBooleanTrue;
@@ -30,13 +30,16 @@ void AppendBoolControl(ParsedAudioDriverConfig& inOutConfig,
 }
 
 void BuildChannelNamesFromPlugs(ParsedAudioDriverConfig& inOutConfig) {
-    const uint32_t maxChannels = std::min(inOutConfig.channelCount, kMaxNamedChannels);
-    for (uint32_t index = 0; index < maxChannels; ++index) {
+    const uint32_t maxInputChannels = std::min(inOutConfig.inputChannelCount, kMaxNamedChannels);
+    const uint32_t maxOutputChannels = std::min(inOutConfig.outputChannelCount, kMaxNamedChannels);
+    for (uint32_t index = 0; index < maxInputChannels; ++index) {
         snprintf(inOutConfig.inputChannelNames[index],
                  sizeof(inOutConfig.inputChannelNames[index]),
                  "%s %u",
                  inOutConfig.inputPlugName,
                  index + 1);
+    }
+    for (uint32_t index = 0; index < maxOutputChannels; ++index) {
         snprintf(inOutConfig.outputChannelNames[index],
                  sizeof(inOutConfig.outputChannelNames[index]),
                  "%s %u",
@@ -90,7 +93,7 @@ void ParseAudioDriverConfigFromProperties(OSDictionary* properties,
         const uint32_t cappedCount = std::min(rates->getCount(), kMaxSampleRates);
         for (uint32_t i = 0; i < cappedCount; ++i) {
             auto* rate = OSDynamicCast(OSNumber, rates->getObject(i));
-            if (!rate) {
+            if (rate == nullptr) {
                 continue;
             }
             inOutConfig.sampleRates[inOutConfig.sampleRateCount++] =
@@ -125,7 +128,7 @@ void ParseAudioDriverConfigFromProperties(OSDictionary* properties,
             auto* classNumber = OSDynamicCast(OSNumber, entry->getObject("ClassID"));
             auto* scopeNumber = OSDynamicCast(OSNumber, entry->getObject("Scope"));
             auto* elementNumber = OSDynamicCast(OSNumber, entry->getObject("Element"));
-            if (!classNumber || !scopeNumber || !elementNumber) {
+            if (classNumber == nullptr || scopeNumber == nullptr || elementNumber == nullptr) {
                 continue;
             }
 

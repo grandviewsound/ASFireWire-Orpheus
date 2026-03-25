@@ -6,9 +6,43 @@
 
 namespace ASFW::Isoch {
 
+namespace {
+
+inline uint32_t EncodeMidiPlaceholderSlot(uint32_t midiSlotIndex) noexcept {
+    const uint8_t label = static_cast<uint8_t>(
+        Encoding::kAM824LabelMIDIConformantBase + (midiSlotIndex & 0x03u));
+    return Encoding::AM824Encoder::encodeLabelOnly(label);
+}
+
+// Positional arguments mirror PCM input then AM824 output layout.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+inline void EncodePcmFramesWithAm824Placeholders(const int32_t* pcmInterleaved,
+                                                 uint32_t frames, // NOLINT(bugprone-easily-swappable-parameters)
+                                                 uint32_t pcmChannels,
+                                                 uint32_t am824Slots,
+                                                 uint32_t* outWireQuadlets) noexcept {
+    const uint32_t midiSlots = (am824Slots > pcmChannels) ? (am824Slots - pcmChannels) : 0;
+    for (uint32_t f = 0; f < frames; ++f) {
+        const int32_t* frameIn = pcmInterleaved + (static_cast<size_t>(f) * pcmChannels);
+        uint32_t* frameOut = outWireQuadlets + (static_cast<size_t>(f) * am824Slots);
+
+        for (uint32_t ch = 0; ch < pcmChannels; ++ch) {
+            frameOut[ch] = Encoding::AM824Encoder::encode(frameIn[ch]);
+        }
+        for (uint32_t s = 0; s < midiSlots; ++s) {
+            frameOut[pcmChannels + s] = EncodeMidiPlaceholderSlot(s);
+        }
+    }
+}
+
+} // namespace
+
 void IsochAudioTxPipeline::SetSharedTxQueue(void* base, uint64_t bytes) noexcept {
     if (!base || bytes == 0) {
-        ASFW_LOG(Isoch, "IT: SetSharedTxQueue - invalid parameters");
+        // Treat null/0 as an explicit detach so callers can safely tear down the
+        // underlying mapping without leaving stale pointers behind.
+        (void)sharedTxQueue_.Attach(nullptr, 0);
+        ASFW_LOG(Isoch, "IT: Shared TX queue detached");
         return;
     }
 
@@ -19,6 +53,7 @@ void IsochAudioTxPipeline::SetSharedTxQueue(void* base, uint64_t bytes) noexcept
                  sharedTxQueue_.CapacityFrames());
     } else {
         ASFW_LOG(Isoch, "IT: Failed to attach shared TX queue - invalid header?");
+        (void)sharedTxQueue_.Attach(nullptr, 0);
     }
 }
 
@@ -45,7 +80,7 @@ void IsochAudioTxPipeline::SetZeroCopyOutputBuffer(void* base, uint64_t bytes, u
         zeroCopyEnabled_ = false;
         assembler_.setZeroCopySource(nullptr, 0);
 
-        if (base || bytes || frameCapacity) {
+        if (base || bytes || frameCapacity) { // NOSONAR(cpp:S3923): branches log different diagnostic messages
             ASFW_LOG(Isoch, "IT: SetZeroCopyOutputBuffer - invalid parameters");
         } else {
             ASFW_LOG(Isoch, "IT: ZERO-COPY disabled; using shared TX queue");
@@ -60,19 +95,23 @@ void IsochAudioTxPipeline::SetZeroCopyOutputBuffer(void* base, uint64_t bytes, u
 
     assembler_.setZeroCopySource(reinterpret_cast<const int32_t*>(base), frameCapacity);
 
-    ASFW_LOG(Isoch, "IT: ✅ ZERO-COPY enabled! AudioBuffer base=%p bytes=%llu frames=%u assembler=%s",
+    ASFW_LOG(Isoch, "IT: ✅ ZERO-COPY enabled! AudioBuffer base=%p bytes=%llu frames=%u assembler=%{public}s",
              base, bytes, frameCapacity,
              assembler_.isZeroCopyEnabled() ? "ENABLED" : "fallback");
 }
 
-kern_return_t IsochAudioTxPipeline::Configure(uint8_t sid, uint32_t streamModeRaw, uint32_t requestedChannels) noexcept {
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+kern_return_t IsochAudioTxPipeline::Configure(uint8_t sid,
+                                              uint32_t streamModeRaw,
+                                              uint32_t requestedChannels,
+                                              uint32_t requestedAm824Slots) noexcept {
     if (!sharedTxQueue_.IsValid()) {
         ASFW_LOG(Isoch, "IT: Configure failed - shared TX queue missing");
         return kIOReturnNotReady;
     }
 
     const uint32_t queueChannels = sharedTxQueue_.Channels();
-    if (queueChannels == 0 || queueChannels > Encoding::kMaxSupportedChannels) {
+    if (queueChannels == 0 || queueChannels > Config::kMaxPcmChannels) {
         ASFW_LOG(Isoch, "IT: Configure failed - invalid queueChannels=%u", queueChannels);
         return kIOReturnBadArgument;
     }
@@ -82,11 +121,27 @@ kern_return_t IsochAudioTxPipeline::Configure(uint8_t sid, uint32_t streamModeRa
         return kIOReturnBadArgument;
     }
 
-    // Fix 29: BeBoB convention — 1 MIDI channel per data block on the wire.
-    // Audio channels (queueChannels) drive CoreAudio/ring buffer sizing.
-    // Wire DBS = audio + MIDI, used for CIP header and packet sizing.
-    constexpr uint32_t kMidiChannels = 1;
-    assembler_.reconfigure(queueChannels, sid, kMidiChannels);
+    uint32_t am824Slots = queueChannels;
+    if (requestedAm824Slots != 0) {
+        if (requestedAm824Slots < queueChannels) {
+            ASFW_LOG(Isoch,
+                     "IT: Configure failed - requestedAm824Slots=%u < queuePcm=%u",
+                     requestedAm824Slots,
+                     queueChannels);
+            return kIOReturnBadArgument;
+        }
+        if (requestedAm824Slots > Config::kMaxAmdtpDbs) {
+            ASFW_LOG(Isoch,
+                     "IT: Configure failed - requestedAm824Slots=%u exceed max supported=%u (pcm=%u)",
+                     requestedAm824Slots,
+                     Config::kMaxAmdtpDbs,
+                     queueChannels);
+            return kIOReturnUnsupported;
+        }
+        am824Slots = requestedAm824Slots;
+    }
+
+    assembler_.reconfigureAM824(queueChannels, am824Slots, sid);
 
     requestedStreamMode_ = (streamModeRaw == 1u)
         ? Encoding::StreamMode::kBlocking
@@ -99,12 +154,21 @@ kern_return_t IsochAudioTxPipeline::Configure(uint8_t sid, uint32_t streamModeRa
              effectiveStreamMode_ == Encoding::StreamMode::kBlocking ? "blocking" : "non-blocking");
 
     const uint32_t framesPerDataPacket = assembler_.samplesPerDataPacket();
-    const uint32_t wDbs = assembler_.wireDbs();
-    const uint32_t payloadBytes = framesPerDataPacket * wDbs * sizeof(uint32_t);
+    const uint32_t payloadBytes = static_cast<uint32_t>(
+        static_cast<size_t>(framesPerDataPacket) * am824Slots * sizeof(uint32_t));
     const uint32_t packetBytes = Encoding::kCIPHeaderSize + payloadBytes;
     ASFW_LOG(Isoch,
-             "IT: Channel geometry resolved audioCh=%u midi=%u wireDBS=%u framesPerData=%u payloadBytes=%u packetBytes=%u",
-             queueChannels, kMidiChannels, wDbs, framesPerDataPacket, payloadBytes, packetBytes);
+             "IT: Channel geometry resolved pcm=%u dbs=%u midiSlots=%u framesPerData=%u payloadBytes=%u packetBytes=%u",
+             queueChannels, am824Slots, (am824Slots > queueChannels) ? (am824Slots - queueChannels) : 0,
+             framesPerDataPacket, payloadBytes, packetBytes);
+    ASFW_LOG(Isoch,
+             "IT: Cadence resolved mode=%{public}s dbs=%u framesPerData=%u dataBytes=%u noDataBytes=%u cadence=%{public}s",
+             effectiveStreamMode_ == Encoding::StreamMode::kBlocking ? "blocking" : "non-blocking",
+             am824Slots,
+             framesPerDataPacket,
+             packetBytes,
+             Encoding::kCIPHeaderSize,
+             effectiveStreamMode_ == Encoding::StreamMode::kBlocking ? "NDDD" : "DATA-every-cycle");
 
     return kIOReturnSuccess;
 }
@@ -162,7 +226,7 @@ void IsochAudioTxPipeline::PrePrimeFromSharedQueue() noexcept {
              fillBefore, startupPrimeLimitFrames);
 
     constexpr uint32_t kTransferChunk = Config::kTransferChunkFrames;
-    int32_t transferBuf[kTransferChunk * Encoding::kMaxSupportedChannels];
+    int32_t transferBuf[kTransferChunk * Config::kMaxPcmChannels];
     uint32_t totalTransferred = 0;
     uint32_t chunkCount = 0;
     bool primeLimitHit = false;
@@ -201,7 +265,7 @@ void IsochAudioTxPipeline::PrePrimeFromSharedQueue() noexcept {
         if (written < read) break;
     }
 
-    ASFW_LOG(Isoch, "IT: Pre-prime transferred %u frames to assembler (fill=%u limit=%u hit=%s)",
+    ASFW_LOG(Isoch, "IT: Pre-prime transferred %u frames to assembler (fill=%u limit=%u hit=%{public}s)",
              totalTransferred,
              assembler_.bufferFillLevel(),
              startupPrimeLimitFrames,
@@ -231,7 +295,7 @@ void IsochAudioTxPipeline::OnRefillTickPreHW() noexcept {
         if (rbFill < targetRbFillFrames) {
             skipped = false;
             uint32_t want = targetRbFillFrames - rbFill;
-            int32_t transferBuf[kTransferChunkFrames * Encoding::kMaxSupportedChannels];
+            int32_t transferBuf[kTransferChunkFrames * Config::kMaxPcmChannels];
             uint32_t chunks = 0;
 
             while (want > 0 && chunks < kMaxChunksPerRefill) {
@@ -358,7 +422,7 @@ uint16_t IsochAudioTxPipeline::ComputeDataSyt(uint32_t transmitCycle) noexcept {
         return Encoding::SYTGenerator::kNoInfo;
     }
 
-    const uint16_t txSyt = sytGenerator_.computeDataSYT(transmitCycle);
+    const uint16_t txSyt = sytGenerator_.computeDataSYT(transmitCycle, assembler_.samplesPerDataPacket());
     MaybeApplyExternalSyncDiscipline(txSyt);
     return txSyt;
 }
@@ -425,7 +489,8 @@ Tx::IsochTxPacket IsochAudioTxPipeline::NextSilentPacket(uint32_t transmitCycle)
     }
 
     Tx::IsochTxPacket out{};
-    out.words = reinterpret_cast<const uint32_t*>(pkt.data);
+    std::memcpy(silentPacketStorage_.data(), pkt.data, pkt.size);
+    out.words = reinterpret_cast<const uint32_t*>(silentPacketStorage_.data());
     out.sizeBytes = pkt.size;
     out.isData = pkt.isData;
     out.dbc = pkt.dbc;
@@ -464,7 +529,8 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
     ++sInjectCallCount;
 
     const uint32_t framesPerPacket = assembler_.samplesPerDataPacket();
-    const uint32_t channels = assembler_.channelCount();
+    const uint32_t pcmChannels = assembler_.channelCount();
+    const uint32_t am824Slots = assembler_.am824SlotCount();
 
     // Fix #24: Capture first packet's samples for diagnostic
     int32_t diagSample0 = 0, diagSample1 = 0;
@@ -482,7 +548,7 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
         const bool isData = (reqCount > Encoding::kCIPHeaderSize);
         if (!isData) continue;
 
-        int32_t samples[Encoding::kSamplesPerDataPacket * Encoding::kMaxSupportedChannels];
+        int32_t samples[Encoding::kSamplesPerDataPacket * Config::kMaxPcmChannels];
         uint32_t framesRead = 0;
 
         if (zeroCopySync) {
@@ -505,9 +571,9 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
                 const uint32_t zcPos = assembler_.zeroCopyReadPosition();
                 for (uint32_t f = 0; f < framesPerPacket; ++f) {
                     const uint32_t frameIdx = (zcPos + f) % zeroCopyFrameCapacity_;
-                    const uint32_t sampleIdx = frameIdx * channels;
-                    for (uint32_t ch = 0; ch < channels; ++ch) {
-                        samples[f * channels + ch] = zcBase[sampleIdx + ch];
+                    const uint32_t sampleIdx = frameIdx * pcmChannels;
+                    for (uint32_t ch = 0; ch < pcmChannels; ++ch) {
+                        samples[f * pcmChannels + ch] = zcBase[sampleIdx + ch];
                     }
                 }
                 assembler_.setZeroCopyReadPosition((zcPos + framesPerPacket) % zeroCopyFrameCapacity_);
@@ -529,8 +595,8 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
         }
 
         if (framesRead < framesPerPacket) {
-            const size_t samplesRead = framesRead * channels;
-            const size_t totalSamples = framesPerPacket * channels;
+            const size_t samplesRead = static_cast<size_t>(framesRead) * pcmChannels;
+            const size_t totalSamples = static_cast<size_t>(framesPerPacket) * pcmChannels;
             std::memset(&samples[samplesRead], 0,
                         (totalSamples - samplesRead) * sizeof(int32_t));
         }
@@ -541,32 +607,20 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
         }
         uint32_t* quadlets = reinterpret_cast<uint32_t*>(payloadVirt + Encoding::kCIPHeaderSize);
 
-        // Fix 29: Encode per data block — audio quadlets then MIDI no-data.
-        // Data block layout: [ch0][ch1]...[ch(N-1)][MIDI]
-        const uint32_t dbs = assembler_.wireDbs();
-        const uint32_t midi = assembler_.midiChannels();
-        const uint32_t midiNoData = Encoding::AM824Encoder::encodeMidiNoData();
+        // Encode per data block: audio quadlets then MIDI placeholders.
+        EncodePcmFramesWithAm824Placeholders(samples, framesPerPacket, pcmChannels, am824Slots, quadlets);
 
-        for (uint32_t f = 0; f < framesPerPacket; ++f) {
-            for (uint32_t ch = 0; ch < channels; ++ch) {
-                quadlets[f * dbs + ch] = Encoding::AM824Encoder::encode(samples[f * channels + ch]);
-            }
-            for (uint32_t m = 0; m < midi; ++m) {
-                quadlets[f * dbs + channels + m] = midiNoData;
-            }
-        }
-
-        // Fix #24: Track diagnostics
+        // Track diagnostics
         ++dataPacketsThisCall;
         ++sInjectPacketsWritten;
         if (dataPacketsThisCall == 1) {
             diagSample0 = samples[0];
-            diagSample1 = (channels > 1) ? samples[1] : 0;
+            diagSample1 = (pcmChannels > 1) ? samples[1] : 0;
             diagAM824_0 = quadlets[0];
-            diagAM824_1 = (channels > 1) ? quadlets[1] : 0;
+            diagAM824_1 = (pcmChannels > 1) ? quadlets[1] : 0;
             diagFramesRead = framesRead;
         }
-        for (uint32_t s = 0; s < framesPerPacket * channels; ++s) {
+        for (uint32_t s = 0; s < framesPerPacket * pcmChannels; ++s) {
             if (samples[s] != 0) {
                 hasNonZeroThisCall = true;
                 int32_t abs_s = (samples[s] < 0) ? -samples[s] : samples[s];

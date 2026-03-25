@@ -1,16 +1,21 @@
 #pragma once
 
+#include "AudioConstants.hpp"
+
 #include <cstdint>
 
 namespace ASFW::Isoch::Config {
 
-#define ASFW_TX_PROFILE_A 1 // 
-#define ASFW_TX_PROFILE_B 2 // Balanced profile with moderate start wait and larger ring buffer targets, suitable for general use.
-#define ASFW_TX_PROFILE_C 3 // Low-latency profile with minimal start wait and smaller ring buffer targets
+/// Profile identifiers. Override build-time default with -DASFW_TX_TUNING_PROFILE=1 (B) or =2 (C).
+enum class TxProfileId : uint8_t { A = 0, B = 1, C = 2 };
 
-#ifndef ASFW_TX_TUNING_PROFILE
-#define ASFW_TX_TUNING_PROFILE ASFW_TX_PROFILE_A
+#if defined(ASFW_TX_TUNING_PROFILE)
+inline constexpr uint8_t kTxTuningProfileRaw = ASFW_TX_TUNING_PROFILE;
+#else
+inline constexpr uint8_t kTxTuningProfileRaw = 0;  // 0=A, 1=B, 2=C
 #endif
+static_assert(kTxTuningProfileRaw <= 2, "Invalid ASFW_TX_TUNING_PROFILE — use 0 (A), 1 (B), or 2 (C)");
+inline constexpr TxProfileId kActiveTxProfileId = static_cast<TxProfileId>(kTxTuningProfileRaw);
 
 struct TxBufferProfile {
     const char* name;
@@ -23,7 +28,6 @@ struct TxBufferProfile {
     uint32_t minPrimeDataPackets;        // 2B: Minimum DATA packets after PrimeRing
 };
 
-inline constexpr uint32_t kSharedTxQueueCapacityFrames = 4096;
 inline constexpr uint32_t kTransferChunkFrames = 256;
 
 inline constexpr TxBufferProfile kTxProfileA{
@@ -71,24 +75,40 @@ static_assert(IsValidProfile(kTxProfileA), "Profile A is invalid");
 static_assert(IsValidProfile(kTxProfileB), "Profile B is invalid");
 static_assert(IsValidProfile(kTxProfileC), "Profile C is invalid");
 
-static_assert(kTxProfileA.startWaitTargetFrames <= kSharedTxQueueCapacityFrames,
+static_assert(kTxProfileA.startWaitTargetFrames <= kTxQueueCapacityFrames,
               "Profile A startWait exceeds shared queue capacity");
-static_assert(kTxProfileB.startWaitTargetFrames <= kSharedTxQueueCapacityFrames,
+static_assert(kTxProfileB.startWaitTargetFrames <= kTxQueueCapacityFrames,
               "Profile B startWait exceeds shared queue capacity");
-static_assert(kTxProfileC.startWaitTargetFrames <= kSharedTxQueueCapacityFrames,
+static_assert(kTxProfileC.startWaitTargetFrames <= kTxQueueCapacityFrames,
               "Profile C startWait exceeds shared queue capacity");
 
-#if ASFW_TX_TUNING_PROFILE == ASFW_TX_PROFILE_A
-inline constexpr TxBufferProfile kTxBufferProfile = kTxProfileA;
-#elif ASFW_TX_TUNING_PROFILE == ASFW_TX_PROFILE_B
-inline constexpr TxBufferProfile kTxBufferProfile = kTxProfileB;
-#elif ASFW_TX_TUNING_PROFILE == ASFW_TX_PROFILE_C
-inline constexpr TxBufferProfile kTxBufferProfile = kTxProfileC;
-#else
-#error "Invalid ASFW_TX_TUNING_PROFILE value. Use ASFW_TX_PROFILE_A/B/C."
-#endif
+constexpr TxBufferProfile SelectTxProfile(TxProfileId id) noexcept {
+    switch (id) {
+        case TxProfileId::B: return kTxProfileB;
+        case TxProfileId::C: return kTxProfileC;
+        default:             return kTxProfileA;
+    }
+}
+inline constexpr TxBufferProfile kTxBufferProfile = SelectTxProfile(kActiveTxProfileId);
 
 static_assert(IsValidProfile(kTxBufferProfile), "Selected TX buffer profile is invalid");
 static_assert(kTransferChunkFrames == 256, "Transfer chunk size must stay fixed at 256");
+
+/// Runtime-selectable profile pointer (defaults to the compile-time kTxBufferProfile).
+/// Callers wishing to support hot-switching should use GetActiveTxProfile() instead of
+/// kTxBufferProfile directly.
+inline const TxBufferProfile* gActiveTxProfile = &kTxBufferProfile;
+
+[[nodiscard]] inline const TxBufferProfile& GetActiveTxProfile() noexcept {
+    return *gActiveTxProfile;
+}
+
+inline void SetActiveTxProfile(TxProfileId id) noexcept {
+    switch (id) {
+        case TxProfileId::A: gActiveTxProfile = &kTxProfileA; break;
+        case TxProfileId::B: gActiveTxProfile = &kTxProfileB; break;
+        case TxProfileId::C: gActiveTxProfile = &kTxProfileC; break;
+    }
+}
 
 }  // namespace ASFW::Isoch::Config

@@ -8,16 +8,11 @@
 
 #include "ApogeeTypes.hpp"
 #include "../../IDeviceProtocol.hpp"
-#include "../../../../Async/AsyncTypes.hpp"
+#include "../../../Ports/FireWireBusPort.hpp"
 #include <DriverKit/IOReturn.h>
 #include <vector>
 #include <functional>
 #include <cstdint>
-
-// Forward declaration
-namespace ASFW::Async {
-    class AsyncSubsystem;
-}
 
 namespace ASFW::Protocols::AVC {
     class FCPTransport;
@@ -30,7 +25,8 @@ public:
     using VoidCallback = std::function<void(IOReturn)>;
     template<typename T> using ResultCallback = std::function<void(IOReturn, T)>;
 
-    ApogeeDuetProtocol(Async::AsyncSubsystem& subsystem,
+    ApogeeDuetProtocol(Protocols::Ports::FireWireBusOps& busOps,
+                       Protocols::Ports::FireWireBusInfo& busInfo,
                        uint16_t nodeId,
                        Protocols::AVC::FCPTransport* fcpTransport = nullptr);
     virtual ~ApogeeDuetProtocol() = default;
@@ -103,6 +99,7 @@ public:
                                     bool value) override;
 
     // Mapping helper for tests and call sites.
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     static bool TryMapBooleanControl(uint32_t classIdFourCC,
                                      uint32_t element,
                                      uint8_t& outChannelIndex) noexcept {
@@ -126,7 +123,8 @@ public:
 private:
     struct VendorCommand;
 
-    Async::AsyncSubsystem& subsystem_;
+    Protocols::Ports::FireWireBusOps& busOps_;
+    Protocols::Ports::FireWireBusInfo& busInfo_;
     uint16_t nodeId_;
     Protocols::AVC::FCPTransport* fcpTransport_{nullptr};
 

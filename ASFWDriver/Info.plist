@@ -57,6 +57,8 @@
 			<false/>
 			<key>ASFWHardwareVerbosity</key>
 			<integer>1</integer>
+			<key>ASFWAutoStartAudioStreams</key>
+			<true/>
 			<key>ASFWLogStatistics</key>
 			<true/>
 			<key>ASFWTraceDMACoherency</key>
