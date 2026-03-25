@@ -16,6 +16,7 @@
 #include "Transmit/IsochTransmitContext.hpp"
 #include "../Audio/Model/ASFWAudioDevice.hpp"
 #include "../Common/DriverKitOwnership.hpp"
+#include "../Protocols/AVC/CMP/CMPClient.hpp"
 
 namespace ASFW::Driver {
 
