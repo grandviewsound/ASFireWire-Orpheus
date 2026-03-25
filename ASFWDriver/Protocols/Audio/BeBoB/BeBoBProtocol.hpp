@@ -9,7 +9,7 @@
 #pragma once
 
 #include "../IDeviceProtocol.hpp"
-#include "../../../Async/AsyncSubsystem.hpp"
+#include "../../Ports/FireWireBusPort.hpp"
 
 namespace ASFW::Audio::BeBoB {
 
@@ -17,7 +17,9 @@ namespace ASFW::Audio::BeBoB {
 /// Currently targets: Prism Sound Orpheus (vendor 0x00001198, model 0x00010048)
 class BeBoBProtocol final : public IDeviceProtocol {
 public:
-    BeBoBProtocol(Async::AsyncSubsystem& subsystem, uint16_t nodeId);
+    BeBoBProtocol(Protocols::Ports::FireWireBusOps& busOps,
+                  Protocols::Ports::FireWireBusInfo& busInfo,
+                  uint16_t nodeId);
 
     IOReturn Initialize() override;
     IOReturn Shutdown() override;
@@ -50,7 +52,8 @@ private:
                               uint8_t sfcCode, uint8_t audioChannels,
                               uint8_t midiChannels = 0);
 
-    Async::AsyncSubsystem& mSubsystem;
+    Protocols::Ports::FireWireBusOps& busOps_;
+    Protocols::Ports::FireWireBusInfo& busInfo_;
     uint16_t mNodeId;
     bool mFormatDone_{false};
 };

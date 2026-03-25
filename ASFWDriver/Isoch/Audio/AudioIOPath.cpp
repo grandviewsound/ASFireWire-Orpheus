@@ -24,8 +24,9 @@ void MaybeDrainRxStartup(AudioIOPathState& state) {
     *state.rxStartupDrained = true;
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 kern_return_t HandleBeginRead(AudioIOPathState& state,
-                              uint32_t ioBufferFrameSize,
+                              uint32_t ioBufferFrameSize, // NOLINT(bugprone-easily-swappable-parameters)
                               uint64_t sampleTime) {
     if (!state.inputBuffer) {
         return kIOReturnNotReady;
@@ -46,12 +47,14 @@ kern_return_t HandleBeginRead(AudioIOPathState& state,
         secondFrames = ioBufferFrameSize - firstFrames;
     }
 
-    // Use inputChannelCount for input buffer stride; fall back to channelCount if not set.
-    const uint32_t inChCount = (state.inputChannelCount > 0) ? state.inputChannelCount : state.channelCount;
+    const uint32_t ch = (state.inputChannelCount > 0) ? state.inputChannelCount : state.channelCount;
+    if (ch == 0) {
+        return kIOReturnBadArgument;
+    }
 
-    const uint64_t offsetBytes = uint64_t(offsetFrames) * sizeof(int32_t) * inChCount;
-    const size_t firstBytes = size_t(firstFrames) * sizeof(int32_t) * inChCount;
-    const size_t secondBytes = size_t(secondFrames) * sizeof(int32_t) * inChCount;
+    const uint64_t offsetBytes = uint64_t(offsetFrames) * sizeof(int32_t) * ch;
+    const size_t firstBytes = size_t(firstFrames) * sizeof(int32_t) * ch;
+    const size_t secondBytes = size_t(secondFrames) * sizeof(int32_t) * ch;
 
     MaybeDrainRxStartup(state);
 
@@ -59,9 +62,9 @@ kern_return_t HandleBeginRead(AudioIOPathState& state,
         auto* pcmFirst = reinterpret_cast<int32_t*>(segment.address + offsetBytes);
         const uint32_t read1 = state.rxQueueReader->Read(pcmFirst, firstFrames);
         if (read1 < firstFrames) {
-            memset(pcmFirst + read1 * inChCount,
+            memset(pcmFirst + (static_cast<size_t>(read1) * ch),
                    0,
-                   size_t(firstFrames - read1) * sizeof(int32_t) * inChCount);
+                   size_t(firstFrames - read1) * sizeof(int32_t) * ch);
         }
 
         if (secondFrames > 0) {
@@ -69,9 +72,9 @@ kern_return_t HandleBeginRead(AudioIOPathState& state,
             if (read1 == firstFrames) {
                 const uint32_t read2 = state.rxQueueReader->Read(pcmSecond, secondFrames);
                 if (read2 < secondFrames) {
-                    memset(pcmSecond + read2 * inChCount,
+                    memset(pcmSecond + (static_cast<size_t>(read2) * ch),
                            0,
-                           size_t(secondFrames - read2) * sizeof(int32_t) * inChCount);
+                           size_t(secondFrames - read2) * sizeof(int32_t) * ch);
                 }
             } else {
                 memset(pcmSecond, 0, secondBytes);
@@ -185,7 +188,12 @@ kern_return_t HandleWriteEnd(AudioIOPathState& state,
 
     const uint32_t bufferFrames = state.ioBufferPeriodFrames;
     const uint32_t offsetFrames = static_cast<uint32_t>(sampleTime % bufferFrames);
-    const uint64_t offsetBytes = uint64_t(offsetFrames) * sizeof(int32_t) * state.channelCount;
+    const uint32_t ch = state.outputChannelCount;
+    if (ch == 0) {
+        return kIOReturnBadArgument;
+    }
+
+    const uint64_t offsetBytes = uint64_t(offsetFrames) * sizeof(int32_t) * ch;
     uint32_t firstFrames = ioBufferFrameSize;
     uint32_t secondFrames = 0;
     if ((offsetFrames + ioBufferFrameSize) > bufferFrames) {
@@ -261,8 +269,9 @@ kern_return_t HandleWriteEnd(AudioIOPathState& state,
 
 } // namespace detail
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 kern_return_t HandleIOOperation(AudioIOPathState& state,
-                                IOUserAudioIOOperation operation,
+                                IOUserAudioIOOperation operation, // NOLINT(bugprone-easily-swappable-parameters)
                                 uint32_t ioBufferFrameSize,
                                 uint64_t sampleTime) {
     switch (operation) {

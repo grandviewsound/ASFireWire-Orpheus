@@ -15,10 +15,10 @@ void SYTGenerator::initialize(double sampleRate, uint32_t framesPerPacket) noexc
     // Blocking mode:     8 frames/packet → 8 * 512 = 4096 ticks
     // Non-blocking mode: 6 frames/packet → 6 * 512 = 3072 ticks
     if (sampleRate == 48000.0) {
-        sytIntervalTicks_ = framesPerPacket * kTicksPerSample48k;
+        ticksPerSample_ = kTicksPerSample48k;
     } else {
         ASFW_LOG(Isoch, "SYTGenerator: Unsupported rate %.0f Hz, using 48kHz params", sampleRate);
-        sytIntervalTicks_ = framesPerPacket * kTicksPerSample48k;  // fallback
+        ticksPerSample_ = kTicksPerSample48k;
     }
 
     sytOffsetWrap_ = 16 * kTicksPerCycle;  // 49152
@@ -26,9 +26,10 @@ void SYTGenerator::initialize(double sampleRate, uint32_t framesPerPacket) noexc
     reset();
     initialized_ = true;
 
+    const uint32_t defaultIntervalTicks = 8u * ticksPerSample_;
     ASFW_LOG(Isoch, "SYTGenerator: Initialized cycle-based mode for %.0f Hz, "
-             "intervalTicks=%u wrapTicks=%u transferDelay=0x%x",
-             sampleRate, sytIntervalTicks_, sytOffsetWrap_, kTransferDelayTicks);
+             "ticksPerSample=%u defaultIntervalTicks(8)=%u wrapTicks=%u transferDelay=0x%x",
+             sampleRate, ticksPerSample_, defaultIntervalTicks, sytOffsetWrap_, kTransferDelayTicks);
 }
 
 void SYTGenerator::reset() noexcept {
@@ -37,8 +38,10 @@ void SYTGenerator::reset() noexcept {
     ASFW_LOG(Isoch, "SYTGenerator: Reset (cycle-based mode)");
 }
 
-uint16_t SYTGenerator::computeDataSYT(uint32_t transmitCycle) noexcept {
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+uint16_t SYTGenerator::computeDataSYT(uint32_t transmitCycle, uint32_t samplesInPacket) noexcept {
     if (!initialized_) return kNoInfo;
+    if (samplesInPacket == 0 || ticksPerSample_ == 0) return kNoInfo;
 
     // Total presentation offset = sample position offset + transfer delay
     uint32_t totalTicks = sytOffsetTicks_ + kTransferDelayTicks;
@@ -55,7 +58,8 @@ uint16_t SYTGenerator::computeDataSYT(uint32_t transmitCycle) noexcept {
         ((presentationCycle & 0xF) << 12) | (remainingTicks & 0xFFF));
 
     // Advance offset for next DATA packet
-    sytOffsetTicks_ += sytIntervalTicks_;
+    const uint32_t intervalTicks = samplesInPacket * ticksPerSample_;
+    sytOffsetTicks_ += intervalTicks;
     if (sytOffsetTicks_ >= sytOffsetWrap_) {
         sytOffsetTicks_ -= sytOffsetWrap_;
     }

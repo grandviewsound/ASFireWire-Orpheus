@@ -8,8 +8,8 @@ using namespace ASFW::Async::HW;
 
 namespace {
 constexpr uint32_t kMaxAudioQuadlets =
-    Encoding::kSamplesPerDataPacket * Encoding::kMaxSupportedChannels; // 8*16=128
-static_assert(kMaxAudioQuadlets <= (Tx::Layout::kAudioWriteAhead * Encoding::kMaxSupportedChannels),
+    Encoding::kSamplesPerDataPacket * Config::kMaxAmdtpDbs;
+static_assert(kMaxAudioQuadlets <= (Tx::Layout::kAudioWriteAhead * Config::kMaxAmdtpDbs),
               "TraceEntry audioHost buffer must be large enough");
 } // namespace
 
@@ -82,6 +82,7 @@ void IsochTxVerifier::Kick(const Inputs& inputs) noexcept {
 #endif
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 void IsochTxVerifier::CaptureBeforeOverwrite(uint32_t packetIndex,
                                              uint32_t hwPacketIndexCmdPtr,
                                              uint32_t cmdPtr,
@@ -240,9 +241,12 @@ void IsochTxVerifier::RunWork() noexcept {
         ++processed;
 
         const uint16_t expectedNoDataReq = static_cast<uint16_t>(Encoding::kCIPHeaderSize);
+        const uint32_t expectedAm824Slots = (inputs_.am824Slots != 0)
+            ? inputs_.am824Slots
+            : inputs_.pcmChannels;
         const uint16_t expectedDataReq = static_cast<uint16_t>(
             Encoding::kCIPHeaderSize +
-            inputs_.framesPerPacket * inputs_.wireDbs * sizeof(uint32_t));
+            static_cast<size_t>(inputs_.framesPerPacket) * expectedAm824Slots * sizeof(uint32_t));
 
         const bool isNoDataByReq = (e.reqCount == expectedNoDataReq);
         const bool isDataByReq = (e.reqCount > expectedNoDataReq);
@@ -271,9 +275,9 @@ void IsochTxVerifier::RunWork() noexcept {
         }
         if (isData && e.reqCount != expectedDataReq) {
             ASFW_LOG_RL(Isoch, "txverify/reqcount", 1000, OS_LOG_TYPE_DEFAULT,
-                        "IT TX VERIFY: unexpected DATA reqCount pkt=%u req=%u expected=%u (framesPerData=%u ch=%u)",
+                        "IT TX VERIFY: unexpected DATA reqCount pkt=%u req=%u expected=%u (framesPerData=%u pcm=%u dbs=%u)",
                         e.packetIndex, e.reqCount, expectedDataReq,
-                        inputs_.framesPerPacket, inputs_.wireDbs);
+                        inputs_.framesPerPacket, inputs_.pcmChannels, expectedAm824Slots);
             restartReasons |= IsochTxRecoveryController::kReasonCipAnomaly;
         }
 
@@ -301,10 +305,10 @@ void IsochTxVerifier::RunWork() noexcept {
                         e.packetIndex, cip.fdf, Encoding::kSFC_48kHz);
             restartReasons |= IsochTxRecoveryController::kReasonCipAnomaly;
         }
-        if (cip.dbs != inputs_.wireDbs) {
+        if (cip.dbs != expectedAm824Slots) {
             ASFW_LOG_RL(Isoch, "txverify/cip_dbs", 1000, OS_LOG_TYPE_DEFAULT,
                         "IT TX VERIFY: CIP DBS mismatch pkt=%u dbs=%u expected=%u",
-                        e.packetIndex, cip.dbs, inputs_.wireDbs);
+                        e.packetIndex, cip.dbs, expectedAm824Slots);
             restartReasons |= IsochTxRecoveryController::kReasonCipAnomaly;
         }
         if (isData && cip.syt == Encoding::kSYTNoData) {
@@ -346,6 +350,10 @@ void IsochTxVerifier::RunWork() noexcept {
 
         if (isData && e.audioQuadletCount > 0) {
             const uint32_t silenceHost = Encoding::AM824Encoder::encodeSilence();
+            const uint32_t slotsPerFrame = (expectedAm824Slots != 0) ? expectedAm824Slots : 1;
+            const uint32_t pcmSlots = (inputs_.pcmChannels < slotsPerFrame)
+                ? inputs_.pcmChannels
+                : slotsPerFrame;
             bool allSilence = true;
             bool sawAllZero = false;
             bool sawInvalidLabel = false;
@@ -355,12 +363,18 @@ void IsochTxVerifier::RunWork() noexcept {
 
             for (uint32_t i = 0; i < e.audioQuadletCount; ++i) {
                 const uint32_t q = e.audioHost[i];
+                const uint32_t slotInFrame = i % slotsPerFrame;
+                const bool isPcmSlot = slotInFrame < pcmSlots;
                 if (q == 0) {
                     sawAllZero = true;
                 }
-                // Fix 29: Accept both MBLA (0x40) and MIDI (0x80) labels as valid.
-                if (!ASFW::Isoch::TxVerify::HasValidAM824Label(q, Encoding::kAM824LabelMBLA) &&
-                    !ASFW::Isoch::TxVerify::HasValidAM824Label(q, Encoding::kAM824LabelMIDI)) {
+                uint8_t expectedLabel = Encoding::kAM824LabelMBLA;
+                if (!isPcmSlot) {
+                    const uint32_t midiSlotIndex = slotInFrame - pcmSlots;
+                    expectedLabel = static_cast<uint8_t>(
+                        Encoding::kAM824LabelMIDIConformantBase + (midiSlotIndex & 0x03u));
+                }
+                if (!ASFW::Isoch::TxVerify::HasValidAM824Label(q, expectedLabel)) {
                     if (!sawInvalidLabel) {
                         badLabel = ASFW::Isoch::TxVerify::AM824LabelByte(q);
                         badWord = q;
@@ -370,7 +384,7 @@ void IsochTxVerifier::RunWork() noexcept {
                         sawInvalidLabelNonZero = true;
                     }
                 }
-                if (q != silenceHost) {
+                if (isPcmSlot && q != silenceHost) {
                     allSilence = false;
                 }
             }

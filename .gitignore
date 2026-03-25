@@ -16,6 +16,9 @@ build-tests*/
 # .DS_Store
 .DS_Store
 
+# .env
+.env
+
 # Coverage report
 coverage_html/
 coverage.profdata
@@ -48,3 +51,9 @@ Plugins/VersionGeneratorPlugin
 
 .claude/
 opencode.json
+
+# Xcode per-user state
+**/xcuserdata/
+
+# Local Codex scratch builds
+build-codex/

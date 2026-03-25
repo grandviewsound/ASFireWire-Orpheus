@@ -27,6 +27,7 @@ namespace ASFW {
  * - ASFWEnableHexDumps (boolean): Force enable/disable packet dumps
  * - ASFWLogStatistics (boolean): Enable aggregate statistics logging
  * - ASFWEnableIsochTxVerifier (boolean): Enable dev-only IT TX verifier (expensive)
+ * - ASFWAutoStartAudioStreams (boolean): Enable/disable CoreAudio-driven stream auto-start
  *
  * Thread-safe singleton with runtime update support via user client.
  */
@@ -70,6 +71,9 @@ public:
      */
     uint8_t GetDiscoveryVerbosity() const;
     uint8_t GetConfigROMVerbosity() const;
+    uint8_t GetBusResetVerbosity() const { return GetControllerVerbosity(); }
+    uint8_t GetTopologyVerbosity() const { return GetDiscoveryVerbosity(); }
+    uint8_t GetBusManagerVerbosity() const { return GetControllerVerbosity(); }
 
     /**
      * @brief Get UserClient subsystem verbosity level (0-4)
@@ -117,6 +121,11 @@ public:
      */
     bool IsIsochTxVerifierEnabled() const;
 
+    /**
+     * @brief Check if CoreAudio-driven auto-start is enabled
+     */
+    bool IsAudioAutoStartEnabled() const;
+
     // ========================================================================
     // Runtime Setters (thread-safe, for user client control)
     // ========================================================================
@@ -142,6 +151,9 @@ public:
      */
     void SetDiscoveryVerbosity(uint8_t level);
     void SetConfigROMVerbosity(uint8_t level);
+    void SetBusResetVerbosity(uint8_t level) { SetControllerVerbosity(level); }
+    void SetTopologyVerbosity(uint8_t level) { SetDiscoveryVerbosity(level); }
+    void SetBusManagerVerbosity(uint8_t level) { SetControllerVerbosity(level); }
 
     /**
      * @brief Set UserClient verbosity at runtime
@@ -179,6 +191,11 @@ public:
      * @brief Enable or disable dev-only IT TX verifier at runtime
      */
     void SetIsochTxVerifierEnabled(bool enable);
+
+    /**
+     * @brief Enable or disable CoreAudio-driven auto-start at runtime
+     */
+    void SetAudioAutoStartEnabled(bool enable);
 
     /**
      * @brief Enable or disable statistics logging at runtime
@@ -223,6 +240,7 @@ private:
     std::atomic<uint8_t> isochVerbosity_;
     std::atomic<bool> enableHexDumps_;
     std::atomic<bool> isochTxVerifierEnabled_;
+    std::atomic<bool> audioAutoStartEnabled_;
     std::atomic<bool> logStatistics_;
     std::atomic<bool> initialized_;
 };

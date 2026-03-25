@@ -4,7 +4,7 @@
 
 #include <com.kevinpeters.ASFW.ASFWDriver/ASFWDriver.h>
 
-#include "../Async/AsyncSubsystem.hpp"
+#include "../Async/Interfaces/IAsyncSubsystemPort.hpp"
 #include "../Controller/ControllerCore.hpp"
 #include "../Diagnostics/StatusPublisher.hpp"
 #include "../Isoch/IsochReceiveContext.hpp"
@@ -66,7 +66,12 @@ kern_return_t WatchdogCoordinator::Prepare(::ASFWDriver& service,
 void WatchdogCoordinator::Stop() {
     if (timer_) {
         timer_->SetEnableWithCompletion(false, nullptr);
-        timer_->Cancel(nullptr);
+        // NOTE: Do NOT call Cancel(nullptr) here.
+        // Cancel() dispatches an async block on the work queue. If the timer
+        // is released (via Reset() → timer_.reset()) before that block executes,
+        // the block dereferences a freed object → SIGSEGV at 0x10 in Cancel_Impl.
+        // Disabling the timer is sufficient; the dispatch source is cleaned up
+        // when the shared pointer is released.
     }
 }
 
@@ -89,7 +94,7 @@ void WatchdogCoordinator::Schedule(uint64_t delayUsec) {
 }
 
 void WatchdogCoordinator::HandleTick(ControllerCore* controller,
-                                     ASFW::Async::AsyncSubsystem* asyncSubsystem,
+                                     ASFW::Async::IAsyncSubsystemPort* asyncSubsystem,
                                      ASFW::Isoch::IsochReceiveContext* isochReceiveContext,
                                      ASFW::Isoch::IsochTransmitContext* isochTransmitContext,
                                      StatusPublisher& statusPublisher) {
@@ -97,8 +102,7 @@ void WatchdogCoordinator::HandleTick(ControllerCore* controller,
         asyncSubsystem->OnTimeoutTick();
         const auto stats = asyncSubsystem->GetWatchdogStats();
         statusPublisher.UpdateAsyncWatchdog(static_cast<uint32_t>(stats.expiredTransactions),
-                                            stats.tickCount,
-                                            stats.lastTickUsec);
+                                            stats.tickCount, stats.lastTickUsec);
     }
 
     if (isochReceiveContext) {

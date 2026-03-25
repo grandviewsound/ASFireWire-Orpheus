@@ -1,7 +1,6 @@
 #include "IsochReceiveContext.hpp"
 
-#include <new>
-
+#include "../../Common/DriverKitUtils.hpp"
 #include "../../Hardware/OHCIConstants.hpp"
 #include "../../Hardware/RegisterMap.hpp"
 #include "../../Diagnostics/Signposts.hpp"
@@ -14,18 +13,15 @@ namespace ASFW::Isoch {
 
 OSSharedPtr<IsochReceiveContext> IsochReceiveContext::Create(::ASFW::Driver::HardwareInterface* hw,
                                                             std::shared_ptr<::ASFW::Isoch::Memory::IIsochDMAMemory> dmaMemory) {
-    IsochReceiveContext* rawCtx = new (std::nothrow) IsochReceiveContext();
-    if (!rawCtx) return nullptr;
+    auto ctx = ASFW::Common::MakeOSObject<IsochReceiveContext>();
+    if (!ctx) return nullptr;
 
-    rawCtx->hardware_ = hw;
-    rawCtx->dmaMemory_ = std::move(dmaMemory);
+    ctx->hardware_ = hw;
+    ctx->dmaMemory_ = std::move(dmaMemory);
 
-    if (!rawCtx->init()) {
-        rawCtx->release();
-        return nullptr;
-    }
+    if (!ctx->init()) return nullptr;  // OSSharedPtr destructor calls release()
 
-    return OSSharedPtr<IsochReceiveContext>(rawCtx, OSNoRetain);
+    return ctx;
 }
 
 // ============================================================================
@@ -57,6 +53,7 @@ IsochReceiveContext::Registers IsochReceiveContext::GetRegisters(uint8_t index) 
     };
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 kern_return_t IsochReceiveContext::Configure(uint8_t channel, uint8_t contextIndex) {
     if (!hardware_ || !dmaMemory_) {
         return kIOReturnNotReady;
@@ -72,7 +69,7 @@ kern_return_t IsochReceiveContext::Configure(uint8_t channel, uint8_t contextInd
 
     audio_.ConfigureFor48k();
 
-    return ring_.SetupRings(*dmaMemory_, kNumDescriptors, kMaxPacketSize);
+    return rxRing_.SetupRings(*dmaMemory_, kNumDescriptors, kMaxPacketSize);
 }
 
 // ============================================================================
@@ -92,7 +89,7 @@ kern_return_t IsochReceiveContext::Start() {
     const uint32_t contextMatch = 0xF0000000 | (channel_ & 0x3F);
     hardware_->Write(registers_.ContextMatch, contextMatch);
 
-    const uint32_t cmdPtr = ring_.InitialCommandPtrWord();
+    const uint32_t cmdPtr = rxRing_.InitialCommandPtrWord();
     if (cmdPtr == 0) {
         ASFW_LOG(Isoch, "❌ Start: Invalid descriptor cmdPtr");
         return kIOReturnInternalError;
@@ -125,7 +122,7 @@ kern_return_t IsochReceiveContext::Start() {
 
     Transition(IRPolicy::State::Running, 0, "Start");
 
-    ring_.ResetForStart();
+    rxRing_.ResetForStart();
     audio_.OnStart();
 
     rxLock_.clear(std::memory_order_release);
@@ -166,7 +163,7 @@ uint32_t IsochReceiveContext::Poll() {
 
     const uint64_t start = mach_absolute_time();
 
-    const uint32_t processed = ring_.DrainCompleted(*dmaMemory_, [&](const Rx::IsochRxDmaRing::CompletedPacket& pkt) {
+    const uint32_t processed = rxRing_.DrainCompleted(*dmaMemory_, [this](const Rx::IsochRxDmaRing::CompletedPacket& pkt) {
         if (pkt.payload) {
             audio_.OnPacket(pkt.payload, pkt.actualLength);
         }
@@ -197,9 +194,8 @@ void IsochReceiveContext::SetCallback(IsochReceiveCallback callback) {
 
 void IsochReceiveContext::LogHardwareState() {
 #if 0
-    // Keep disabled unless troubleshooting; should be reimplemented using ring_ accessors.
+    // Keep disabled unless troubleshooting; should be reimplemented using rxRing_ accessors.
 #endif
 }
 
 } // namespace ASFW::Isoch
-

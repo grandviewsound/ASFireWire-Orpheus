@@ -3,13 +3,16 @@
 #include "BeBoBProtocol.hpp"
 #include "BeBoBTypes.hpp"
 #include "../../../Logging/Logging.hpp"
+#include "../../Ports/FireWireBusPort.hpp"
 
 #include <array>
 
 namespace ASFW::Audio::BeBoB {
 
-BeBoBProtocol::BeBoBProtocol(Async::AsyncSubsystem& subsystem, uint16_t nodeId)
-    : mSubsystem(subsystem), mNodeId(nodeId)
+BeBoBProtocol::BeBoBProtocol(Protocols::Ports::FireWireBusOps& busOps,
+                             Protocols::Ports::FireWireBusInfo& busInfo,
+                             uint16_t nodeId)
+    : busOps_(busOps), busInfo_(busInfo), mNodeId(nodeId)
 {
     ASFW_LOG(Audio, "BeBoBProtocol: Created for Prism Sound Orpheus (node=0x%04x)", nodeId);
 }
@@ -98,18 +101,22 @@ void BeBoBProtocol::SendSetFormatCommand(uint8_t plugDir, uint8_t plugNum,
         midiChannels,                 // MIDI channel count
     }};
 
-    Async::WriteParams params;
-    params.destinationID = mNodeId;
-    params.addressHigh   = static_cast<uint32_t>((kFCPCommandAddress >> 32) & 0xFFFF);
-    params.addressLow    = static_cast<uint32_t>(kFCPCommandAddress & 0xFFFFFFFF);
-    params.payload       = cmd.data();
-    params.length        = cmdSize;
-    params.speedCode     = 0xFF;  // auto
+    const auto gen = busInfo_.GetGeneration();
+    const Async::FWAddress addr{
+        Async::FWAddress::AddressParts{
+            static_cast<uint16_t>((kFCPCommandAddress >> 32) & 0xFFFF),
+            static_cast<uint32_t>(kFCPCommandAddress & 0xFFFFFFFF)
+        }
+    };
 
-    // The AsyncSubsystem::Write() copies the payload into a DMA descriptor
-    // before returning, so cmd[] does not need to outlive this call.
-    mSubsystem.Write(params,
-        [this, plugDir, plugNum](Async::AsyncHandle, Async::AsyncStatus status,
+    // WriteBlock copies the payload into DMA-backed storage before returning,
+    // so cmd[] does not need to outlive this call.
+    busOps_.WriteBlock(gen,
+        FW::NodeId(mNodeId),
+        addr,
+        std::span<const uint8_t>{cmd.data(), cmdSize},
+        FW::FwSpeed::S400,
+        [this, plugDir, plugNum](Async::AsyncStatus status,
                                  std::span<const uint8_t>) {
             if (status != Async::AsyncStatus::kSuccess) {
                 ASFW_LOG(Audio,
@@ -124,7 +131,7 @@ void BeBoBProtocol::SendSetFormatCommand(uint8_t plugDir, uint8_t plugNum,
                 if (plugDir == kPlugDirInput) {
                     mFormatDone_ = true;
                     ASFW_LOG(Audio,
-                        "BeBoBProtocol: SetFormat complete — BeBoB bus reset expected");
+                        "BeBoBProtocol: SetFormat complete - BeBoB bus reset expected");
                 }
             }
         });

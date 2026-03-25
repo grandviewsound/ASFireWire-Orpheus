@@ -85,7 +85,8 @@ public:
     kern_return_t Configure(uint8_t channel,
                             uint8_t sid,
                             uint32_t streamModeRaw = 0,
-                            uint32_t requestedChannels = 0) noexcept;
+                            uint32_t requestedChannels = 0,
+                            uint32_t requestedAm824Slots = 0) noexcept;
     kern_return_t Start() noexcept;
     void Stop() noexcept;
     
@@ -118,7 +119,6 @@ public:
     
     void LogStatistics() const noexcept;
     void DumpPayloadBuffers(uint32_t numPackets = 4) const noexcept;
-    void PrimeOnly() noexcept;
     void DumpDescriptorRing(uint32_t startPacket = 0, uint32_t numPackets = 8) const noexcept;
 
 private:

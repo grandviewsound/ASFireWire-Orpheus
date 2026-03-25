@@ -15,16 +15,17 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include "IAVCDiscovery.hpp"
 #include "AVCUnit.hpp"
+#include "../Ports/FireWireBusPort.hpp"
 #include "../../Discovery/IDeviceManager.hpp"
 #include "../../Discovery/FWUnit.hpp"
 #include "../../Discovery/FWDevice.hpp"
-#include "../../Async/AsyncSubsystem.hpp"
+#include "../../Audio/IAVCAudioConfigListener.hpp"
 #include "../Audio/Oxford/Apogee/ApogeeTypes.hpp"
 
 // Forward declarations
-class ASFWAudioNub;
 namespace ASFW::Discovery { struct DeviceRecord; }
 namespace ASFW::Audio::Model { struct ASFWAudioDevice; }
 
@@ -40,7 +41,9 @@ class AVCDiscovery : public Discovery::IUnitObserver,
 public:
     AVCDiscovery(IOService* driver,
                  Discovery::IDeviceManager& deviceManager,
-                 Async::AsyncSubsystem& asyncSubsystem);
+                 Protocols::Ports::FireWireBusOps& busOps,
+                 Protocols::Ports::FireWireBusInfo& busInfo,
+                 ASFW::Audio::IAVCAudioConfigListener* audioConfigListener);
 
     ~AVCDiscovery() override;
 
@@ -70,16 +73,15 @@ public:
 
     void SetTransmitRingBufferOnNubs(void* ringBuffer);
 
-    ASFWAudioNub* GetFirstAudioNub();
-
     // Optional callback invoked when a previously-suspended device resumes
     // (e.g. after a BeBoB bus reset). Called from the DeviceManager observer
-    // notification — must not block.
+    // notification -- must not block.
     void SetDeviceResumedCallback(
         std::function<void(std::shared_ptr<Discovery::FWDevice>)> cb);
 
-    // Create audio nub from hardcoded profile for known non-AV/C bring-up.
+    // Create audio config from hardcoded profile for known non-AV/C bring-up.
     void EnsureHardcodedAudioNubForDevice(const Discovery::DeviceRecord& deviceRecord);
+
 
 private:
     struct DuetPrefetchState {
@@ -100,9 +102,6 @@ private:
     void RebuildNodeIDMap();
 
     void HandleInitializedUnit(uint64_t guid, const std::shared_ptr<AVCUnit>& avcUnit);
-    bool CreateAudioNubFromModel(uint64_t guid,
-                                 const Audio::Model::ASFWAudioDevice& config,
-                                 const char* sourceTag);
     void PrefetchDuetStateAndCreateNub(uint64_t guid,
                                        const std::shared_ptr<AVCUnit>& avcUnit,
                                        const Audio::Model::ASFWAudioDevice& config);
@@ -110,15 +109,15 @@ private:
 
     IOService* driver_{nullptr};
     Discovery::IDeviceManager& deviceManager_;
-    Async::AsyncSubsystem& asyncSubsystem_;
+    Protocols::Ports::FireWireBusOps& busOps_;
+    Protocols::Ports::FireWireBusInfo& busInfo_;
+    ASFW::Audio::IAVCAudioConfigListener* audioConfigListener_{nullptr};
 
     IOLock* lock_{nullptr};
 
     std::unordered_map<uint64_t, std::shared_ptr<AVCUnit>> units_;
 
     std::unordered_map<uint16_t, FCPTransport*> fcpTransportsByNodeID_;
-
-    std::unordered_map<uint64_t, ASFWAudioNub*> audioNubs_;
     std::unordered_map<uint64_t, uint8_t> rescanAttempts_;
     std::unordered_map<uint64_t, DuetPrefetchState> duetPrefetchByGuid_;
 

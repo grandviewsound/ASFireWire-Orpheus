@@ -24,7 +24,9 @@ public:
 
     [[nodiscard]] kern_return_t AllocateAndInitialize(Memory::IIsochDMAMemory& dmaMemory) noexcept;
 
-    [[nodiscard]] bool IsValid() const noexcept { return descRegion_.virtualBase != nullptr; }
+    [[nodiscard]] bool IsValid() const noexcept {
+        return descRegion_.virtualBase != nullptr && bufRegion_.virtualBase != nullptr;
+    }
 
     void DebugFillDescriptorSlab(uint8_t pattern) noexcept {
         if (!descRegion_.virtualBase || descRegion_.size == 0) return;
@@ -50,13 +52,15 @@ public:
 
     [[nodiscard]] uint8_t* PayloadPtr(uint32_t packetIndex) noexcept {
         return bufRegion_.virtualBase
-            ? (reinterpret_cast<uint8_t*>(bufRegion_.virtualBase) + (packetIndex * Layout::kMaxPacketSize))
+            ? (reinterpret_cast<uint8_t*>(bufRegion_.virtualBase) +
+               (static_cast<size_t>(packetIndex) * Layout::kMaxPacketSize))
             : nullptr;
     }
 
     [[nodiscard]] const uint8_t* PayloadPtr(uint32_t packetIndex) const noexcept {
         return bufRegion_.virtualBase
-            ? (reinterpret_cast<const uint8_t*>(bufRegion_.virtualBase) + (packetIndex * Layout::kMaxPacketSize))
+            ? (reinterpret_cast<const uint8_t*>(bufRegion_.virtualBase) +
+               (static_cast<size_t>(packetIndex) * Layout::kMaxPacketSize))
             : nullptr;
     }
 
@@ -80,4 +84,3 @@ private:
 };
 
 } // namespace ASFW::Isoch::Tx
-

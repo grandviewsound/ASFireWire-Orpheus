@@ -42,7 +42,7 @@ struct IRPolicy {
 };
 
 struct IRTag {
-    static constexpr std::string_view kContextName = "IsochReceiveContext";
+    static constexpr const char kContextName[] = "IsochReceiveContext";
 };
 
 class IsochReceiveContext : public OSObject,
@@ -99,7 +99,7 @@ private:
 
     ::ASFW::Shared::DescriptorRing descriptorRing_{};
 
-    Rx::IsochRxDmaRing ring_{};
+    Rx::IsochRxDmaRing rxRing_{};
     Rx::IsochAudioRxPipeline audio_{};
 
     IsochReceiveCallback callback_{nullptr};
@@ -109,4 +109,3 @@ private:
 };
 
 } // namespace ASFW::Isoch
-
