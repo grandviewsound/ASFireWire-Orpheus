@@ -146,7 +146,7 @@ void CMPClient::ReadOPCR(uint8_t plugNum, PCRReadCallback callback) {
     ReadPCRQuadlet(PCRRegisters::GetOPCRAddress(plugNum), callback);
 }
 
-void CMPClient::ConnectOPCR(uint8_t plugNum, uint8_t channel, CMPCallback callback) {
+void CMPClient::ConnectOPCR(uint8_t plugNum, uint8_t channel, uint8_t speed, CMPCallback callback) {
     if (plugNum > 30) {
         ASFW_LOG(CMP, "CMPClient: Invalid oPCR plug number %u", plugNum);
         callback(CMPStatus::Failed);
@@ -158,8 +158,12 @@ void CMPClient::ConnectOPCR(uint8_t plugNum, uint8_t channel, CMPCallback callba
         return;
     }
 
-    ASFW_LOG(CMP, "CMPClient: Connecting oPCR[%u] on channel %u", plugNum, channel);
-    PerformConnect(PCRRegisters::GetOPCRAddress(plugNum), plugNum, channel, callback);
+    ASFW_LOG(CMP, "CMPClient: Connecting oPCR[%u] on channel %u speed %u", plugNum, channel, speed);
+    PerformConnect(PCRRegisters::GetOPCRAddress(plugNum),
+                   plugNum,
+                   channel,
+                   speed,
+                   callback);
 }
 
 void CMPClient::DisconnectOPCR(uint8_t plugNum, CMPCallback callback) {
@@ -187,7 +191,7 @@ void CMPClient::ReadIPCR(uint8_t plugNum, PCRReadCallback callback) {
     ReadPCRQuadlet(PCRRegisters::GetIPCRAddress(plugNum), callback);
 }
 
-void CMPClient::ConnectIPCR(uint8_t plugNum, uint8_t channel, CMPCallback callback) {
+void CMPClient::ConnectIPCR(uint8_t plugNum, uint8_t channel, uint8_t speed, CMPCallback callback) {
     if (plugNum > 30) {
         ASFW_LOG(CMP, "CMPClient: Invalid iPCR plug number %u", plugNum);
         callback(CMPStatus::Failed);
@@ -198,9 +202,18 @@ void CMPClient::ConnectIPCR(uint8_t plugNum, uint8_t channel, CMPCallback callba
         callback(CMPStatus::Failed);
         return;
     }
-    
-    ASFW_LOG(CMP, "CMPClient: Connecting iPCR[%u] on channel %u", plugNum, channel);
-    PerformConnect(PCRRegisters::GetIPCRAddress(plugNum), plugNum, channel, callback);
+
+    ASFW_LOG(CMP,
+             "CMPClient: Connecting iPCR[%u] on channel %u (speed %u ignored; iPCR speed bits are device-owned)",
+             plugNum,
+             channel,
+             speed);
+    (void)speed;
+    PerformConnect(PCRRegisters::GetIPCRAddress(plugNum),
+                   plugNum,
+                   channel,
+                   std::nullopt,
+                   callback);
 }
 
 void CMPClient::DisconnectIPCR(uint8_t plugNum, CMPCallback callback) {
@@ -218,46 +231,107 @@ void CMPClient::DisconnectIPCR(uint8_t plugNum, CMPCallback callback) {
 // Private Implementation
 // ============================================================================
 
+// Apr 13 2026: Split into TWO compare-swap operations per direction to match
+// Apple's dtrace: AppleFWAudio/AM824AVC fires `cmpNewPointToPointConnection`
+// twice per plug bring-up. Stage A programs channel + speed with p2p UNCHANGED;
+// stage B bumps p2p N→N+1. This sequencing gives the device firmware a
+// quiescent window to latch channel/speed before the p2p edge that activates
+// the connection — doing both in one CAS was wire-valid but didn't match the
+// ordering the Orpheus firmware expects.
 void CMPClient::PerformConnect(uint32_t pcrAddress, uint8_t plugNum,
-                                std::optional<uint8_t> setChannel, CMPCallback callback) {
-    // Step 1: Read current PCR value
-    ReadPCRQuadlet(pcrAddress, [this, pcrAddress, plugNum, setChannel, callback](bool success, uint32_t current) {
+                                std::optional<uint8_t> setChannel,
+                                std::optional<uint8_t> setSpeed,
+                                CMPCallback callback) {
+    // Stage A: Read → set channel/speed (p2p unchanged) → CAS
+    ReadPCRQuadlet(pcrAddress, [this, pcrAddress, plugNum, setChannel, setSpeed, callback](bool success, uint32_t current) {
         if (!success) {
-            ASFW_LOG(CMP, "CMPClient: Connect failed - cannot read PCR 0x%08X", pcrAddress);
+            ASFW_LOG(CMP, "CMPClient: Connect failed - cannot read PCR 0x%08X (stage A)", pcrAddress);
             callback(CMPStatus::Failed);
             return;
         }
-        
-        // Step 2: Verify plug is online
+
         if (!PCRBits::IsOnline(current)) {
             ASFW_LOG(CMP, "CMPClient: Connect failed - plug %u not online (PCR=0x%08X)",
                      plugNum, current);
             callback(CMPStatus::Failed);
             return;
         }
-        
-        // Step 3: Check p2p count
+
         uint8_t p2p = PCRBits::GetP2P(current);
         if (p2p >= 3) {
             ASFW_LOG(CMP, "CMPClient: Connect failed - p2p count already max (%u)", p2p);
             callback(CMPStatus::NoResources);
             return;
         }
-        
-        // Step 4: Compute new value (increment p2p, optionally set channel)
-        uint32_t newVal = PCRBits::SetP2P(current, p2p + 1);
-        
-        if (setChannel.has_value()) {
-            // Set channel for iPCR connection
-            newVal = (newVal & ~PCRBits::kChannelMask) |
-                     (static_cast<uint32_t>(*setChannel) << PCRBits::kChannelShift);
+
+        // Stage A new value: preserve p2p, set channel/speed.
+        // Per Linux kernel sound/firewire/cmp.c: speed is set in oPCR but NOT
+        // in iPCR (iPCR speed is device-determined).
+        uint32_t stageAVal = current;
+        if (setSpeed.has_value()) {
+            stageAVal = PCRBits::SetSpeed(stageAVal, *setSpeed);
         }
-        
-        ASFW_LOG(CMP, "CMPClient: Connect PCR 0x%08X: p2p %u→%u (0x%08X → 0x%08X)",
-                 pcrAddress, p2p, p2p + 1, current, newVal);
-        
-        // Step 5: Lock-compare-swap
-        CompareSwapPCR(pcrAddress, current, newVal, callback);
+        if (setChannel.has_value()) {
+            stageAVal = PCRBits::SetChannel(stageAVal, *setChannel);
+        }
+
+        if (stageAVal == current) {
+            // Nothing to program in stage A (no channel/speed change requested).
+            // Skip straight to stage B.
+            ASFW_LOG(CMP, "CMPClient: Connect PCR 0x%08X stage A skipped (no change), proceeding to stage B",
+                     pcrAddress);
+            PerformConnectStageB(pcrAddress, plugNum, callback);
+            return;
+        }
+
+        const char* stageALabel = setSpeed.has_value() ? "program channel/speed"
+                                                       : "program channel";
+        ASFW_LOG(CMP, "CMPClient: Connect PCR 0x%08X stage A: %s (0x%08X → 0x%08X)",
+                 pcrAddress, stageALabel, current, stageAVal);
+
+        CompareSwapPCR(pcrAddress, current, stageAVal,
+                       [this, pcrAddress, plugNum, callback](CMPStatus status) {
+            if (status != CMPStatus::Success) {
+                ASFW_LOG(CMP, "CMPClient: Connect PCR 0x%08X stage A CAS failed (%d)",
+                         pcrAddress, static_cast<int>(status));
+                callback(status);
+                return;
+            }
+            // Stage B: bump p2p N→N+1
+            PerformConnectStageB(pcrAddress, plugNum, callback);
+        });
+    });
+}
+
+void CMPClient::PerformConnectStageB(uint32_t pcrAddress, uint8_t plugNum,
+                                      CMPCallback callback) {
+    ReadPCRQuadlet(pcrAddress, [this, pcrAddress, plugNum, callback](bool success, uint32_t current) {
+        if (!success) {
+            ASFW_LOG(CMP, "CMPClient: Connect failed - cannot read PCR 0x%08X (stage B)", pcrAddress);
+            callback(CMPStatus::Failed);
+            return;
+        }
+
+        if (!PCRBits::IsOnline(current)) {
+            ASFW_LOG(CMP, "CMPClient: Connect failed - plug %u offline between stages (PCR=0x%08X)",
+                     plugNum, current);
+            callback(CMPStatus::Failed);
+            return;
+        }
+
+        uint8_t p2p = PCRBits::GetP2P(current);
+        if (p2p >= 3) {
+            ASFW_LOG(CMP, "CMPClient: Connect failed - p2p hit max between stages (%u)", p2p);
+            callback(CMPStatus::NoResources);
+            return;
+        }
+
+        uint32_t stageBVal = PCRBits::SetP2P(current, p2p + 1);
+
+        ASFW_LOG(CMP, "CMPClient: Connect PCR 0x%08X stage B: p2p %u→%u (0x%08X → 0x%08X)",
+                 pcrAddress, p2p, p2p + 1, current, stageBVal);
+
+        CompareSwapPCR(pcrAddress, current, stageBVal, callback);
     });
 }
 

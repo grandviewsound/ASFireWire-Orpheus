@@ -88,10 +88,13 @@ IsochTxDmaRing::PrimeStats IsochTxDmaRing::Prime(IIsochTxPacketProvider& provide
         const uint32_t isochHeaderQ0 = BuildIsochHeaderQ0(channel_);
 
         auto* immDesc = reinterpret_cast<OHCIDescriptorImmediate*>(slab_.GetDescriptorPtr(descBase));
-        // Fix #28: reqCount=4 (isoch header only). Previously reqCount=8 injected
-        // 4 garbage bytes (isochHeaderQ1) before the CIP payload, shifting
-        // CIP Q0/Q1 by one quadlet so the device could never parse them.
-        immDesc->common.control = (0x0200u << 16) | 4;
+        // Fix #34a: reqCount=0 (no payload from immediate data). The isoch header
+        // at immediateData[0] is ALWAYS read by OHCI regardless of reqCount.
+        // reqCount specifies ADDITIONAL payload bytes from the immediate area —
+        // it does NOT include the 4-byte isoch header. Previous reqCount=4 injected
+        // 4 zero bytes (from immediateData[1]) before the CIP payload in the OL
+        // buffer, shifting CIP Q0/Q1 by one quadlet so the device parsed garbage.
+        immDesc->common.control = (0x0200u << 16) | 0;
         immDesc->common.dataAddress = 0;
         immDesc->common.branchWord = (nextBlockIOVA & 0xFFFFFFF0u) | Layout::kBlocksPerPacket;
         immDesc->common.statusWord = 0;
@@ -278,9 +281,9 @@ IsochTxDmaRing::RefillOutcome IsochTxDmaRing::Refill(Driver::HardwareInterface& 
             lastDesc->dataAddress = payloadIOVA;
             lastDesc->statusWord = 0;
 
-            // Fix #28: No isochHeaderQ1 update needed — reqCount=4 means only
-            // the isoch header (immediateData[0]) is sent from OMI. The CIP payload
-            // starts entirely from the OUTPUT_LAST data buffer.
+            // No isochHeaderQ1 update needed — reqCount=0 means only
+            // the isoch header (immediateData[0]) is sent from OMI (Fix #34a).
+            // The CIP payload starts entirely from the OUTPUT_LAST data buffer.
 
             out.packetsFilled++;
             if (pkt.isData) {

@@ -359,6 +359,20 @@ std::optional<FilledBufferInfo> ARContextBase<Derived, Tag>::Dequeue() noexcept 
     // the correct DSB barrier for device memory access
     std::optional<FilledBufferInfo> result = bufferRing_->Dequeue();
 
+    // Fix64b: if BufferRing's auto-recycle path fired (hardware advanced past
+    // a previous buffer, descriptor was reset and republished), we must write
+    // the OHCI ContextControl WAKE bit. Without this, the controller can stay
+    // paused at a buffer boundary and silently drop subsequent packets.
+    // Mirrors what Recycle() does for the empty-buffer edge case; here we cover
+    // the normal data path which RxPath intentionally never recycles.
+    if (result && result->autoRecycledPrev) {
+        Driver::WriteBarrier();
+        this->WriteControlSet(kContextControlWakeBit);
+        ASFW_LOG_V0(Async,
+                    "♻️  %{public}s: Wrote WAKE bit after auto-recycle (head→%zu)",
+                    this->ContextNameCString(), result->descriptorIndex);
+    }
+
     IOLockUnlock(lock_);
 
     return result;

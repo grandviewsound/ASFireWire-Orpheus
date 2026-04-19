@@ -39,6 +39,14 @@ void AudioCoordinator::SetCMPClient(ASFW::CMP::CMPClient* client) noexcept {
     avc_.SetCMPClient(client);
 }
 
+void AudioCoordinator::SetIRMClient(ASFW::IRM::IRMClient* client) noexcept {
+    avc_.SetIRMClient(client);
+}
+
+void AudioCoordinator::SetAVCDiscovery(ASFW::Protocols::AVC::IAVCDiscovery* discovery) noexcept {
+    avc_.SetAVCDiscovery(discovery);
+}
+
 void AudioCoordinator::OnDeviceAdded(std::shared_ptr<Discovery::FWDevice> device) {
     if (!device) return;
     dice_.OnDeviceRecordUpdated(device->GetGUID());

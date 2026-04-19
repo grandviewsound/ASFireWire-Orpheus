@@ -68,7 +68,7 @@ kern_return_t IsochService::StartReceive(uint8_t channel,
             rxQueue_.Reset();
             return kIOReturnNoMemory;
         }
-        ASFW_LOG(Controller, "[Isoch] ✅ provisioned Isoch Context with Dedicated Memory");
+        ASFW_LOG(Controller, "[Isoch] ✅ provisioned IR Context with Dedicated Memory");
     }
 
     isochReceiveContext_->SetExternalSyncBridge(&externalSyncBridge_);
@@ -366,7 +366,7 @@ void IsochService::ReconnectOPCR(ASFW::CMP::CMPClient* cmpClient) {
     const uint8_t ch = irChannel_;
     ASFW_LOG(Controller, "[Isoch] Reconnecting CMP oPCR on channel %u after device resume", ch);
     cmpClient->DisconnectOPCR(0, [cmpClient, ch](ASFW::CMP::CMPStatus) {
-        cmpClient->ConnectOPCR(0, ch, [](ASFW::CMP::CMPStatus status) {
+        cmpClient->ConnectOPCR(0, ch, 2 /*S400*/, [](ASFW::CMP::CMPStatus status) {
             if (status == ASFW::CMP::CMPStatus::Success) {
                 ASFW_LOG(Controller, "[Isoch] ✅ CMP oPCR reconnected after device resume");
             } else {
@@ -384,7 +384,7 @@ void IsochService::ReconnectIPCR(ASFW::CMP::CMPClient* cmpClient) {
     const uint8_t ch = itChannel_;
     ASFW_LOG(Controller, "[Isoch] Reconnecting CMP iPCR on channel %u after device resume", ch);
     cmpClient->DisconnectIPCR(0, [cmpClient, ch](ASFW::CMP::CMPStatus) {
-        cmpClient->ConnectIPCR(0, ch, [](ASFW::CMP::CMPStatus status) {
+        cmpClient->ConnectIPCR(0, ch, 2 /*S400*/, [](ASFW::CMP::CMPStatus status) {
             if (status == ASFW::CMP::CMPStatus::Success) {
                 ASFW_LOG(Controller, "[Isoch] ✅ CMP iPCR reconnected after device resume");
             } else {

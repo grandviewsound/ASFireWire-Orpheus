@@ -76,6 +76,8 @@ target_compile_definitions(ASFWPacketTests
 
 target_include_directories(ASFWPacketTests PRIVATE ${ASFW_COMMON_INCLUDES})
 
+gtest_discover_tests(ASFWPacketTests)
+
 # TLabel Matching Tests - Critical bug fix verification
 add_executable(TLabelMatchingTests
     "${ASFW_TESTS_DIR}/TLabelMatchingTests.cpp"
@@ -492,6 +494,26 @@ target_include_directories(PacketFieldExtractionTests PRIVATE ${ASFW_COMMON_INCL
 
 gtest_discover_tests(PacketFieldExtractionTests)
 
+add_executable(FCPTransportResponseMatchingTests
+    "${ASFW_TESTS_DIR}/FCPTransportResponseMatchingTests.cpp"
+    "${ASFW_DRIVER_DIR}/Protocols/AVC/FCPTransport.cpp"
+    "${ASFW_TESTS_DIR}/LoggingStubs.cpp"
+)
+
+target_link_libraries(FCPTransportResponseMatchingTests
+    PRIVATE
+        GTest::gtest_main
+)
+
+target_compile_definitions(FCPTransportResponseMatchingTests
+    PRIVATE
+        ASFW_HOST_TEST
+)
+
+target_include_directories(FCPTransportResponseMatchingTests PRIVATE ${ASFW_COMMON_INCLUDES})
+
+gtest_discover_tests(FCPTransportResponseMatchingTests)
+
 # Music Subunit Identifier Parser Tests
 add_executable(MusicSubunitIdentifierParserTests
     "${ASFW_TESTS_DIR}/MusicSubunitIdentifierParserTests.cpp"
@@ -504,6 +526,7 @@ add_executable(MusicSubunitIdentifierParserTests
     "${ASFW_DRIVER_DIR}/Protocols/AVC/Descriptors/AVCInfoBlock.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/StreamFormats/StreamFormatParser.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/AVCUnit.cpp"
+    "${ASFW_DRIVER_DIR}/Protocols/AVC/AppleDiscoverySequence.cpp"
     "${ASFW_DRIVER_DIR}/Async/Track/LabelAllocator.cpp"
     "${ASFW_DRIVER_DIR}/Bus/GenerationTracker.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/Audio/AudioSubunit.cpp"
@@ -660,6 +683,7 @@ add_executable(MusicSubunitTests
     "${ASFW_TESTS_DIR}/MusicSubunitTests.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/Music/MusicSubunit.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/AVCUnit.cpp"
+    "${ASFW_DRIVER_DIR}/Protocols/AVC/AppleDiscoverySequence.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/Descriptors/DescriptorAccessor.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/Descriptors/AVCInfoBlock.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/StreamFormats/StreamFormatParser.cpp"
@@ -762,6 +786,7 @@ add_executable(AVCHandlerTests
     "${ASFW_TESTS_DIR}/AVCHandlerTests.cpp"
     "${ASFW_DRIVER_DIR}/UserClient/Handlers/AVCHandler.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/AVCUnit.cpp"
+    "${ASFW_DRIVER_DIR}/Protocols/AVC/AppleDiscoverySequence.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/Music/MusicSubunit.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/Audio/AudioSubunit.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/Camera/CameraSubunit.cpp"
@@ -800,6 +825,7 @@ add_executable(AVCCapabilitiesSerializerTests
     "${ASFW_TESTS_DIR}/AVCCapabilitiesSerializerTests.cpp"
     "${ASFW_DRIVER_DIR}/UserClient/Handlers/AVCHandler.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/AVCUnit.cpp"
+    "${ASFW_DRIVER_DIR}/Protocols/AVC/AppleDiscoverySequence.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/Descriptors/AVCInfoBlock.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/Music/MusicSubunit.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/Audio/AudioSubunit.cpp"

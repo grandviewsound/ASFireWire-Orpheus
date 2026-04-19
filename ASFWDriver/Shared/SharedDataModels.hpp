@@ -129,6 +129,8 @@ struct AVCMusicCapabilitiesWire {
     //       Each SignalBlockWire followed by ChannelDetailWire[numChannelDetails]
 } __attribute__((packed));
 
+static_assert(sizeof(AVCMusicCapabilitiesWire) == 18, "AVCMusicCapabilitiesWire must be 18 bytes");
+
 } // namespace Shared
 
 // -----------------------------------------------------------------------------

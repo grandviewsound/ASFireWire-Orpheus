@@ -39,6 +39,8 @@ public:
     AudioCoordinator& operator=(const AudioCoordinator&) = delete;
 
     void SetCMPClient(ASFW::CMP::CMPClient* client) noexcept;
+    void SetIRMClient(ASFW::IRM::IRMClient* client) noexcept;
+    void SetAVCDiscovery(ASFW::Protocols::AVC::IAVCDiscovery* discovery) noexcept;
 
     // IDeviceObserver
     void OnDeviceAdded(std::shared_ptr<Discovery::FWDevice> device) override;

@@ -112,7 +112,7 @@ private:
     };
 
     ASFW::Isoch::Core::ExternalSyncBridge externalSyncBridge_{};
-    OSSharedPtr<ASFW::Isoch::IsochReceiveContext> isochReceiveContext_;
+    std::unique_ptr<ASFW::Isoch::IsochReceiveContext> isochReceiveContext_;
     std::unique_ptr<ASFW::Isoch::IsochTransmitContext> isochTransmitContext_;
     uint8_t irChannel_{0xFF};  // channel passed to StartReceive; 0xFF = not started
     uint8_t itChannel_{0xFF};  // channel passed to StartTransmit; 0xFF = not started

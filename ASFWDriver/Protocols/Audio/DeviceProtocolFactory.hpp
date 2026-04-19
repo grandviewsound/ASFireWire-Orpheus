@@ -44,7 +44,7 @@ public:
             return DeviceIntegrationMode::kAVCDriven;
         }
         if (vendorId == kPrismSoundVendorId && modelId == kOrpheusModelId) {
-            return DeviceIntegrationMode::kHardcodedNub;
+            return DeviceIntegrationMode::kAVCDriven;
         }
         return DeviceIntegrationMode::kNone;
     }

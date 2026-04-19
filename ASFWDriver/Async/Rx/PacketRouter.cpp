@@ -79,6 +79,26 @@ void PacketRouter::RoutePacket(ARContextType contextType, std::span<const uint8_
             view.tLabel   = 0;
         }
 
+        // FCP diagnostic: log every AR Request packet so we can see if block writes arrive
+        if (contextType == ARContextType::Request && tCode != 0xE /* skip PHY */) {
+            uint64_t destOff = 0;
+            if (headerLen >= 16) {
+                // Extract dest offset inline (same logic as PacketHelpers.hpp)
+                uint64_t oh_lo = view.header[4];
+                uint64_t oh_hi = view.header[5] & 0x0F;
+                uint64_t oh12 = (oh_hi << 8) | oh_lo;
+                if (oh12 & 0x800) oh12 |= 0xF000;
+                uint64_t ol = (static_cast<uint64_t>(view.header[11]) << 24) |
+                              (static_cast<uint64_t>(view.header[10]) << 16) |
+                              (static_cast<uint64_t>(view.header[9]) << 8) |
+                              static_cast<uint64_t>(view.header[8]);
+                destOff = (oh12 << 32) | ol;
+            }
+            ASFW_LOG(Async,
+                     "📨 AR Request packet: tCode=0x%x src=0x%04x dest=0x%04x destOff=0x%012llx payload=%zu",
+                     tCode, view.sourceID, view.destID, destOff, view.payload.size());
+        }
+
         if (tCode < 16 && handlers[tCode]) {
             const ResponseCode rcode = handlers[tCode](view);
 

@@ -89,6 +89,12 @@ public:
     const std::optional<std::vector<uint8_t>>& GetStatusDescriptorData() const {
         return statusDescriptorData_;
     }
+
+    /// Populate from AppleDiscoverySequence results (synchronous path).
+    /// Takes the raw status descriptor data from Phase 4 and parses it
+    /// via ParseDescriptorBlock, the same code path used by the async flow.
+    void LoadFromDiscovery(uint8_t destPlugs, uint8_t srcPlugs,
+                           const std::vector<uint8_t>& descriptorData);
     
     /// Individual channel info from MusicPlugInfo (0x810B) blocks
     /// These provide per-channel names like "Analog Out 1", "Analog In 2"

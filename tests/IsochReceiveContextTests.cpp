@@ -54,7 +54,7 @@ protected:
 
     ::ASFW::Driver::HardwareInterface* hardware_{nullptr};
     std::shared_ptr<IIsochDMAMemory> dmaMemory_;
-    OSSharedPtr<IsochReceiveContext> context_;
+    std::unique_ptr<IsochReceiveContext> context_;
 };
 
 TEST_F(IsochReceiveContextTest, Initialization) {

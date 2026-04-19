@@ -28,8 +28,8 @@ class MetricsViewModel: ObservableObject {
     }
     
     func startPolling() {
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            Task { @MainActor [weak self] in
                 self?.fetchMetrics()
             }
         }
@@ -321,7 +321,6 @@ struct PacketTypePie: View {
     var body: some View {
         let total = max(1, dataPackets + emptyPackets)
         let dataRatio = Double(dataPackets) / Double(total)
-        let emptyRatio = Double(emptyPackets) / Double(total)
         
         VStack {
             ZStack {

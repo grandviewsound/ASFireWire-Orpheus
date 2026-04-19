@@ -120,6 +120,44 @@ void AudioSubunit::QueryPlugFormats(AVCUnit& unit, size_t plugIndex, bool isInpu
     });
 }
 
+//==============================================================================
+// LoadFromDiscovery — populate from AppleDiscoverySequence results
+//==============================================================================
+
+void AudioSubunit::LoadFromDiscovery(uint8_t destPlugs, uint8_t srcPlugs,
+                                      const std::vector<uint8_t>& descriptorData) {
+    ASFW_LOG_INFO(Discovery,
+                  "AudioSubunit: LoadFromDiscovery dest=%u src=%u descriptorLen=%zu",
+                  destPlugs, srcPlugs, descriptorData.size());
+
+    // Populate base-class plug counts so AVCUnit wire serialization and UI see them.
+    SetPlugCounts({.dest = destPlugs, .src = srcPlugs});
+
+    numInputPlugs_ = destPlugs;
+    numOutputPlugs_ = srcPlugs;
+
+    inputPlugs_.clear();
+    inputPlugs_.resize(numInputPlugs_);
+    for (size_t i = 0; i < numInputPlugs_; ++i) {
+        inputPlugs_[i].plugNumber = i;
+        inputPlugs_[i].isInput = true;
+    }
+
+    outputPlugs_.clear();
+    outputPlugs_.resize(numOutputPlugs_);
+    for (size_t i = 0; i < numOutputPlugs_; ++i) {
+        outputPlugs_[i].plugNumber = i;
+        outputPlugs_[i].isInput = false;
+    }
+
+    // Descriptor data stored for future use (not parsed for Audio subunit currently)
+    (void)descriptorData;
+
+    ASFW_LOG_INFO(Discovery,
+                  "AudioSubunit: LoadFromDiscovery complete — %u in, %u out",
+                  numInputPlugs_, numOutputPlugs_);
+}
+
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 void AudioSubunit::SetAudioVolume(AVCUnit& unit, uint8_t plugId, int16_t volume, std::function<void(bool)> completion) {
     auto completionState = Common::ShareCallback(std::move(completion));

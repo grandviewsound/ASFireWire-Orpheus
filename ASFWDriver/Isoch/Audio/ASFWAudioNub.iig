@@ -80,6 +80,7 @@ public:
     // Set RX queue channel count (may differ from TX; e.g. 10 audio vs 12 output)
     // If not called, RX queue falls back to channelCount
     void SetInputChannelCount(uint32_t channels) LOCALONLY;
+    void SetOutputChannelCount(uint32_t channels) LOCALONLY;
 
     // Stream mode selected during discovery:
     //   0 = non-blocking, 1 = blocking

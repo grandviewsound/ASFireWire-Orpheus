@@ -19,6 +19,13 @@ struct FilledBufferInfo {
     size_t startOffset;
     size_t bytesFilled;
     size_t descriptorIndex;
+    // True iff Dequeue's auto-recycle path fired this call (hardware advanced
+    // past the previous buffer; descriptor was reset and republished but WAKE
+    // has NOT been written). The caller (ARContextBase::Dequeue) must write
+    // the OHCI ContextControl WAKE bit while still holding the dequeue lock.
+    // Without this, the controller can stay paused at a buffer boundary and
+    // silently drop subsequent packets. See fix64b root-cause memo.
+    bool autoRecycledPrev{false};
 };
 
 class BufferRing {

@@ -328,8 +328,6 @@ struct OrpheusControlView: View {
     }
 
     private func lineChannelRow(_ ch: Int) -> some View {
-        let chState = viewModel.state.channels[ch]
-
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("AI \(ch + 1)")

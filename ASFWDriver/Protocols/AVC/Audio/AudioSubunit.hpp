@@ -38,6 +38,11 @@ public:
     const std::vector<AudioPlugInfo>& GetInputPlugs() const { return inputPlugs_; }
     const std::vector<AudioPlugInfo>& GetOutputPlugs() const { return outputPlugs_; }
 
+    /// Populate from AppleDiscoverySequence results (synchronous path).
+    /// Sets plug counts from Phase 3. Descriptor data stored for future use.
+    void LoadFromDiscovery(uint8_t destPlugs, uint8_t srcPlugs,
+                           const std::vector<uint8_t>& descriptorData);
+
 private:
     uint8_t numInputPlugs_{0};
     uint8_t numOutputPlugs_{0};

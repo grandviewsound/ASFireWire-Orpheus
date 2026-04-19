@@ -35,6 +35,50 @@ protected:
     }
 };
 
+TEST_F(BufferRingDMATest, DequeueFlagsAutoRecycleWhenHardwareAdvances) {
+    constexpr size_t kBufSize = 256;
+
+    // Simulate hardware: buffer 0 fully consumed (resCount=0), buffer 1 has 32 bytes written.
+    auto* desc0 = ring_.GetDescriptor(0);
+    auto* desc1 = ring_.GetDescriptor(1);
+    ASSERT_NE(desc0, nullptr);
+    ASSERT_NE(desc1, nullptr);
+
+    // reqCount stays in low 16 of control; resCount lives in low 16 of statusWord.
+    // Setting statusWord: xferStatus=0, resCount=0 → buffer 0 full.
+    desc0->statusWord = 0u;  // full
+    // Setting buffer 1: xferStatus=0, resCount=kBufSize-32 → 32 bytes new.
+    desc1->statusWord = static_cast<uint32_t>(kBufSize - 32);
+
+    auto info = ring_.Dequeue();
+    ASSERT_TRUE(info.has_value());
+    EXPECT_TRUE(info->autoRecycledPrev)
+        << "Dequeue must flag auto-recycle when next descriptor shows hardware advanced; "
+           "ARContextBase relies on this flag to write the OHCI WAKE bit.";
+    EXPECT_EQ(info->descriptorIndex, 1u);
+    EXPECT_EQ(info->bytesFilled, 32u);
+    EXPECT_EQ(info->startOffset, 0u);
+
+    // Buffer 0 must have been recycled in place (resCount restored to reqCount=kBufSize).
+    EXPECT_EQ(Async::HW::AR_resCount(*desc0), static_cast<uint16_t>(kBufSize));
+}
+
+TEST_F(BufferRingDMATest, DequeueDoesNotFlagAutoRecycleOnNormalReturn) {
+    constexpr size_t kBufSize = 256;
+
+    // Only buffer 0 has data; buffer 1 is still pristine (resCount==reqCount).
+    auto* desc0 = ring_.GetDescriptor(0);
+    ASSERT_NE(desc0, nullptr);
+    desc0->statusWord = static_cast<uint32_t>(kBufSize - 16);  // 16 bytes written
+
+    auto info = ring_.Dequeue();
+    ASSERT_TRUE(info.has_value());
+    EXPECT_FALSE(info->autoRecycledPrev)
+        << "Auto-recycle must only flag when hardware has advanced past the head buffer.";
+    EXPECT_EQ(info->descriptorIndex, 0u);
+    EXPECT_EQ(info->bytesFilled, 16u);
+}
+
 TEST_F(BufferRingDMATest, FinalizeProgramsDataAddressAndBranchWords) {
     constexpr size_t kNum = 32;
     constexpr size_t kBufSize = 256;

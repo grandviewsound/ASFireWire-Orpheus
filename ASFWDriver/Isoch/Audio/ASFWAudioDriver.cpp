@@ -451,10 +451,12 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
             return operationStatus;
         }
 
+        // Fix 50: metrics were swapped — BeginRead is input (received from device),
+        // WriteEnd is output (sent to device).
         if (operation == IOUserAudioIOOperationBeginRead) {
-            driverIvars->runtime.ioMetrics.totalFramesSent.fetch_add(ioBufferFrameSize, std::memory_order_relaxed);
-        } else if (operation == IOUserAudioIOOperationWriteEnd) {
             driverIvars->runtime.ioMetrics.totalFramesReceived.fetch_add(ioBufferFrameSize, std::memory_order_relaxed);
+        } else if (operation == IOUserAudioIOOperationWriteEnd) {
+            driverIvars->runtime.ioMetrics.totalFramesSent.fetch_add(ioBufferFrameSize, std::memory_order_relaxed);
         }
         
         return kIOReturnSuccess;

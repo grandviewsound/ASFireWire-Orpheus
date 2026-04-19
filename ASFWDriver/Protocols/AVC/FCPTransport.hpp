@@ -153,6 +153,10 @@ public:
 
     const FCPTransportConfig& GetConfig() const { return config_; }
 
+    /// Fix 35: Allow toggling bus-reset retry at runtime (e.g. for re-probe
+    /// after the bus has stabilized).
+    void SetAllowBusResetRetry(bool allow) { config_.allowBusResetRetry = allow; }
+
 private:
     struct OutstandingCommand {
         FCPFrame command;

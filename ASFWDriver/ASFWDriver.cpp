@@ -215,6 +215,9 @@ kern_return_t IMPL(ASFWDriver, Start) {
         ctx.deps.avcDiscovery = std::make_shared<ASFW::Protocols::AVC::AVCDiscovery>(
             this, *ctx.deps.deviceManager, bus, bus, ctx.audioCoordinator.get());
         ctx.controller->SetAVCDiscovery(ctx.deps.avcDiscovery);
+        if (ctx.audioCoordinator) {
+            ctx.audioCoordinator->SetAVCDiscovery(ctx.deps.avcDiscovery.get());
+        }
         ASFW_LOG(Controller, "✅ AVCDiscovery initialized");
     }
 
@@ -291,6 +294,7 @@ kern_return_t IMPL(ASFWDriver, Start) {
 
     if (ctx.audioCoordinator) {
         ctx.audioCoordinator->SetCMPClient(ctx.deps.cmpClient.get());
+        ctx.audioCoordinator->SetIRMClient(ctx.deps.irmClient.get());
     }
 
     // Wire automatic CMP oPCR/iPCR reconnect for BeBoB bus-reset recovery.
@@ -306,8 +310,9 @@ kern_return_t IMPL(ASFWDriver, Start) {
     if (ctx.deps.avcDiscovery && ctx.deps.cmpClient) {
         ASFW::CMP::CMPClient* rawCmp = ctx.deps.cmpClient.get();
         ASFW::Driver::IsochService* isochPtr = &ctx.isoch;
+        ASFW::Protocols::AVC::IAVCDiscovery* rawAvcDiscovery = ctx.deps.avcDiscovery.get();
         ctx.deps.avcDiscovery->SetDeviceResumedCallback(
-            [this, isochPtr, rawCmp](std::shared_ptr<ASFW::Discovery::FWDevice> device) {
+            [this, isochPtr, rawCmp, rawAvcDiscovery](std::shared_ptr<ASFW::Discovery::FWDevice> device) {
                 // Check whether SetFormat has already been confirmed for this device.
                 // If not, retry it with the current node ID before touching CMP.
                 auto* ctrl = static_cast<ASFW::Driver::ControllerCore*>(GetControllerCore());
@@ -316,7 +321,10 @@ kern_return_t IMPL(ASFWDriver, Start) {
                     if (reg) {
                         auto* rec = reg->FindByGuid(device->GetGUID());
                         if (rec && rec->protocol && !rec->protocol->IsFormatDone()) {
-                            rec->protocol->UpdateRuntimeContext(device->GetNodeID(), nullptr);
+                            auto* transport = rawAvcDiscovery
+                                ? rawAvcDiscovery->GetFCPTransportForNodeID(device->GetNodeID())
+                                : nullptr;
+                            rec->protocol->UpdateRuntimeContext(device->GetNodeID(), transport);
                             ASFW_LOG(Controller,
                                 "[Isoch] SetFormat not confirmed - retrying before CMP connect "
                                 "(node=0x%04x)", device->GetNodeID());

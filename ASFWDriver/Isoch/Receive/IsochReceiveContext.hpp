@@ -1,7 +1,5 @@
 #pragma once
 
-#include <DriverKit/OSObject.h>
-#include <new>
 #include <DriverKit/IOLib.h>
 #include <DriverKit/IOBufferMemoryDescriptor.h>
 #include <memory>
@@ -45,8 +43,7 @@ struct IRTag {
     static constexpr const char kContextName[] = "IsochReceiveContext";
 };
 
-class IsochReceiveContext : public OSObject,
-                            public ::ASFW::Shared::DmaContextManagerBase<IsochReceiveContext,
+class IsochReceiveContext : public ::ASFW::Shared::DmaContextManagerBase<IsochReceiveContext,
                                                                          ::ASFW::Shared::DescriptorRing,
                                                                          IRTag,
                                                                          IRPolicy> {
@@ -55,15 +52,14 @@ public:
         : ::ASFW::Shared::DmaContextManagerBase<IsochReceiveContext, ::ASFW::Shared::DescriptorRing, IRTag, IRPolicy>(*this, descriptorRing_) {
     }
 
-    virtual bool init() override;
-    virtual void free() override;
+    ~IsochReceiveContext();
 
-    void* operator new(size_t size) { return IOMallocZero(size); }
-    void* operator new(size_t size, std::nothrow_t const&) { return IOMallocZero(size); }
-    void operator delete(void* ptr, size_t size) { IOFree(ptr, size); }
+    // Non-copyable, non-movable (hardware state is tied to this instance)
+    IsochReceiveContext(const IsochReceiveContext&) = delete;
+    IsochReceiveContext& operator=(const IsochReceiveContext&) = delete;
 
-    static OSSharedPtr<IsochReceiveContext> Create(::ASFW::Driver::HardwareInterface* hw,
-                                                  std::shared_ptr<::ASFW::Isoch::Memory::IIsochDMAMemory> dmaMemory);
+    static std::unique_ptr<IsochReceiveContext> Create(::ASFW::Driver::HardwareInterface* hw,
+                                                       std::shared_ptr<::ASFW::Isoch::Memory::IIsochDMAMemory> dmaMemory);
 
     static constexpr size_t kNumDescriptors = 512;
     static constexpr size_t kMaxPacketSize = 4096;

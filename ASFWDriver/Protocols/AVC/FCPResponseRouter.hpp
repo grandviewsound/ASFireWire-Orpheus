@@ -27,25 +27,22 @@ class FCPResponseRouter {
 
     Protocols::Ports::BlockWriteDisposition
     RouteBlockWrite(const Protocols::Ports::BlockWriteRequestView& request) {
-        ASFW_LOG_V3(FCP,
-                    "🔍 FCPResponseRouter::RouteBlockWrite CALLED: srcID=0x%04x payloadLen=%zu",
-                    request.sourceID, request.payload.size());
-
         const uint64_t destOffset = request.destOffset;
 
-        ASFW_LOG_V3(FCP, "🔍 FCPResponseRouter: destOffset=0x%012llx (FCP_RESPONSE=0x%012llx)",
-                    destOffset, kFCPResponseAddress);
-
         if (destOffset != kFCPResponseAddress) {
-            ASFW_LOG_V3(FCP, "⚠️  FCPResponseRouter: Not an FCP response (offset mismatch)");
+            ASFW_LOG_V3(FCP, "⚠️  FCPResponseRouter: Not an FCP response (offset=0x%012llx)",
+                        destOffset);
             return Protocols::Ports::BlockWriteDisposition::kAddressError;
         }
 
         const uint16_t srcNodeID = request.sourceID;
         const uint32_t generation = busInfo_.GetGeneration().value;
-
-        ASFW_LOG_V2(FCP, "✅ FCPResponseRouter: FCP response detected! srcNode=0x%04x gen=%u",
-                    srcNodeID, generation);
+        const size_t pn = request.payload.size();
+        auto pb = [&](size_t i) -> uint8_t { return i < pn ? request.payload[i] : 0xFFu; };
+        ASFW_LOG_V1(FCP,
+                    "FCPResponseRouter: FCP response src=0x%04x gen=%u len=%zu bytes=%02x %02x %02x %02x %02x %02x %02x %02x",
+                    srcNodeID, generation, pn,
+                    pb(0), pb(1), pb(2), pb(3), pb(4), pb(5), pb(6), pb(7));
 
         FCPTransport* transport = avcDiscovery_.GetFCPTransportForNodeID(srcNodeID);
         if (!transport) {
@@ -55,8 +52,6 @@ class FCPResponseRouter {
 
         std::vector<uint8_t> payloadCopy(request.payload.begin(), request.payload.end());
 
-        ASFW_LOG_V2(FCP, "🔄 FCPResponseRouter: Routing to FCPTransport %p (%zu bytes copied)",
-                    transport, payloadCopy.size());
         transport->OnFCPResponse(srcNodeID, generation,
                                  std::span<const uint8_t>(payloadCopy.data(), payloadCopy.size()));
 

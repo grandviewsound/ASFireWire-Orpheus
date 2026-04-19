@@ -147,7 +147,8 @@ class ControllerCore {
     void OnTopologyReady(const TopologySnapshot& snapshot);
     void OnDiscoveryScanComplete(Discovery::Generation gen,
                                  const std::vector<Discovery::ConfigROM>& roms,
-                                 bool hadBusyNodes) const;
+                                 bool hadBusyNodes,
+                                 bool isFullScan) const;
 
     ControllerConfig config_;
     Dependencies deps_;
