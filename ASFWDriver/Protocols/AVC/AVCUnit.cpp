@@ -6,6 +6,10 @@
 //
 
 #include "AVCUnit.hpp"
+#include "AppleDiscoverySequence.hpp"
+#include "Music/MusicSubunit.hpp"
+#include "Audio/AudioSubunit.hpp"
+#include "Camera/CameraSubunit.hpp"
 #include "../../Common/CallbackUtils.hpp"
 #include "../../Logging/Logging.hpp"
 #include "Descriptors/DescriptorAccessor.hpp"
@@ -58,12 +62,18 @@ AVCUnit::AVCUnit(std::shared_ptr<Discovery::FWDevice> device,
 
 void AVCUnit::ProbeUnitInfo(std::function<void(bool)> completion) {
     auto completionState = Common::ShareCallback(std::move(completion));
-    // UNIT_INFO: [STATUS, unit, opcode=0x30], no operands
+    // UNIT_INFO: [STATUS, unit, 0x30, FF FF FF FF FF]
+    // AV/C General Spec (TA 1999008) §9.2.1: 5 operand bytes, all 0xFF
     AVCCdb cdb{};
     cdb.ctype = static_cast<uint8_t>(AVCCommandType::kStatus);
     cdb.subunit = kAVCSubunitUnit;
     cdb.opcode = static_cast<uint8_t>(AVCOpcode::kUnitInfo);
-    cdb.operandLength = 0;
+    cdb.operands[0] = 0xFF;
+    cdb.operands[1] = 0xFF;
+    cdb.operands[2] = 0xFF;
+    cdb.operands[3] = 0xFF;
+    cdb.operands[4] = 0xFF;
+    cdb.operandLength = 5;
 
     SubmitCommand(cdb, [this, completionState](AVCResult result, const AVCCdb&) {
         if (!IsSuccess(result)) {
@@ -111,9 +121,22 @@ void AVCUnit::Initialize(std::function<void(bool)> completion) {
                 }
 
                 ProbePlugs([this, completionState](bool plugsOk) {
-                    initialized_ = plugsOk;
+                    if (!plugsOk) {
+                        ASFW_LOG_V1(AVC, "AVCUnit: Plug probe failed");
+                        initialized_ = false;
+                        Common::InvokeSharedCallback(completionState, false);
+                        return;
+                    }
 
-                    if (plugsOk) { // NOSONAR(cpp:S3923): branches log different diagnostic messages
+                    // Fix 55b (Apr 12 2026): Apple phase 10 — QuerySyncPlugReconnect
+                    // at UNIT for each external/iso plug. Apple runs this 11 times
+                    // during cold attach and Orpheus may gate DAC arming on it.
+                    // Non-fatal: replicate Apple exactly and continue regardless
+                    // of per-plug result. See apple-discovery-sequence-full-174.md
+                    // phase 10 and sequence-differences-vs-apple.md bug 2 sub-bug 2.
+                    ProbeSyncPlugReconnect([this, completionState](bool /*qsprOk*/) {
+                        initialized_ = true;
+
                         ASFW_LOG_V1(AVC,
                                    "AVCUnit: Initialized - "
                                    "%zu subunits, %u/%u ISO plugs, "
@@ -123,16 +146,111 @@ void AVCUnit::Initialize(std::function<void(bool)> completion) {
                                    plugCounts_.isoOutputPlugs,
                                    descriptorInfo_.descriptorMechanismSupported ?
                                        "YES" : "NO");
-                    } else {
-                        ASFW_LOG_V1(AVC, "AVCUnit: Plug probe failed");
-                    }
 
-                    Common::InvokeSharedCallback(completionState, plugsOk);
+                        Common::InvokeSharedCallback(completionState, true);
+                    });
                 });
             });
         });
     });
     });
+}
+
+//==============================================================================
+// Apple Discovery Initialization (synchronous)
+//==============================================================================
+
+bool AVCUnit::InitializeWithAppleDiscovery() {
+    if (initialized_) {
+        ASFW_LOG_V2(AVC, "AVCUnit: Already initialized (Apple path)");
+        return true;
+    }
+
+    if (!fcpTransport_) {
+        ASFW_LOG_V1(AVC, "AVCUnit: No FCP transport (Apple path)");
+        return false;
+    }
+
+    ASFW_LOG_V1(AVC, "AVCUnit: InitializeWithAppleDiscovery starting...");
+
+    AppleDiscoverySequence discovery(*fcpTransport_);
+    auto result = discovery.RunSync();
+
+    if (!result.success) {
+        ASFW_LOG_V1(AVC, "AVCUnit: AppleDiscoverySequence failed");
+        return false;
+    }
+
+    // ── Populate plug counts from Phase 2 ────────────────────────────────
+    plugCounts_.isoInputPlugs  = result.isoInputPlugs;
+    plugCounts_.isoOutputPlugs = result.isoOutputPlugs;
+    plugCounts_.extInputPlugs  = result.extInputPlugs;
+    plugCounts_.extOutputPlugs = result.extOutputPlugs;
+
+    // ── Create subunits from Phase 2 ─────────────────────────────────────
+    subunits_.clear();
+
+    for (const auto& entry : result.subunits) {
+        for (uint8_t id = 0; id <= entry.maxId; id++) {
+            std::shared_ptr<Subunit> subunit;
+            auto type = static_cast<AVCSubunitType>(entry.type);
+
+            if (type == AVCSubunitType::kMusic || type == AVCSubunitType::kMusic0C) {
+                subunit = std::make_shared<Music::MusicSubunit>(type, id);
+            } else if (type == AVCSubunitType::kAudio) {
+                subunit = std::make_shared<Audio::AudioSubunit>(type, id);
+            } else {
+                // Generic subunit for others
+                class GenericSubunit : public Subunit {
+                public:
+                    GenericSubunit(AVCSubunitType t, uint8_t i) : Subunit(t, i) {}
+                    std::string GetName() const override { return "Generic"; }
+                };
+                subunit = std::make_shared<GenericSubunit>(type, id);
+            }
+
+            if (subunit) {
+                subunits_.push_back(subunit);
+                ASFW_LOG_V2(AVC,
+                            "AVCUnit: [Apple] Subunit: type=0x%02x id=%d (%{public}s)",
+                            entry.type, id, subunit->GetName().c_str());
+            }
+        }
+    }
+
+    // ── Load discovery data into subunits ─────────────────────────────────
+    for (auto& subunit : subunits_) {
+        auto type = subunit->GetType();
+
+        if (type == AVCSubunitType::kMusic || type == AVCSubunitType::kMusic0C) {
+            auto* music = static_cast<Music::MusicSubunit*>(subunit.get());
+            music->LoadFromDiscovery(result.musicDestPlugs,
+                                     result.musicSrcPlugs,
+                                     result.musicDescriptorData);
+        } else if (type == AVCSubunitType::kAudio) {
+            auto* audio = static_cast<Audio::AudioSubunit*>(subunit.get());
+            audio->LoadFromDiscovery(result.audioDestPlugs,
+                                     result.audioSrcPlugs,
+                                     result.audioDescriptorData);
+        }
+    }
+
+    // ── Mark descriptor mechanism as supported ────────────────────────────
+    descriptorInfo_.descriptorMechanismSupported =
+        !result.musicDescriptorData.empty() || !result.audioDescriptorData.empty();
+
+    initialized_ = true;
+
+    ASFW_LOG_V1(AVC,
+                "AVCUnit: InitializeWithAppleDiscovery complete — "
+                "%zu subunits, %u/%u ISO plugs, QSPR %u/%u",
+                subunits_.size(),
+                plugCounts_.isoInputPlugs,
+                plugCounts_.isoOutputPlugs,
+                result.syncPlugsAccepted,
+                result.syncPlugsTotal);
+
+    return true;
 }
 
 void AVCUnit::ReScan(std::function<void(bool)> completion) {
@@ -147,14 +265,6 @@ void AVCUnit::ReScan(std::function<void(bool)> completion) {
     // Re-initialize
     Initialize(completion);
 }
-
-//==============================================================================
-// Subunit Probing
-//==============================================================================
-
-#include "Music/MusicSubunit.hpp"
-#include "Camera/CameraSubunit.hpp"
-#include "Audio/AudioSubunit.hpp"
 
 //==============================================================================
 // Subunit Probing
@@ -189,16 +299,6 @@ void AVCUnit::ProbeSubunits(std::function<void(bool)> completion) {
 void AVCUnit::StoreSubunitInfo(const AVCSubunitInfoCommand::SubunitInfo& info) {
     subunits_.clear();
 
-    // First pass: Detect if Music Subunit is present
-    bool hasMusicSubunit = false;
-    for (const auto& entry : info.subunits) {
-        AVCSubunitType type = static_cast<AVCSubunitType>(entry.type);
-        if (type == AVCSubunitType::kMusic || type == AVCSubunitType::kMusic0C) {
-            hasMusicSubunit = true;
-            break;
-        }
-    }
-
     for (const auto& entry : info.subunits) {
         // For each subunit type reported, enumerate instances
         for (uint8_t id = 0; id <= entry.maxID; id++) {
@@ -211,11 +311,13 @@ void AVCUnit::StoreSubunitInfo(const AVCSubunitInfoCommand::SubunitInfo& info) {
             } else if (type == AVCSubunitType::kCamera) {
                 subunit = std::make_shared<Camera::CameraSubunit>(type, id);
             } else if (type == AVCSubunitType::kAudio) {
-                // Audio subunit - use dedicated AudioSubunit class
-                if (hasMusicSubunit) {
-                    ASFW_LOG_V2(AVC, "AVCUnit: Skipping Audio Subunit (Apple driver matching artifact) because Music Subunit is present.");
-                    continue;
-                }
+                // Fix 55a (Apr 12 2026): do NOT skip the audio subunit when a music
+                // subunit is present. Orpheus advertises BOTH (GetSubUnitInfo returns
+                // 08 60 ff ff) and Apple's AppleFWAudio probes the audio subunit
+                // heavily during cold attach (GetPlugInfo, Open/ReadDescriptor,
+                // per-plug GetExtendedStreamFormat, GetChannelVolumeInfo, GetChannelMute).
+                // Skipping it meant we never ran Apple's phase-3/phase-6 discovery,
+                // and the DAC never armed. See apple-discovery-sequence-full-174.md.
                 subunit = std::make_shared<Audio::AudioSubunit>(type, id);
             } else {
                 // Generic subunit for others
@@ -290,6 +392,113 @@ void AVCUnit::ProbePlugs(std::function<void(bool)> completion) {
 
         Common::InvokeSharedCallback(completionState, true);
     });
+}
+
+//==============================================================================
+// Sync Plug Reconnect (Apple phase 10)
+//==============================================================================
+
+// Fix 55b (Apr 12 2026): QuerySyncPlugReconnect × 11 at UNIT.
+//
+// Apple's cold-attach dtrace shows AppleFWAudio issues 11 QuerySyncPlugReconnect
+// commands during discovery (opcode 0x1A subfunction 0x0F) BEFORE any CONTROL
+// format sets. The bytes are verified in apple-discovery-sequence-full-174.md
+// phase 10 — 10 for unit plugs 0x00, 0x01, 0x80..0x87 and 1 for music subunit
+// plug 0x08. All commands are addressed to UNIT (0xFF) with CTYPE=0x02
+// (SPECIFIC INQUIRY); the target subunit + plug are encoded in the operands.
+//
+// Operand layout per command: [0x0F, <target_subunit>, <target_plug>, 0x60, 0x07]
+//   - 0x0F    = SIGNAL_SOURCE subfunction "sync plug reconnect"
+//   - target_subunit = 0xFF for unit plugs, 0x60 for music subunit plug
+//   - target_plug    = plug number (0x00, 0x01, 0x80..0x87, or 0x08)
+//   - 0x60 0x07 = Apple's fixed trailing bytes (meaning unclear — may be the
+//                 "source" plug specifier the device is expected to validate
+//                 against; we replicate byte-for-byte).
+//
+// Non-fatal: device may NotImplement individual plugs. Continue regardless.
+void AVCUnit::ProbeSyncPlugReconnect(std::function<void(bool)> completion) {
+    struct PlugAddr {
+        uint8_t targetSubunit;
+        uint8_t targetPlug;
+    };
+
+    // Apple's exact order from phase 10 byte log.
+    static constexpr std::array<PlugAddr, 11> kPlugs = {{
+        {0xFF, 0x00},  // unit plug 0 (iso input 0)
+        {0xFF, 0x01},  // unit plug 1 (iso input 1)
+        {0xFF, 0x80},  // ext plug 0
+        {0xFF, 0x81},  // ext plug 1
+        {0xFF, 0x82},
+        {0xFF, 0x83},
+        {0xFF, 0x84},
+        {0xFF, 0x85},
+        {0xFF, 0x86},
+        {0xFF, 0x87},
+        {0x60, 0x08},  // music subunit plug 8
+    }};
+
+    struct QsprState {
+        size_t index{0};
+        size_t acceptedCount{0};
+        std::function<void(bool)> completion;
+        std::function<void()> queryNext;
+    };
+
+    auto state = std::make_shared<QsprState>();
+    state->completion = std::move(completion);
+
+    state->queryNext = [this, state]() {
+        if (state->index >= kPlugs.size()) {
+            ASFW_LOG_V1(Discovery,
+                        "AVCUnit: ProbeSyncPlugReconnect complete — %zu/%zu accepted",
+                        state->acceptedCount, kPlugs.size());
+            auto completion = state->completion;
+            state->queryNext = nullptr; // break reference cycle
+            if (completion) {
+                completion(true);
+            }
+            return;
+        }
+
+        const auto& plugAddr = kPlugs[state->index];
+
+        AVCCdb cdb{};
+        cdb.ctype = static_cast<uint8_t>(AVCCommandType::kInquiry); // 0x02 SPECIFIC INQUIRY
+        cdb.subunit = kAVCSubunitUnit;                              // 0xFF
+        cdb.opcode = 0x1A;                                          // SIGNAL_SOURCE
+        cdb.operands[0] = 0x0F;                                     // sync plug reconnect subfunction
+        cdb.operands[1] = plugAddr.targetSubunit;
+        cdb.operands[2] = plugAddr.targetPlug;
+        cdb.operands[3] = 0x60;                                     // Apple fixed trailer
+        cdb.operands[4] = 0x07;
+        cdb.operandLength = 5;
+
+        const size_t currentIndex = state->index;
+
+        SubmitCommand(cdb, [this, state, currentIndex](AVCResult result,
+                                                       const AVCCdb& /*response*/) {
+            if (IsSuccess(result)) {
+                state->acceptedCount++;
+                ASFW_LOG_V3(Discovery,
+                            "AVCUnit: QSPR plug %zu accepted (subunit=0x%02x plug=0x%02x)",
+                            currentIndex,
+                            kPlugs[currentIndex].targetSubunit,
+                            kPlugs[currentIndex].targetPlug);
+            } else {
+                ASFW_LOG_V3(Discovery,
+                            "AVCUnit: QSPR plug %zu not accepted (subunit=0x%02x plug=0x%02x result=%d) — continuing",
+                            currentIndex,
+                            kPlugs[currentIndex].targetSubunit,
+                            kPlugs[currentIndex].targetPlug,
+                            static_cast<int>(result));
+            }
+            state->index++;
+            state->queryNext();
+        });
+    };
+
+    ASFW_LOG_V2(Discovery, "AVCUnit: ProbeSyncPlugReconnect starting (%zu plugs)", kPlugs.size());
+    state->queryNext();
 }
 
 void AVCUnit::ProbeSignalFormat(std::function<void(bool)> completion) {

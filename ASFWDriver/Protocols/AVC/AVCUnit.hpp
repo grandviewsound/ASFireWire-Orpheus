@@ -77,6 +77,12 @@ public:
 
     void Initialize(std::function<void(bool success)> completion);
 
+    /// Synchronous initialization using Apple's exact discovery sequence.
+    /// Sends ~174 AV/C commands in Apple's order, then populates AVCUnit state
+    /// from the results. Blocks the calling thread. Must NOT be called from
+    /// the FCP timeout queue.
+    bool InitializeWithAppleDiscovery();
+
     void ReScan(std::function<void(bool success)> completion);
 
     void ProbeUnitInfo(std::function<void(bool)> completion);
@@ -119,6 +125,8 @@ private:
     void ProbeSubunits(std::function<void(bool)> completion);
 
     void ProbePlugs(std::function<void(bool)> completion);
+
+    void ProbeSyncPlugReconnect(std::function<void(bool)> completion);
 
     void ProbeSignalFormat(std::function<void(bool)> completion);
 

@@ -70,12 +70,21 @@ public:
     /// Non-BeBoB protocols that don't need SetFormat should return true always.
     virtual bool IsFormatDone() const { return true; }
 
+    /// Returns true while a protocol-specific format change is still in flight.
+    /// The audio backend uses this to distinguish "still waiting for the device"
+    /// from "the protocol already failed and there is nothing left to wait for".
+    virtual bool IsFormatInFlight() const { return false; }
+
     /// Update volatile runtime context that can change across bus resets.
     virtual void UpdateRuntimeContext(uint16_t nodeId,
                                       Protocols::AVC::FCPTransport* transport) {
         (void)nodeId;
         (void)transport;
     }
+
+    /// Optional hook after the remote iPCR is connected but before host IT starts.
+    /// Protocols can use this to switch the device's playback path to the live stream.
+    virtual IOReturn PreparePlaybackPath() { return kIOReturnSuccess; }
 
     /// Check if protocol can expose/control a boolean control.
     // These virtuals intentionally match the host-facing `(class, element[, value])` contract.

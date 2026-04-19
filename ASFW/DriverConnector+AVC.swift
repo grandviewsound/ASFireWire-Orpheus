@@ -134,7 +134,9 @@ extension ASFWDriverConnector {
             UInt64(id)               // Subunit ID
         ]
 
-        var outSize = 1024  // Initial capacity for output
+        // DriverKit structure outputs over ~4KB get rejected; cap to match kMaxWireSize on the driver
+        let maxWireSize = 4 * 1024
+        var outSize = maxWireSize
         var out = Data(count: outSize)
         let scalarInputCount: UInt32 = 4
 

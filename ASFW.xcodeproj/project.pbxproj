@@ -170,7 +170,6 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 3A1693E52E80872C000BD368 /* Build configuration list for PBXNativeTarget "ASFW" */;
 			buildPhases = (
-				3A27C5372ECDECB0009CA664 /* ShellScript */,
 				3A1693D62E808727000BD368 /* Resources */,
 				3A1693D42E808727000BD368 /* Sources */,
 				3A1693D52E808727000BD368 /* Frameworks */,
@@ -305,7 +304,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		3A27C5372ECDECB0009CA664 /* ShellScript */ = {
+		3A27C5392ECDED18009CA664 /* Generate Version Header */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -313,33 +312,18 @@
 			inputFileListPaths = (
 			);
 			inputPaths = (
+				"$(SRCROOT)/VERSION.txt",
+				"$(SRCROOT)/bump.sh",
 			);
+			name = "Generate Version Header";
 			outputFileListPaths = (
 			);
 			outputPaths = (
+				"$(SRCROOT)/ASFWDriver/Version/DriverVersion.hpp",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "
-";
-		};
-		3A27C5392ECDED18009CA664 /* ShellScript */ = {
-			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-			);
-			outputFileListPaths = (
-			);
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "ls \"${SRCROOT}\"\n\"$SRCROOT/bump.sh\"\n";
+			shellScript = "\"$SRCROOT/bump.sh\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

@@ -548,7 +548,7 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
         const bool isData = (reqCount > Encoding::kCIPHeaderSize);
         if (!isData) continue;
 
-        int32_t samples[Encoding::kSamplesPerDataPacket * Config::kMaxPcmChannels];
+        int32_t samples[Encoding::kSamplesPerDataPacket * Config::kMaxPcmChannels] = {};
         uint32_t framesRead = 0;
 
         if (zeroCopySync) {

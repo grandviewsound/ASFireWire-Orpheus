@@ -205,13 +205,17 @@ constexpr size_t kAVCOperandMaxLength = kAVCFrameMaxSize - kAVCFrameMinSize;
 // FCP Timeouts
 //==============================================================================
 
-/// Initial FCP timeout (milliseconds)
-constexpr uint32_t kFCPTimeoutInitial = 2000;
+/// Initial FCP timeout (milliseconds). Apple's AV/C spec allows 100 ms, but
+/// Orpheus takes >2 s on some commands after session-idle gaps (observed
+/// ~2022 ms on pre-CMP ExtStreamFormat CONTROL). Budget 6 s for slow targets.
+constexpr uint32_t kFCPTimeoutInitial = 6000;
 
 /// FCP timeout after interim response (milliseconds)
 constexpr uint32_t kFCPTimeoutAfterInterim = 10000;
 
-/// Maximum FCP retry attempts
+/// Maximum FCP retry attempts (transport-error / bus-reset only — we do NOT
+/// retry on command-timeout, because the target already saw the write and a
+/// duplicate CONTROL command may corrupt device state).
 constexpr uint8_t kFCPMaxRetries = 4;
 
 //==============================================================================

@@ -76,7 +76,7 @@ class DebugViewModel: ObservableObject {
     }
     
     func connect() {
-        connector.connect(forceAttempt: false)
+        _ = connector.connect(forceAttempt: false)
     }
     
     func disconnect() {
@@ -154,9 +154,13 @@ class DebugViewModel: ObservableObject {
     }
     
     func getSubunitCapabilities(guid: UInt64, type: UInt8, id: UInt8) async -> ASFWDriverConnector.AVCMusicCapabilities? {
-        return await Task.detached {
-            return self.connector.getSubunitCapabilities(guid: guid, type: type, id: id)
-        }.value
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { continuation.resume(returning: nil); return }
+                let result = self.connector.getSubunitCapabilities(guid: guid, type: type, id: id)
+                continuation.resume(returning: result)
+            }
+        }
     }
 
 

@@ -302,7 +302,7 @@ std::string DiagnosticLogger::DecodePhyPacket(uint32_t phy0, uint32_t phy1) {
         const bool forceRoot = (phy0 & 0x00800000) != 0;
         const uint8_t rootId = (phy0 >> 24) & 0x3F;
         const uint8_t gapCount = (phy0 >> 16) & 0x3F;
-        snprintf(buf, sizeof(buf), " root=%u%{public}s gap=%u",
+        snprintf(buf, sizeof(buf), " root=%u%s gap=%u",
                  static_cast<uint32_t>(rootId),
                  forceRoot ? " FORCE" : "",
                  static_cast<uint32_t>(gapCount));

@@ -88,6 +88,7 @@ std::optional<FilledBufferInfo> BufferRing::Dequeue() noexcept {
     }
 
     size_t index = head_;
+    bool autoRecycledPrev = false;
 
     // CRITICAL: Auto-recycling logic for AR DMA stream semantics
     // Per OHCI §3.3, §8.4.2 bufferFill mode: hardware fills current buffer until exhausted,
@@ -107,10 +108,14 @@ std::optional<FilledBufferInfo> BufferRing::Dequeue() noexcept {
     // If next buffer has data, hardware has moved to it
     if (next_resCount != next_reqCount) {
         // Hardware advanced to next buffer! Recycle current buffer.
-        ASFW_LOG_V4(Async,
+        // Fix-65 diagnostic: elevated to V0 so we see auto-recycle events
+        // in the default log; these are suspect correlators for tCode=0xF
+        // drops (startOffset resets to 0 on a potentially-mid-write buffer).
+        ASFW_LOG_V0(Async,
                     "🔄 BufferRing::Dequeue: Hardware advanced to buffer[%zu] (resCount=%u/%u). "
-                    "Auto-recycling buffer[%zu]...",
-                    next_index, next_resCount, next_reqCount, index);
+                    "Auto-recycling buffer[%zu] (prev last_dequeued=%zu)",
+                    next_index, next_resCount, next_reqCount, index,
+                    last_dequeued_bytes_);
 
         // Recycle current buffer (resets resCount=reqCount)
         auto& desc_to_recycle = descriptors_[index];
@@ -126,6 +131,7 @@ std::optional<FilledBufferInfo> BufferRing::Dequeue() noexcept {
         head_ = next_index;
         last_dequeued_bytes_ = 0;  // Reset tracking for new buffer
         index = next_index;  // Process the new buffer now
+        autoRecycledPrev = true;  // Caller must write WAKE bit (see FilledBufferInfo doc)
 
         ASFW_LOG_V4(Async,
                     "✅ BufferRing: Auto-recycled buffer, advanced head_ →%zu",
@@ -206,11 +212,25 @@ std::optional<FilledBufferInfo> BufferRing::Dequeue() noexcept {
     // Update tracking: remember how many total bytes we've now returned
     last_dequeued_bytes_ = total_bytes_in_buffer;
 
+    // Fix-65 diagnostic: unconditional ring state on every successful
+    // Dequeue, so a tCode=0xF drop in ARPacketParser can be correlated
+    // against resCount/reqCount and the next descriptor's fill state.
+    // One line per RX packet; noise acceptable for the duration of the
+    // diagnostic pass, removed once root cause is classified.
+    ASFW_LOG_V0(Async,
+        "📥 BufferRing::Dequeue: idx=%zu reqCount=%u resCount=%u "
+        "total=%zu startOffset=%zu newBytes=%zu "
+        "nextIdx=%zu next_reqCount=%u next_resCount=%u",
+        index, reqCount, resCount,
+        total_bytes_in_buffer, start_offset, new_bytes,
+        next_index, next_reqCount, next_resCount);
+
     return FilledBufferInfo{
         .virtualAddress = bufferAddr,
         .startOffset = start_offset,
         .bytesFilled = total_bytes_in_buffer,  // Total bytes (caller parses [startOffset, bytesFilled))
-        .descriptorIndex = index
+        .descriptorIndex = index,
+        .autoRecycledPrev = autoRecycledPrev
     };
 }
 

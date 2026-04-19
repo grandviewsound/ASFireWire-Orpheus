@@ -13,6 +13,7 @@
 #include "../ConfigROM/ConfigROMBuilder.hpp"
 #include "../ConfigROM/ConfigROMStager.hpp"
 #include "../ConfigROM/ConfigROMStore.hpp"
+#include "../ConfigROM/Parse/ConfigROMParser.hpp"
 #include "../ConfigROM/ROMScanner.hpp"
 #include "../Diagnostics/DiagnosticLogger.hpp"
 #include "../Diagnostics/MetricsSink.hpp"
@@ -62,10 +63,12 @@ bool ControllerCore::StartDiscoveryScan(const Discovery::ROMScanRequest& request
         return false;
     }
 
+    const bool isFullScan = request.targetNodes.empty();
+
     return deps_.romScanner->Start(
         request,
-        [this](Discovery::Generation gen, const std::vector<Discovery::ConfigROM>& roms,
-               bool hadBusyNodes) { this->OnDiscoveryScanComplete(gen, roms, hadBusyNodes); });
+        [this, isFullScan](Discovery::Generation gen, const std::vector<Discovery::ConfigROM>& roms,
+               bool hadBusyNodes) { this->OnDiscoveryScanComplete(gen, roms, hadBusyNodes, isFullScan); });
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -94,6 +97,30 @@ void ControllerCore::OnTopologyReady(const TopologySnapshot& snap) {
              snap.generation, snap.nodeCount, scannableCount, localNodeId);
     ASFW_LOG(Discovery, "═══════════════════════════════════════════════════════");
 
+    // Insert the local node's ROM into the store.
+    // The ROMScanner can't read our own ROM over the bus, so we populate
+    // it directly from the ConfigROMBuilder that staged it to OHCI.
+    if (deps_.configRom && deps_.romStore && deps_.configRom->QuadletCount() >= 5) {
+        auto imageBE = deps_.configRom->ImageBE();
+        Discovery::ConfigROM localRom{};
+        localRom.gen = Discovery::Generation{snap.generation};
+        localRom.nodeId = localNodeId;
+        localRom.rawQuadlets.assign(imageBE.begin(), imageBE.end());
+        localRom.vendorName = config_.vendor.vendorName;
+        localRom.state = Discovery::ROMState::Fresh;
+        localRom.firstSeen = localRom.gen;
+        localRom.lastValidated = localRom.gen;
+
+        auto bibRes = Discovery::ConfigROMParser::ParseBIB(imageBE);
+        if (bibRes) {
+            localRom.bib = bibRes->bib;
+        }
+
+        deps_.romStore->Insert(localRom);
+        ASFW_LOG(Discovery, "Local node ROM inserted into store (%zu quadlets, GUID=0x%016llx)",
+                 localRom.rawQuadlets.size(), localRom.bib.guid);
+    }
+
     Discovery::ROMScanRequest request{};
     request.gen = Discovery::Generation{snap.generation};
     request.topology = snap;
@@ -120,7 +147,8 @@ void ControllerCore::OnTopologyReady(const TopologySnapshot& snap) {
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void ControllerCore::OnDiscoveryScanComplete(Discovery::Generation gen,
                                              const std::vector<Discovery::ConfigROM>& roms,
-                                             bool hadBusyNodes) const {
+                                             bool hadBusyNodes,
+                                             bool isFullScan) const {
     if (!deps_.romStore || !deps_.deviceRegistry || !deps_.speedPolicy) {
         ASFW_LOG(Discovery, "OnDiscoveryScanComplete: missing Discovery dependencies");
         return;
@@ -188,7 +216,11 @@ void ControllerCore::OnDiscoveryScanComplete(Discovery::Generation gen,
                  deviceRecord.isAudioCandidate ? "YES" : "NO");
     }
 
-    if (deps_.deviceManager) {
+    // Fix #47: Only mark devices as lost during full bus scans.
+    // Targeted single-node ROM reads (e.g. TriggerROMRead from UserClient) scan
+    // only one node — other devices are simply not part of the scan scope and
+    // must NOT be marked lost.
+    if (isFullScan && deps_.deviceManager) {
         auto devices = deps_.deviceManager->GetAllDevices();
         for (const auto& device : devices) {
             if (!device) {
@@ -205,6 +237,8 @@ void ControllerCore::OnDiscoveryScanComplete(Discovery::Generation gen,
                      gen.value, guid);
             deps_.deviceManager->MarkDeviceLost(guid);
         }
+    } else if (!isFullScan) {
+        ASFW_LOG(Discovery, "Targeted scan — skipping lost-device check");
     }
 
     ASFW_LOG(Discovery, "═══════════════════════════════════════");

@@ -305,12 +305,130 @@ TEST(AsyncPacketSerDesLinuxCompat, ParseLockResponsePreservesExtendedTCodeLength
     EXPECT_TRUE(handled);
 }
 
+// -----------------------
+// 0xFFFFFFFF padding skip (console log fix 58 root cause)
+// -----------------------
+//
+// OHCI AR DMA buffers are pre-initialized to 0xFF. Hardware can deliver an
+// interrupt against a descriptor whose header quadlets contain padding ahead
+// of a real packet. Before the padding skip, ParseNext would see q0=0xFFFFFFFF,
+// decode tCode=0xF, return nullopt, and the caller loop would drop every real
+// packet queued after it in the same buffer. That manifested as an 8-second
+// FCP response timeout on attach (logs/console log fix 58.txt line 744).
+//
+// Fixture packet: read-quadlet response, tCode=0x6, tLabel=0x30, rCode=0,
+// matching the ExtractTLabelUsesWireByteTwo fixture above.
+namespace {
+constexpr std::array<uint8_t, 16> kValidReadQuadletResponseLE{
+    0x60, 0x01, 0xC2, 0x60,
+    0x00, 0x00, 0xC0, 0xFF,
+    0x00, 0x00, 0x00, 0x00,
+    0x04, 0x20, 0x8F, 0xE2,
+};
+constexpr std::array<uint8_t, 4> kTrailerZero{0x00, 0x00, 0x00, 0x00};
+constexpr std::array<uint8_t, 4> kPaddingQuadlet{0xFF, 0xFF, 0xFF, 0xFF};
+} // namespace
+
+TEST(ARPacketParserPaddingSkip, SinglePaddingQuadletBeforeValidPacket) {
+    std::vector<uint8_t> buffer;
+    buffer.insert(buffer.end(), kPaddingQuadlet.begin(), kPaddingQuadlet.end());
+    buffer.insert(buffer.end(),
+                  kValidReadQuadletResponseLE.begin(),
+                  kValidReadQuadletResponseLE.end());
+    buffer.insert(buffer.end(), kTrailerZero.begin(), kTrailerZero.end());
+
+    const auto info = ARPacketParser::ParseNext(
+        std::span<const uint8_t>(buffer.data(), buffer.size()), 0);
+
+    ASSERT_TRUE(info.has_value())
+        << "Padding slot at head must be skipped, not drop the buffer.";
+    EXPECT_EQ(info->tCode, 0x6);
+    EXPECT_EQ(info->headerLength, 16u);
+    EXPECT_EQ(info->dataLength, 0u);
+    // totalLength must fold in the 4 padding bytes so the caller loop advances
+    // past both the padding and the packet.
+    EXPECT_EQ(info->totalLength, 4u + 16u + 4u);
+    EXPECT_EQ(info->packetStart, buffer.data() + 4);
+}
+
+TEST(ARPacketParserPaddingSkip, MultiplePaddingQuadletsBeforeValidPacket) {
+    std::vector<uint8_t> buffer;
+    for (int i = 0; i < 3; ++i) {
+        buffer.insert(buffer.end(), kPaddingQuadlet.begin(), kPaddingQuadlet.end());
+    }
+    buffer.insert(buffer.end(),
+                  kValidReadQuadletResponseLE.begin(),
+                  kValidReadQuadletResponseLE.end());
+    buffer.insert(buffer.end(), kTrailerZero.begin(), kTrailerZero.end());
+
+    const auto info = ARPacketParser::ParseNext(
+        std::span<const uint8_t>(buffer.data(), buffer.size()), 0);
+
+    ASSERT_TRUE(info.has_value());
+    EXPECT_EQ(info->tCode, 0x6);
+    EXPECT_EQ(info->totalLength, 12u + 16u + 4u);
+    EXPECT_EQ(info->packetStart, buffer.data() + 12);
+}
+
+TEST(ARPacketParserPaddingSkip, PurePaddingBufferReturnsNulloptGracefully) {
+    std::vector<uint8_t> buffer(64, 0xFF);
+
+    const auto info = ARPacketParser::ParseNext(
+        std::span<const uint8_t>(buffer.data(), buffer.size()), 0);
+
+    EXPECT_FALSE(info.has_value())
+        << "All-padding buffer must return nullopt, not a bogus packet.";
+}
+
+TEST(ARPacketParserPaddingSkip, NoPaddingPacketParsesUnchanged) {
+    std::vector<uint8_t> buffer;
+    buffer.insert(buffer.end(),
+                  kValidReadQuadletResponseLE.begin(),
+                  kValidReadQuadletResponseLE.end());
+    buffer.insert(buffer.end(), kTrailerZero.begin(), kTrailerZero.end());
+
+    const auto info = ARPacketParser::ParseNext(
+        std::span<const uint8_t>(buffer.data(), buffer.size()), 0);
+
+    ASSERT_TRUE(info.has_value());
+    EXPECT_EQ(info->tCode, 0x6);
+    EXPECT_EQ(info->totalLength, 16u + 4u);
+    EXPECT_EQ(info->packetStart, buffer.data());
+}
+
+TEST(ARPacketParserPaddingSkip, CallerOffsetAfterPaddedPacketLandsOnBufferEnd) {
+    // Simulates RxPath's while-loop: call ParseNext, advance offset by
+    // totalLength, then call again. With the fix, offset must land exactly on
+    // bufferSize and the next call must return nullopt (buffer exhausted, no
+    // drop). Without the fix, the padding would cause a drop on the first call.
+    std::vector<uint8_t> buffer;
+    buffer.insert(buffer.end(), kPaddingQuadlet.begin(), kPaddingQuadlet.end());
+    buffer.insert(buffer.end(),
+                  kValidReadQuadletResponseLE.begin(),
+                  kValidReadQuadletResponseLE.end());
+    buffer.insert(buffer.end(), kTrailerZero.begin(), kTrailerZero.end());
+
+    size_t offset = 0;
+    const auto first = ARPacketParser::ParseNext(
+        std::span<const uint8_t>(buffer.data(), buffer.size()), offset);
+    ASSERT_TRUE(first.has_value());
+    offset += first->totalLength;
+    EXPECT_EQ(offset, buffer.size());
+
+    const auto second = ARPacketParser::ParseNext(
+        std::span<const uint8_t>(buffer.data(), buffer.size()), offset);
+    EXPECT_FALSE(second.has_value());
+}
+
 TEST(AsyncPacketSerDesLinuxCompat, ExtractTLabelUsesWireByteTwo) {
-    // Read quadlet response packet: tLabel=48, tCode=6, rCode=0
-    // IEEE 1394 wire: Byte2=[tLabel:6][rt:2], Byte3=[tCode:4][rCode:4]
+    // Read-quadlet response: tLabel=48 (0x30), tCode=6, destID=0xFFC0, srcID=0xFFC1.
+    // OHCI AR DMA stores each quadlet little-endian in memory, so Q0 byte[0]
+    // holds [tCode:4 | pri:4] and byte[1] holds [tLabel:6 | rt:2].
+    //   Q0 (host) = 0xFFC0C060  →  LE bytes [0x60, 0xC0, 0xC0, 0xFF]
+    //   Q1 (host) = 0xFFC10000  →  LE bytes [0x00, 0x00, 0xC1, 0xFF]
     const std::array<uint8_t, 16> responseBytes{
-        0x60, 0x01, 0xC2, 0x60,  // Fixed byte3: was 0xFF (invalid tCode=0xF) → 0x60 (tCode=6)
-        0x00, 0x00, 0xC0, 0xFF,
+        0x60, 0xC0, 0xC0, 0xFF,
+        0x00, 0x00, 0xC1, 0xFF,
         0x00, 0x00, 0x00, 0x00,
         0x04, 0x20, 0x8F, 0xE2,
     };

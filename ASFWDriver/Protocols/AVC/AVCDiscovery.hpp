@@ -119,6 +119,7 @@ private:
 
     std::unordered_map<uint16_t, FCPTransport*> fcpTransportsByNodeID_;
     std::unordered_map<uint64_t, uint8_t> rescanAttempts_;
+    std::unordered_set<uint64_t> hardcodedNubGuids_;  // Devices with hardcoded nub — skip re-probe
     std::unordered_map<uint64_t, DuetPrefetchState> duetPrefetchByGuid_;
 
     OSSharedPtr<IODispatchQueue> rescanQueue_;

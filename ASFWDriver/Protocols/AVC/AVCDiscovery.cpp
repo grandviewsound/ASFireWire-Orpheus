@@ -9,6 +9,7 @@
 #include "../../Logging/Logging.hpp"
 #include "../../Audio/Model/ASFWAudioDevice.hpp"
 #include "../Audio/DeviceProtocolFactory.hpp"
+#include "../Audio/BeBoB/BeBoBTypes.hpp"
 #include "../Audio/Oxford/Apogee/ApogeeDuetProtocol.hpp"
 #include "../Audio/DeviceStreamModeQuirks.hpp"
 #include "../../Discovery/DiscoveryTypes.hpp"
@@ -111,6 +112,11 @@ struct PlugChannelSummary {
     return summary;
 }
 
+[[nodiscard]] bool IsPrismOrpheus(uint32_t vendorId, uint32_t modelId) noexcept {
+    return vendorId == ASFW::Audio::BeBoB::kPrismSoundVendorId &&
+           modelId == ASFW::Audio::BeBoB::kOrpheusModelId;
+}
+
 } // namespace
 
 //==============================================================================
@@ -120,6 +126,10 @@ struct PlugChannelSummary {
 /// 1394 Trade Association spec ID (24-bit)
 constexpr uint32_t kAVCSpecID = 0x00A02D;
 constexpr uint32_t kDuetPrefetchTimeoutMs = 1200;
+
+/// Post-reset stabilization delay for devices that need time before accepting
+/// AV/C commands (e.g., Prism Sound Orpheus — hardware initialization window).
+constexpr uint32_t kOrpheusInitDelayMs = 5000;
 constexpr uint32_t kClassIdPhantomPower = static_cast<uint32_t>('phan');
 constexpr uint32_t kClassIdPhaseInvert = static_cast<uint32_t>('phsi');
 constexpr uint32_t kScopeInput = static_cast<uint32_t>('inpt');
@@ -242,25 +252,74 @@ void AVCDiscovery::OnUnitPublished(std::shared_ptr<Discovery::FWUnit> unit) {
     // Create AVCUnit
     auto avcUnit = std::make_shared<AVCUnit>(device, unit, busOps_, busInfo_);
 
-    // Initialize (probe subunits, plugs)
-    avcUnit->Initialize([this, avcUnit, guid](bool success) {
-        if (!success) {
-            os_log_error(log_,
-                         "AVCDiscovery: AVCUnit initialization failed: GUID=%llx",
-                         guid);
-            return;
-        }
-
-        HandleInitializedUnit(guid, avcUnit);
-    });
-
-    // Store AVCUnit
+    // Store AVCUnit (before async Initialize — OnUnitResumed needs it)
     IOLockLock(lock_);
-    units_[guid] = std::move(avcUnit);
+    units_[guid] = avcUnit;
     IOLockUnlock(lock_);
 
     // Rebuild node ID map (unit now has transport)
     RebuildNodeIDMap();
+
+    // Check if this device needs a stabilization delay before AVC probing.
+    // The Orpheus (and potentially other BeBoB devices) cannot handle AV/C
+    // commands during its post-reset hardware initialization window.  Give it
+    // time to finish booting before we send SUBUNIT_INFO, UNIT_INFO, etc.
+    const uint32_t vid = device->GetVendorID();
+    const uint32_t mid = device->GetModelID();
+    const bool needsInitDelay =
+        (vid == Audio::DeviceProtocolFactory::kPrismSoundVendorId &&
+         mid == Audio::DeviceProtocolFactory::kOrpheusModelId);
+
+    auto initWork = [this, avcUnit, guid, needsInitDelay]() {
+        if (needsInitDelay) {
+            ASFW_LOG(Audio,
+                     "AVCDiscovery: Orpheus detected — waiting %ums for device to stabilize before AVC discovery GUID=%llx",
+                     kOrpheusInitDelayMs, guid);
+            IOSleep(kOrpheusInitDelayMs);
+
+            // Enable bus-reset retry: the bus may still be settling after the
+            // delay, so allow FCP to retry across generation changes.
+            avcUnit->GetFCPTransport().SetAllowBusResetRetry(true);
+        }
+
+        // Use Apple's exact ~174-command discovery sequence (synchronous).
+        // This replaces the old async probe chain and ensures the device sees
+        // the same command sequence Apple's AppleFWAudio sends on cold attach.
+        bool success = avcUnit->InitializeWithAppleDiscovery();
+
+        if (needsInitDelay) {
+            avcUnit->GetFCPTransport().SetAllowBusResetRetry(false);
+        }
+
+        if (!success) {
+            os_log_error(log_,
+                         "AVCDiscovery: AVCUnit Apple discovery failed: GUID=%llx — "
+                         "falling back to async probe",
+                         guid);
+
+            // Fallback to old async path if Apple discovery fails
+            avcUnit->Initialize([this, avcUnit, guid](bool asyncSuccess) {
+                if (!asyncSuccess) {
+                    os_log_error(log_,
+                                 "AVCDiscovery: AVCUnit async init also failed: GUID=%llx",
+                                 guid);
+                    return;
+                }
+                HandleInitializedUnit(guid, avcUnit);
+            });
+            return;
+        }
+
+        HandleInitializedUnit(guid, avcUnit);
+    };
+
+    // Always run on rescan queue — AppleDiscoverySequence is synchronous and
+    // blocks the calling thread for the full discovery duration (~5-30 s).
+    if (rescanQueue_) {
+        rescanQueue_->DispatchAsync(^{ initWork(); });
+    } else {
+        initWork();
+    }
 }
 
 void AVCDiscovery::HandleInitializedUnit(uint64_t guid, const std::shared_ptr<AVCUnit>& avcUnit) {
@@ -310,6 +369,32 @@ void AVCDiscovery::HandleInitializedUnit(uint64_t guid, const std::shared_ptr<AV
         os_log_debug(log_,
                      "AVCDiscovery: No audio-capable music subunit found (GUID=%llx)",
                      guid);
+        // For known devices, fall back to the hardcoded audio nub rather than
+        // silently dropping.  This covers the case where SUBUNIT_INFO timed out
+        // during bus-reset recovery and the re-probe on resume also failed to
+        // yield a Music Subunit (e.g. Prism Sound Orpheus).
+        if (device) {
+            const uint32_t vid = device->GetVendorID();
+            const uint32_t mid = device->GetModelID();
+            if (ASFW::Audio::DeviceProtocolFactory::IsKnownDevice(vid, mid)) {
+                Discovery::DeviceRecord rec;
+                rec.guid = guid;
+                rec.vendorId = vid;
+                rec.modelId = mid;
+                ASFW_LOG(Audio,
+                         "AVCDiscovery: Known device — using hardcoded audio nub fallback (GUID=%llx)",
+                         guid);
+                EnsureHardcodedAudioNubForDevice(rec);
+                // Mark this device so OnUnitResumed won't re-probe endlessly.
+                // AVC discovery always fails for this device (FCP transport errors
+                // cause bus resets), so stop trying once the hardcoded nub is up.
+                if (lock_) {
+                    IOLockLock(lock_);
+                    hardcodedNubGuids_.insert(guid);
+                    IOLockUnlock(lock_);
+                }
+            }
+        }
         return;
     }
 
@@ -518,20 +603,46 @@ void AVCDiscovery::HandleInitializedUnit(uint64_t guid, const std::shared_ptr<AV
              vendorId, modelId,
              ASFW::Audio::Quirks::StreamModeToString(streamMode),
              streamModeReason);
+    uint32_t publishedAggregateChannels = channelCount;
+    uint32_t publishedInputChannels =
+        (plugSummary.outputAudioMaxChannels > 0) ? plugSummary.outputAudioMaxChannels : channelCount;
+    uint32_t publishedOutputChannels =
+        (plugSummary.inputAudioMaxChannels > 0) ? plugSummary.inputAudioMaxChannels : channelCount;
+
+    if (IsPrismOrpheus(vendorId, modelId)) {
+        publishedAggregateChannels = ASFW::Audio::BeBoB::kOrpheusInputAudioChannels;
+        publishedInputChannels = ASFW::Audio::BeBoB::kOrpheusOutputAudioChannels;
+        publishedOutputChannels = ASFW::Audio::BeBoB::kOrpheusInputAudioChannels;
+
+        // Match Apple's naming: "Orpheus (0818)" where suffix is last 2 GUID bytes as decimal
+        uint16_t deviceNum = static_cast<uint16_t>(guid & 0xFFFF);
+        char nameBuf[64];
+        snprintf(nameBuf, sizeof(nameBuf), "Orpheus (%04u)", deviceNum);
+        deviceName = nameBuf;
+
+        ASFW_LOG(Audio,
+                 "AVCDiscovery: Applying Orpheus overrides "
+                 "name=%{public}s rawIn=%u rawOut=%u publishedIn=%u publishedOut=%u aggregate=%u",
+                 deviceName.c_str(),
+                 plugSummary.outputAudioMaxChannels,
+                 plugSummary.inputAudioMaxChannels,
+                 publishedInputChannels,
+                 publishedOutputChannels,
+                 publishedAggregateChannels);
+    }
+
     ASFW_LOG(Audio,
              "AVCDiscovery: Publishing audio configuration for GUID=%llx: %{public}s, %u channels, %zu sample rates",
-             guid, deviceName.c_str(), channelCount, sampleRates.size());
+             guid, deviceName.c_str(), publishedAggregateChannels, sampleRates.size());
 
     ASFW::Audio::Model::ASFWAudioDevice audioDeviceConfig;
     audioDeviceConfig.guid = guid;
     audioDeviceConfig.vendorId = vendorId;
     audioDeviceConfig.modelId = modelId;
     audioDeviceConfig.deviceName = deviceName;
-    audioDeviceConfig.channelCount = channelCount;
-    audioDeviceConfig.inputChannelCount =
-        (plugSummary.outputAudioMaxChannels > 0) ? plugSummary.outputAudioMaxChannels : channelCount;
-    audioDeviceConfig.outputChannelCount =
-        (plugSummary.inputAudioMaxChannels > 0) ? plugSummary.inputAudioMaxChannels : channelCount;
+    audioDeviceConfig.channelCount = publishedAggregateChannels;
+    audioDeviceConfig.inputChannelCount = publishedInputChannels;
+    audioDeviceConfig.outputChannelCount = publishedOutputChannels;
     audioDeviceConfig.sampleRates = sampleRates;
     audioDeviceConfig.currentSampleRate = currentRate;
     audioDeviceConfig.inputPlugName = mutableCaps.inputPlugName;
@@ -815,18 +926,93 @@ void AVCDiscovery::OnUnitSuspended(std::shared_ptr<Discovery::FWUnit> unit) {
 void AVCDiscovery::OnUnitResumed(std::shared_ptr<Discovery::FWUnit> unit) {
     uint64_t guid = GetUnitGUID(unit);
 
+    std::shared_ptr<AVCUnit> avcUnit;
+    bool needsReprobe = false;
+
     IOLockLock(lock_);
     auto it = units_.find(guid);
     if (it != units_.end()) {
+        avcUnit = it->second;
+        // If the initial probing failed (0 subunits — typically due to FCP
+        // timeouts during bus-reset turmoil), re-initialize now that the
+        // device has stabilized.  BUT if a hardcoded nub is already in place,
+        // do NOT re-probe — FCP commands cause bus resets on this device,
+        // creating an infinite reset loop (fix 38).
+        if (avcUnit && avcUnit->GetSubunits().empty() &&
+            hardcodedNubGuids_.find(guid) == hardcodedNubGuids_.end()) {
+            needsReprobe = true;
+        }
         os_log_info(log_,
-                    "AVCDiscovery: AV/C unit resumed: GUID=%llx",
-                    guid);
-        // Unit is now available again
+                    "AVCDiscovery: AV/C unit resumed: GUID=%llx needsReprobe=%d",
+                    guid, needsReprobe);
     }
     IOLockUnlock(lock_);
 
     // Rebuild node ID map (resumed units back in routing)
     RebuildNodeIDMap();
+
+    if (needsReprobe && avcUnit) {
+        ASFW_LOG(Audio,
+                 "AVCDiscovery: Re-probing subunits on resume (initial probe had 0 subunits) GUID=%llx",
+                 guid);
+        // Clear previous rescan attempt counter so the post-init rescan path
+        // is available if the descriptor parse is still incomplete.
+        if (lock_) {
+            IOLockLock(lock_);
+            rescanAttempts_.erase(guid);
+            IOLockUnlock(lock_);
+        }
+
+        // Determine stabilization delay: Orpheus needs longer (5s) due to
+        // hardware initialization window; other devices use 500ms.
+        auto device = avcUnit->GetDevice();
+        uint32_t delayMs = 500;
+        if (device) {
+            const uint32_t vid = device->GetVendorID();
+            const uint32_t mid = device->GetModelID();
+            if (vid == Audio::DeviceProtocolFactory::kPrismSoundVendorId &&
+                mid == Audio::DeviceProtocolFactory::kOrpheusModelId) {
+                delayMs = kOrpheusInitDelayMs;
+            }
+        }
+
+        auto rescanWork = [this, avcUnit, guid, delayMs]() {
+            ASFW_LOG(Audio,
+                     "AVCDiscovery: Waiting %ums for device to stabilize before re-probe GUID=%llx",
+                     delayMs, guid);
+            IOSleep(delayMs);
+
+            // Enable bus-reset retry for the re-probe.  The bus may still be
+            // resetting, so allow the FCP transport to retry across generation
+            // changes.
+            avcUnit->GetFCPTransport().SetAllowBusResetRetry(true);
+
+            ASFW_LOG(Audio,
+                     "AVCDiscovery: Starting delayed ReScan for GUID=%llx",
+                     guid);
+
+            // Must use ReScan() (not Initialize()) — Initialize() is a no-op
+            // when initialized_==true.
+            avcUnit->ReScan([this, avcUnit, guid](bool success) {
+                // Restore generation-locked FCP for normal operation.
+                avcUnit->GetFCPTransport().SetAllowBusResetRetry(false);
+
+                if (!success) {
+                    ASFW_LOG_ERROR(Audio,
+                                   "AVCDiscovery: Re-probe on resume failed GUID=%llx",
+                                   guid);
+                    return;
+                }
+                HandleInitializedUnit(guid, avcUnit);
+            });
+        };
+
+        if (rescanQueue_) {
+            rescanQueue_->DispatchAsync(^{ rescanWork(); });
+        } else {
+            rescanWork();
+        }
+    }
 }
 
 void AVCDiscovery::OnUnitTerminated(std::shared_ptr<Discovery::FWUnit> unit) {
@@ -947,16 +1133,13 @@ void AVCDiscovery::EnsureHardcodedAudioNubForDevice(const Discovery::DeviceRecor
 
     // Hardcoded bring-up profile (v1):
     // - advertise single 48kHz / 24-bit stream format
-    // Orpheus channel layout (from fw_diag Music subunit dest plug 0):
+    // Orpheus channel layout (asymmetric, from AVC discovery + macOS 11 ioreg):
     //   10 ins  = 8 analog + 2 S/PDIF  (device oPCR sends DBS=11: 10 audio + 1 MIDI)
-    //   10 outs = 8 analog + 2 S/PDIF  (device iPCR expects DBS=11: 10 audio + 1 MIDI)
-    //   (Headphone pair is on separate iPCR[1] via Music subunit dest plug 1)
-    // channelCount drives the TX queue, HAL stream format, and buffer sizing.
+    //   12 outs = 8 analog + 2 S/PDIF + 2 headphone  (device iPCR expects DBS=13: 12 audio + 1 MIDI)
     // fw_diag confirmed: Orpheus returns NOT_IMPLEMENTED for SetFormat CONTROL.
-    // Music subunit dest plug 0: 5x(2ch MBLA) + 1x(1ch MIDI) = DBS=11.
-    hardcoded.channelCount = 10;
-    hardcoded.inputChannelCount = 10;   // 10 audio channels (device oPCR DBS=11 = 10 audio + 1 MIDI; MIDI not exposed to HAL)
-    hardcoded.outputChannelCount = 10;  // 10 audio channels on wire (DBS=11, matching Orpheus iPCR[0] expectation)
+    hardcoded.channelCount = 12;
+    hardcoded.inputChannelCount = 10;   // 10 audio channels (device oPCR DBS=11 = 10 audio + 1 MIDI)
+    hardcoded.outputChannelCount = 12;  // 12 audio channels (device iPCR DBS=13 = 12 audio + 1 MIDI)
     hardcoded.sampleRates = {48000};
     hardcoded.currentSampleRate = 48000;
     hardcoded.inputPlugName = "Orpheus Input";

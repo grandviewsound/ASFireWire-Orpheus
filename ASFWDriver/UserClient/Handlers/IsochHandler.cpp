@@ -171,7 +171,8 @@ kern_return_t IsochHandler::TestCMPConnectOPCR(IOUserClientMethodArguments* args
     auto* driver = driver_;
 
     constexpr uint8_t kTestChannel = 0;
-    cmpClient->ConnectOPCR(kTestPlug, kTestChannel,
+    constexpr uint8_t kTestSpeed = 2; // S400
+    cmpClient->ConnectOPCR(kTestPlug, kTestChannel, kTestSpeed,
         [driver](ASFW::CMP::CMPStatus status) {
             if (status == ASFW::CMP::CMPStatus::Success) {
                 ASFW_LOG(UserClient, "✅ CMP oPCR connect succeeded!");
@@ -236,7 +237,8 @@ kern_return_t IsochHandler::TestCMPConnectIPCR(IOUserClientMethodArguments* args
 
     ASFW_LOG(UserClient, "TestCMPConnectIPCR: Connecting iPCR[%u] ch=%u", kTestPlug, kTestChannel);
 
-    cmpClient->ConnectIPCR(kTestPlug, kTestChannel, [](ASFW::CMP::CMPStatus status) {
+    constexpr uint8_t kTestSpeed = 2; // S400
+    cmpClient->ConnectIPCR(kTestPlug, kTestChannel, kTestSpeed, [](ASFW::CMP::CMPStatus status) {
         if (status == ASFW::CMP::CMPStatus::Success) { // NOSONAR(cpp:S3923): branches log different
                                                        // diagnostic messages
             ASFW_LOG(UserClient, "✅ CMP iPCR connect succeeded!");

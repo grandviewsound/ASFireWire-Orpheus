@@ -32,6 +32,29 @@ std::optional<ARPacketParser::PacketInfo> ARPacketParser::ParseNext(
         return std::nullopt;
     }
 
+    // Skip AR-buffer padding slots (q0 == 0xFFFFFFFF). OHCI AR DMA buffers
+    // are pre-initialized to 0xFF; hardware writes packets back-to-back but
+    // may deliver interrupts against a descriptor whose header quadlets
+    // include padding ahead of the real packet. (0xFFFFFFFF >> 4) & 0xF
+    // yields tCode=0xF, which is reserved and cannot start a valid async
+    // packet, so this pattern unambiguously means "not yet / no packet here
+    // — skip forward." Before this skip we dropped the whole buffer on the
+    // first 0xF slot, losing every real packet queued after it and causing
+    // the attach-time 8-second FCP timeout observed in console log fix 58.
+    const size_t paddingStart = offset;
+    while (offset + 4 <= bufferSize) {
+        const uint32_t probe = le32_at(buffer.data() + offset);
+        if (probe != 0xFFFFFFFFU) {
+            break;
+        }
+        offset += 4;
+    }
+    const size_t paddingSkipped = offset - paddingStart;
+
+    if (offset + 8 > bufferSize) {
+        return std::nullopt;
+    }
+
     const uint8_t* packetStart = buffer.data() + offset;
 
     // HEX DUMP: Complete AR packet as received (first 32 bytes or less)
@@ -69,7 +92,35 @@ std::optional<ARPacketParser::PacketInfo> ARPacketParser::ParseNext(
 
     const size_t headerLength = GetHeaderLength(tCode);
     if (headerLength == 0) {
-        ASFW_LOG_V0(Async, "❌ ARPacketParser::ParseNext: Unknown tCode=0x%X at offset %zu, dropping buffer", tCode, offset);
+        // Fix-65 diagnostic: dump the bytes that produced the unknown tCode,
+        // plus parse/padding context, so the drop can be classified as
+        // trailer-misparsed, partial hardware write, stale padding variant,
+        // or legitimate OHCI event quadlet. Without this, the drop site is
+        // ambiguous and any fix is a guess.
+        const size_t available = bufferSize - offset;
+        const size_t dumpSize = available > 32 ? 32 : available;
+        ASFW_LOG_V0(Async,
+            "❌ ARPacketParser::ParseNext: Unknown tCode=0x%X dropping buffer "
+            "(parseOffset=%zu padStart=%zu paddingSkipped=%zu bufferSize=%zu "
+            "available=%zu dumpSize=%zu q0=0x%08X q1=0x%08X)",
+            tCode, offset, paddingStart, paddingSkipped, bufferSize,
+            available, dumpSize, q0, q1);
+        for (size_t i = 0; i < dumpSize; i += 16) {
+            const size_t ch = (i + 16 <= dumpSize) ? 16 : (dumpSize - i);
+            const uint8_t* b = packetStart + i;
+            ASFW_LOG_V0(Async,
+                "    drop[%02zu]: %02X %02X %02X %02X  %02X %02X %02X %02X  "
+                "%02X %02X %02X %02X  %02X %02X %02X %02X",
+                i,
+                ch > 0 ? b[0] : 0, ch > 1 ? b[1] : 0,
+                ch > 2 ? b[2] : 0, ch > 3 ? b[3] : 0,
+                ch > 4 ? b[4] : 0, ch > 5 ? b[5] : 0,
+                ch > 6 ? b[6] : 0, ch > 7 ? b[7] : 0,
+                ch > 8 ? b[8] : 0, ch > 9 ? b[9] : 0,
+                ch > 10 ? b[10] : 0, ch > 11 ? b[11] : 0,
+                ch > 12 ? b[12] : 0, ch > 13 ? b[13] : 0,
+                ch > 14 ? b[14] : 0, ch > 15 ? b[15] : 0);
+        }
         return std::nullopt;
     }
 
@@ -132,7 +183,10 @@ std::optional<ARPacketParser::PacketInfo> ARPacketParser::ParseNext(
     info.packetStart = packetStart;
     info.headerLength = headerLength;
     info.dataLength = dataLength;
-    info.totalLength = totalLengthWithTrailer;
+    // totalLength is what the caller adds to its running offset, so it must
+    // include any 0xFFFFFFFF padding we skipped past at the head of this
+    // parse attempt.
+    info.totalLength = totalLengthWithTrailer + paddingSkipped;
     info.tCode = tCode;
     info.rCode = rCode;
     info.xferStatus = xferStatus;  // stored in 32-bit field; value range 0..0xFFFF

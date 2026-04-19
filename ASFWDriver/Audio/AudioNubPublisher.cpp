@@ -110,9 +110,14 @@ bool AudioNubPublisher::EnsureNub(uint64_t guid,
         return false;
     }
 
-    // Stream mode and GUID are LOCALONLY helpers; channel topology is derived from nub properties.
+    // LOCALONLY helpers — set ivars directly so they are available before
+    // properties propagate through the IORegistry (fixes race where the nub's
+    // Start() reads default ch=2 because SetProperties hasn't completed yet).
     audioNub->SetStreamMode(static_cast<uint32_t>(config.streamMode));
     audioNub->SetGuid(config.guid);
+    audioNub->SetChannelCount(config.channelCount);
+    audioNub->SetInputChannelCount(config.inputChannelCount);
+    audioNub->SetOutputChannelCount(config.outputChannelCount);
 
     IOLockLock(lock_);
     nubsByGuid_[guid] = audioNub;

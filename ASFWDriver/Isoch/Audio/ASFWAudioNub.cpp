@@ -169,120 +169,6 @@ static kern_return_t ResolveProtocolRuntimeBinding(const ASFWAudioNub_IVars* iv,
     return kIOReturnSuccess;
 }
 
-// Stream start/stop is primarily orchestrated by AudioCoordinator backends.
-// However, BeBoB devices (e.g. Prism Sound Orpheus) need direct auto-start
-// as a fallback when AudioCoordinator is not yet wired.
-
-static void ConfigureDeviceDuplex48kBestEffort(const ASFWDriver* parent)
-{
-    if (!parent) {
-        return;
-    }
-
-    const auto* controllerCore = static_cast<ASFW::Driver::ControllerCore*>(parent->GetControllerCore());
-    if (!controllerCore) {
-        ASFW_LOG(Audio, "ASFWAudioNub: AutoStart: missing ControllerCore");
-        return;
-    }
-
-    const auto* registry = controllerCore->GetDeviceRegistry();
-    const auto topology = controllerCore->LatestTopology();
-    if (!registry || !topology.has_value()) {
-        ASFW_LOG(Audio, "ASFWAudioNub: AutoStart: missing DeviceRegistry/Topology");
-        return;
-    }
-
-    auto devices = registry->LiveDevices(static_cast<ASFW::Discovery::Generation>(topology->generation));
-    for (auto& device : devices) {
-        if (!device.protocol) {
-            continue;
-        }
-
-        if (const IOReturn status = device.protocol->StartDuplex48k(); status == kIOReturnSuccess) {
-            ASFW_LOG(Audio, "ASFWAudioNub: Device duplex configured at 48kHz (GUID=%llx)", device.guid);
-        } else {
-            ASFW_LOG(Audio, "ASFWAudioNub: Device duplex config failed (GUID=%llx status=0x%x)",
-                     device.guid, status);
-        }
-        return;
-    }
-
-    ASFW_LOG(Audio, "ASFWAudioNub: AutoStart: no protocol device available for duplex config");
-}
-
-static void AutoStartStreamsIfNeeded(const ASFWAudioNub* self, const ASFWAudioNub_IVars* iv)
-{
-    (void)self;
-    if (!iv) {
-        return;
-    }
-
-    // Prefer AudioCoordinator if available
-    auto* coordinator = GetAudioCoordinator(iv);
-    if (coordinator) {
-        return;  // Coordinator handles stream lifecycle
-    }
-
-    ASFWDriver* parent = GetParentASFWDriver(iv);
-    if (!parent) {
-        return;
-    }
-
-    const bool irRunning = parent->GetIsochReceiveContext() != nullptr;
-    const bool itRunning = parent->GetIsochTransmitContext() != nullptr;
-    if (irRunning && itRunning) {
-        return;
-    }
-
-    ConfigureDeviceDuplex48kBestEffort(parent);
-
-    constexpr uint8_t kAutoIsochChannel = 0;
-    ASFW_LOG(Audio, "ASFWAudioNub: AutoStart -> duplex staged (IR ch%u, IT ch%u)",
-             kAutoIsochChannel, kAutoIsochChannel);
-
-    if (!irRunning) {
-        if (const kern_return_t irKr = parent->StartIsochReceive(kAutoIsochChannel);
-            irKr == kIOReturnSuccess) {
-            ASFW_LOG(Audio, "ASFWAudioNub: IR started");
-        } else {
-            ASFW_LOG(Audio, "ASFWAudioNub: StartIsochReceive failed: 0x%x", irKr);
-            return;  // Can't start IT without IR
-        }
-    }
-
-    if (!itRunning) {
-        const kern_return_t itKr = parent->StartIsochTransmit(kAutoIsochChannel);
-        if (itKr == kIOReturnSuccess) {
-            ASFW_LOG(Audio, "ASFWAudioNub: IT started");
-        } else {
-            ASFW_LOG(Audio, "ASFWAudioNub: StartIsochTransmit failed: 0x%x", itKr);
-        }
-    }
-}
-
-static void AutoStopStreamsBestEffort(const ASFWAudioNub* self, const ASFWAudioNub_IVars* iv)
-{
-    (void)self;
-    if (!iv) {
-        return;
-    }
-
-    // Prefer AudioCoordinator if available
-    auto* coordinator = GetAudioCoordinator(iv);
-    if (coordinator) {
-        return;  // Coordinator handles stream lifecycle
-    }
-
-    ASFWDriver* parent = GetParentASFWDriver(iv);
-    if (!parent) {
-        return;
-    }
-
-    ASFW_LOG(Audio, "ASFWAudioNub: AutoStop -> duplex");
-    parent->StopIsochReceive();
-    parent->StopIsochTransmit();
-}
-
 // Helper to create and initialize the TX queue
 static kern_return_t CreateTxQueue(ASFWAudioNub_IVars* iv)
 {
@@ -850,6 +736,14 @@ uint32_t ASFWAudioNub::GetInputChannelCount() const
 {
     if (!ivars) return 0;
     return ivars->inputChannelCount ? ivars->inputChannelCount : ivars->channelCount;
+}
+
+// LOCALONLY: Set TX (output) channel count independently from aggregate
+void ASFWAudioNub::SetOutputChannelCount(uint32_t channels)
+{
+    if (!ivars) return;
+    ivars->outputChannelCount = channels;
+    ASFW_LOG(Audio, "ASFWAudioNub: Output channel count set to %u", channels);
 }
 
 uint32_t ASFWAudioNub::GetOutputChannelCount() const

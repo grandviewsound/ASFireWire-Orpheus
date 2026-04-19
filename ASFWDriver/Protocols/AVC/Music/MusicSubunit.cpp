@@ -1354,4 +1354,46 @@ void MusicSubunit::SetAudioMute(ASFW::Protocols::AVC::IAVCCommandSubmitter& subm
     });
 }
 
+//==============================================================================
+// LoadFromDiscovery — populate from AppleDiscoverySequence results
+//==============================================================================
+
+void MusicSubunit::LoadFromDiscovery(uint8_t destPlugs, uint8_t srcPlugs,
+                                      const std::vector<uint8_t>& descriptorData) {
+    ASFW_LOG_V1(MusicSubunit,
+                "MusicSubunit: LoadFromDiscovery dest=%u src=%u descriptorLen=%zu",
+                destPlugs, srcPlugs, descriptorData.size());
+
+    // Populate base-class plug counts so AVCUnit wire serialization and UI see them,
+    // independent of whether the Status Descriptor parse succeeds.
+    SetPlugCounts({.dest = destPlugs, .src = srcPlugs});
+
+    // Reset state (same as ParseCapabilities preamble)
+    statusDescriptorReadOk_ = false;
+    statusDescriptorParsedOk_ = false;
+    statusDescriptorHasRouting_ = false;
+    statusDescriptorHasClusterInfo_ = false;
+    statusDescriptorHasPlugs_ = false;
+    statusDescriptorExpectedPlugCount_ = 0;
+    musicChannels_.clear();
+    plugs_.clear();
+
+    if (!descriptorData.empty()) {
+        statusDescriptorReadOk_ = true;
+        statusDescriptorData_ = descriptorData;
+        ParseDescriptorBlock(descriptorData.data(), descriptorData.size());
+    }
+
+    ASFW_LOG_V1(MusicSubunit,
+                "MusicSubunit: LoadFromDiscovery complete — "
+                "parsed=%d routing=%d cluster=%d plugs=%d plugCount=%zu "
+                "audioCap=%d",
+                statusDescriptorParsedOk_,
+                statusDescriptorHasRouting_,
+                statusDescriptorHasClusterInfo_,
+                statusDescriptorHasPlugs_,
+                plugs_.size(),
+                capabilities_.hasAudioCapability);
+}
+
 } // namespace ASFW::Protocols::AVC::Music
