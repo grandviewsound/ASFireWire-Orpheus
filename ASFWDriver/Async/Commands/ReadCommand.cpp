@@ -14,6 +14,7 @@ TxMetadata ReadCommand::BuildMetadata(const TransactionContext& txCtx) {
     meta.destinationNodeID = params_.destinationID;
     meta.tCode = isQuadlet ? 0x4 : 0x5;  // READ_QUADLET or READ_BLOCK
     meta.expectedLength = params_.length;
+    meta.timeoutMs = params_.timeoutMs;
 
     // EXPLICIT: Read operations complete on AR response only (gotPacket model)
     // Per Apple IOFWReadQuadCommand: gotAck() stores ack, gotPacket() completes

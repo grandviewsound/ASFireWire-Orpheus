@@ -70,8 +70,6 @@ void ParseAudioDriverConfigFromProperties(OSDictionary* properties,
 
 void BuildFallbackBoolControls(ParsedAudioDriverConfig& inOutConfig);
 
-void ApplyBringupSingleFormatPolicy(ParsedAudioDriverConfig& inOutConfig);
-
 void ClampAudioDriverChannels(ParsedAudioDriverConfig& inOutConfig,
                               uint32_t maxSupportedChannels);
 

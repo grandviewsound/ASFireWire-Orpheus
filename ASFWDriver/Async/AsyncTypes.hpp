@@ -298,6 +298,7 @@ struct ReadParams {
     uint32_t length{0};
     bool forceBlock{false};
     uint8_t speedCode{0xFF};
+    uint32_t timeoutMs{0};
 };
 
 struct WriteParams {
@@ -308,6 +309,7 @@ struct WriteParams {
     uint32_t length{0};
     bool forceBlock{false};
     uint8_t speedCode{0xFF};
+    uint32_t timeoutMs{0};
 };
 
 struct LockParams {
@@ -318,6 +320,7 @@ struct LockParams {
     uint32_t operandLength{0};
     uint32_t responseLength{0};
     uint8_t speedCode{0xFF};
+    uint32_t timeoutMs{0};
 };
 
 struct CompareSwapParams {

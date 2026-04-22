@@ -32,28 +32,14 @@ std::optional<ARPacketParser::PacketInfo> ARPacketParser::ParseNext(
         return std::nullopt;
     }
 
-    // Skip AR-buffer padding slots (q0 == 0xFFFFFFFF). OHCI AR DMA buffers
-    // are pre-initialized to 0xFF; hardware writes packets back-to-back but
-    // may deliver interrupts against a descriptor whose header quadlets
-    // include padding ahead of the real packet. (0xFFFFFFFF >> 4) & 0xF
-    // yields tCode=0xF, which is reserved and cannot start a valid async
-    // packet, so this pattern unambiguously means "not yet / no packet here
-    // — skip forward." Before this skip we dropped the whole buffer on the
-    // first 0xF slot, losing every real packet queued after it and causing
-    // the attach-time 8-second FCP timeout observed in console log fix 58.
-    const size_t paddingStart = offset;
-    while (offset + 4 <= bufferSize) {
-        const uint32_t probe = le32_at(buffer.data() + offset);
-        if (probe != 0xFFFFFFFFU) {
-            break;
-        }
-        offset += 4;
-    }
-    const size_t paddingSkipped = offset - paddingStart;
-
-    if (offset + 8 > bufferSize) {
-        return std::nullopt;
-    }
+    // Fix67 removed fix59's 0xFFFFFFFF padding-skip. That skip was a workaround
+    // for straddling packets at AR buffer boundaries — the parser would see
+    // reserved tCode=0xF from pre-init fill pattern and previously dropped the
+    // whole buffer. With straddle-scratch in BufferRing::Dequeue (fix67), the
+    // old buffer's tail + new buffer's head are copied into per-ring scratch
+    // before the old descriptor is reset, so the parser never sees 0xFF fill
+    // inside a logical packet stream. If 0xFFFFFFFF does appear, it is a real
+    // parser error (unknown tCode), not something to silently skip.
 
     const uint8_t* packetStart = buffer.data() + offset;
 
@@ -101,9 +87,9 @@ std::optional<ARPacketParser::PacketInfo> ARPacketParser::ParseNext(
         const size_t dumpSize = available > 32 ? 32 : available;
         ASFW_LOG_V0(Async,
             "❌ ARPacketParser::ParseNext: Unknown tCode=0x%X dropping buffer "
-            "(parseOffset=%zu padStart=%zu paddingSkipped=%zu bufferSize=%zu "
+            "(parseOffset=%zu bufferSize=%zu "
             "available=%zu dumpSize=%zu q0=0x%08X q1=0x%08X)",
-            tCode, offset, paddingStart, paddingSkipped, bufferSize,
+            tCode, offset, bufferSize,
             available, dumpSize, q0, q1);
         for (size_t i = 0; i < dumpSize; i += 16) {
             const size_t ch = (i + 16 <= dumpSize) ? 16 : (dumpSize - i);
@@ -183,10 +169,7 @@ std::optional<ARPacketParser::PacketInfo> ARPacketParser::ParseNext(
     info.packetStart = packetStart;
     info.headerLength = headerLength;
     info.dataLength = dataLength;
-    // totalLength is what the caller adds to its running offset, so it must
-    // include any 0xFFFFFFFF padding we skipped past at the head of this
-    // parse attempt.
-    info.totalLength = totalLengthWithTrailer + paddingSkipped;
+    info.totalLength = totalLengthWithTrailer;
     info.tCode = tCode;
     info.rCode = rCode;
     info.xferStatus = xferStatus;  // stored in 32-bit field; value range 0..0xFFFF

@@ -95,6 +95,12 @@ public:
     /// via ParseDescriptorBlock, the same code path used by the async flow.
     void LoadFromDiscovery(uint8_t destPlugs, uint8_t srcPlugs,
                            const std::vector<uint8_t>& descriptorData);
+
+    /// Apply a raw StreamFormat response captured during Apple-style discovery.
+    /// This lets the synchronous path populate current/supported plug formats
+    /// using the same parser as the async query flow.
+    void ApplyDiscoveryFormatResponse(uint8_t plugId, bool isInput,
+                                      const std::vector<uint8_t>& rawResponse);
     
     /// Individual channel info from MusicPlugInfo (0x810B) blocks
     /// These provide per-channel names like "Analog Out 1", "Analog In 2"

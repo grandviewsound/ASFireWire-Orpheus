@@ -44,6 +44,8 @@ struct ASFWAudioDevice {
     uint32_t currentSampleRate{48000};
     std::string inputPlugName{"Input"};
     std::string outputPlugName{"Output"};
+    std::vector<uint8_t> playback48kRawFormatBlock{};
+    std::vector<uint8_t> capture48kRawFormatBlock{};
     StreamMode streamMode{StreamMode::kNonBlocking};
     bool hasPhantomOverride{false};
     uint32_t phantomSupportedMask{0};

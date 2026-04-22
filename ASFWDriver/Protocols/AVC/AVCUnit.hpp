@@ -65,6 +65,13 @@ struct UnitDescriptorInfo {
 
 class AVCUnit : public std::enable_shared_from_this<AVCUnit>, public IAVCCommandSubmitter {
 public:
+    struct AppleDiscoveryFormatRecord {
+        bool valid{false};
+        uint8_t direction{0};
+        uint8_t plugNum{0};
+        std::vector<uint8_t> rawResponse;
+    };
+
     AVCUnit(std::shared_ptr<Discovery::FWDevice> device,
             std::shared_ptr<Discovery::FWUnit> unit,
             Protocols::Ports::FireWireBusOps& busOps,
@@ -103,6 +110,10 @@ public:
 
     FCPTransport& GetFCPTransport() { return *fcpTransport_; }
     const FCPTransport& GetFCPTransport() const { return *fcpTransport_; }
+
+    const std::vector<AppleDiscoveryFormatRecord>& GetAppleDiscoveryUnitIsochFormats() const {
+        return appleDiscoveryUnitIsochFormats_;
+    }
 
     void OnBusReset(uint32_t newGeneration);
 
@@ -147,6 +158,7 @@ private:
     std::vector<std::shared_ptr<Subunit>> subunits_;
     UnitPlugCounts plugCounts_;
     UnitDescriptorInfo descriptorInfo_;
+    std::vector<AppleDiscoveryFormatRecord> appleDiscoveryUnitIsochFormats_;
 
     bool initialized_{false};
 };

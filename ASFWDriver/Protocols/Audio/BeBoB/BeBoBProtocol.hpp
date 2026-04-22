@@ -25,6 +25,7 @@
 
 #include <atomic>
 #include <functional>
+#include <vector>
 
 namespace ASFW::Audio::BeBoB {
 
@@ -53,6 +54,12 @@ public:
     /// Pre-CMP Extended Stream Format CONTROL (0xBF/0xC0) at UNIT, iPCR plug.
     /// Mirrors Apple's initHardware-direct SetExtendedStreamFormat call.
     IOReturn StartDuplex48k() override;
+
+    bool OwnsAttachTimeFormatProgramming() const override { return true; }
+
+    void UpdateDiscoveredStreamFormatBlocks(
+        const std::vector<uint8_t>& playback48kRawFormatBlock,
+        const std::vector<uint8_t>& capture48kRawFormatBlock) override;
 
     /// Returns true once stream format setup is complete.
     bool IsFormatDone() const override { return mFormatDone_.load(std::memory_order_acquire); }
@@ -94,6 +101,8 @@ private:
     std::atomic<bool> mOutputFormatVerified_{false};
     std::atomic<bool> mInputFormatVerified_{false};
     std::atomic<uint32_t> mFormatSequence_{0};
+    std::vector<uint8_t> playback48kRawFormatBlock_{};
+    std::vector<uint8_t> capture48kRawFormatBlock_{};
 };
 
 } // namespace ASFW::Audio::BeBoB

@@ -14,7 +14,7 @@ namespace ASFW::Async {
  *
  * Different transaction types complete at different phases:
  * - Read operations: Always complete on AR (need response data)
- * - Write quadlet: Usually complete on AT (ack_complete)
+ * - Write quadlet: Usually complete on AT (ack_complete / 0x1)
  * - Write block: May complete on AT or AR depending on ack code
  * - Lock operations: Always complete on AR (need old value response)
  *
@@ -28,7 +28,7 @@ enum class CompletionStrategy : uint8_t {
     /**
      * Complete on AT acknowledgment only (unified transaction).
      *
-     * Used for: Write quadlet with ack_complete (0x0)
+     * Used for: Write quadlet with ack_complete (0x1)
      *
      * Behavior:
      * - OnATCompletion(): Check ack code, complete if successful
@@ -65,7 +65,7 @@ enum class CompletionStrategy : uint8_t {
      * Require both AT and AR paths (complex split transaction).
      *
      * Used for:
-     * - Write block with ack_pending (0x1): AT confirms receipt, AR confirms completion
+     * - Write block with ack_pending (0x2): AT confirms receipt, AR confirms completion
      * - Deferred operations: Target acknowledges, then processes and responds
      *
      * Behavior:
@@ -91,6 +91,7 @@ constexpr bool RequiresARResponse(CompletionStrategy strategy) noexcept {
 constexpr bool ProcessesATCompletion(CompletionStrategy strategy) noexcept {
     return strategy == CompletionStrategy::CompleteOnAT ||
            strategy == CompletionStrategy::CompleteOnPHY ||
+           strategy == CompletionStrategy::CompleteOnAR ||
            strategy == CompletionStrategy::RequireBoth;
 }
 

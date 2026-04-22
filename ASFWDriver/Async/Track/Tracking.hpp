@@ -41,6 +41,7 @@ struct TxMetadata {
     uint8_t  tLabel{0};
     uint8_t  tCode{0};
     uint32_t expectedLength{0};
+    uint32_t timeoutMs{0};
     CompletionCallback callback{nullptr};
     CompletionStrategy completionStrategy{CompletionStrategy::CompleteOnAT};  // Explicit two-path model
 };
@@ -143,15 +144,17 @@ public:
                     txn, label);
 
         // Set transaction parameters
-        txn->SetTimeout(200);  // TODO: Get from config or meta
+        constexpr uint32_t kDefaultTransactionTimeoutMs = 500;
+        txn->SetTimeout(meta.timeoutMs != 0 ? meta.timeoutMs : kDefaultTransactionTimeoutMs);
         txn->SetTCode(meta.tCode);  // Store tCode for IsReadOperation() check
         txn->SetCompletionStrategy(meta.completionStrategy);
 
-        // EXPLICIT: Mark read operations to skip AT completion
-        if (meta.completionStrategy == CompletionStrategy::CompleteOnAR) {
+        // Reads are the only CompleteOnAR operations that bypass our AT handler.
+        // Locks still need gotAck-style processing so we preserve the real ACK
+        // code before waiting for the AR payload.
+        if (txn->IsReadOperation()) {
             txn->SetSkipATCompletion(true);
-            ASFW_LOG_V3(Async, "🔍 [RegisterTx] Read operation: will skip AT completion, strategy=%{public}s",
-                        ToString(meta.completionStrategy));
+            ASFW_LOG_V3(Async, "🔍 [RegisterTx] Read transaction: bypassing AT completion handler");
         }
 
         ASFW_LOG_V3(Async, "🔍 [RegisterTx] meta.callback valid=%d for tLabel=%u",
@@ -236,14 +239,13 @@ public:
             // Transition to ATPosted state
             txn->TransitionTo(TransactionState::ATPosted, "OnTxPosted");
 
-            // EXPLICIT: Read operations bypass AT completion (go straight to AwaitingAR)
-            // This matches Apple's IOFWReadQuadCommand gotAck() pattern:
-            // - gotAck() stores ackCode but doesn't complete
-            // - gotPacket() completes the command with response data
-            if (txn->GetCompletionStrategy() == CompletionStrategy::CompleteOnAR) {
+            // Reads are the only transactions we currently fast-path directly to
+            // AwaitingAR. Locks also complete on AR, but they still need the real
+            // AT ACK recorded first for Apple-like timeout behavior.
+            if (txn->ShouldSkipATCompletion()) {
                 txn->TransitionTo(TransactionState::ATCompleted, "OnTxPosted: CompleteOnAR bypass");
                 txn->TransitionTo(TransactionState::AwaitingAR, "OnTxPosted: CompleteOnAR bypass");
-                ASFW_LOG_V3(Async, "  📤 Read operation: bypassing AT completion, going to AwaitingAR");
+                ASFW_LOG_V3(Async, "  📤 Read transaction: bypassing AT completion, going to AwaitingAR");
             }
 
             // Set deadline for timeout

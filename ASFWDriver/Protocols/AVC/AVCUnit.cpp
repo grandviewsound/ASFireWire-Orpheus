@@ -173,6 +173,8 @@ bool AVCUnit::InitializeWithAppleDiscovery() {
 
     ASFW_LOG_V1(AVC, "AVCUnit: InitializeWithAppleDiscovery starting...");
 
+    appleDiscoveryUnitIsochFormats_.clear();
+
     AppleDiscoverySequence discovery(*fcpTransport_);
     auto result = discovery.RunSync();
 
@@ -227,12 +229,29 @@ bool AVCUnit::InitializeWithAppleDiscovery() {
             music->LoadFromDiscovery(result.musicDestPlugs,
                                      result.musicSrcPlugs,
                                      result.musicDescriptorData);
+            for (const auto& formatResult : result.musicSubunitFormats) {
+                if (!formatResult.valid) {
+                    continue;
+                }
+                music->ApplyDiscoveryFormatResponse(formatResult.plugNum,
+                                                    formatResult.direction == 0,
+                                                    formatResult.rawResponse);
+            }
         } else if (type == AVCSubunitType::kAudio) {
             auto* audio = static_cast<Audio::AudioSubunit*>(subunit.get());
             audio->LoadFromDiscovery(result.audioDestPlugs,
                                      result.audioSrcPlugs,
                                      result.audioDescriptorData);
         }
+    }
+
+    for (const auto& formatResult : result.unitIsochFormats) {
+        appleDiscoveryUnitIsochFormats_.push_back({
+            .valid = formatResult.valid,
+            .direction = formatResult.direction,
+            .plugNum = formatResult.plugNum,
+            .rawResponse = formatResult.rawResponse,
+        });
     }
 
     // ── Mark descriptor mechanism as supported ────────────────────────────
@@ -261,6 +280,7 @@ void AVCUnit::ReScan(std::function<void(bool)> completion) {
     subunits_.clear();
     plugCounts_ = {};
     descriptorInfo_ = {};
+    appleDiscoveryUnitIsochFormats_.clear();
     
     // Re-initialize
     Initialize(completion);

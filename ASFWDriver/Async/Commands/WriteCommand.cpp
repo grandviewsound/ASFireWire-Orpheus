@@ -16,6 +16,7 @@ TxMetadata WriteCommand::BuildMetadata(const TransactionContext& txCtx) {
     meta.destinationNodeID = params_.destinationID;
     meta.tCode = isQuadlet ? 0x0 : 0x1;  // WRITE_QUADLET or WRITE_BLOCK
     meta.expectedLength = 0;  // Writes don't expect response payload
+    meta.timeoutMs = params_.timeoutMs;
     // callback filled by AsyncCommand::Submit()
     
     return meta;

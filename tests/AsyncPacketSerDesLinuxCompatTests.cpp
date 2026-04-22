@@ -329,7 +329,12 @@ constexpr std::array<uint8_t, 4> kTrailerZero{0x00, 0x00, 0x00, 0x00};
 constexpr std::array<uint8_t, 4> kPaddingQuadlet{0xFF, 0xFF, 0xFF, 0xFF};
 } // namespace
 
-TEST(ARPacketParserPaddingSkip, SinglePaddingQuadletBeforeValidPacket) {
+// Fix67 reversed fix59's padding-skip contract. With straddle-scratch in
+// BufferRing::Dequeue, the parser no longer receives buffers that begin with
+// 0xFFFFFFFF fill pattern inside a valid packet stream. If it does see leading
+// padding, that is an error state (treat as unknown tCode, return nullopt)
+// rather than silently skipping forward to find a packet.
+TEST(ARPacketParserPaddingSkip, PaddingAtHeadReturnsNulloptNotSkipped) {
     std::vector<uint8_t> buffer;
     buffer.insert(buffer.end(), kPaddingQuadlet.begin(), kPaddingQuadlet.end());
     buffer.insert(buffer.end(),
@@ -340,18 +345,13 @@ TEST(ARPacketParserPaddingSkip, SinglePaddingQuadletBeforeValidPacket) {
     const auto info = ARPacketParser::ParseNext(
         std::span<const uint8_t>(buffer.data(), buffer.size()), 0);
 
-    ASSERT_TRUE(info.has_value())
-        << "Padding slot at head must be skipped, not drop the buffer.";
-    EXPECT_EQ(info->tCode, 0x6);
-    EXPECT_EQ(info->headerLength, 16u);
-    EXPECT_EQ(info->dataLength, 0u);
-    // totalLength must fold in the 4 padding bytes so the caller loop advances
-    // past both the padding and the packet.
-    EXPECT_EQ(info->totalLength, 4u + 16u + 4u);
-    EXPECT_EQ(info->packetStart, buffer.data() + 4);
+    EXPECT_FALSE(info.has_value())
+        << "Leading 0xFFFFFFFF yields tCode=0xF (unknown); parser must return "
+           "nullopt rather than silently skip forward. Straddle handling lives "
+           "in BufferRing::Dequeue now.";
 }
 
-TEST(ARPacketParserPaddingSkip, MultiplePaddingQuadletsBeforeValidPacket) {
+TEST(ARPacketParserPaddingSkip, MultiplePaddingQuadletsAtHeadReturnNullopt) {
     std::vector<uint8_t> buffer;
     for (int i = 0; i < 3; ++i) {
         buffer.insert(buffer.end(), kPaddingQuadlet.begin(), kPaddingQuadlet.end());
@@ -364,10 +364,7 @@ TEST(ARPacketParserPaddingSkip, MultiplePaddingQuadletsBeforeValidPacket) {
     const auto info = ARPacketParser::ParseNext(
         std::span<const uint8_t>(buffer.data(), buffer.size()), 0);
 
-    ASSERT_TRUE(info.has_value());
-    EXPECT_EQ(info->tCode, 0x6);
-    EXPECT_EQ(info->totalLength, 12u + 16u + 4u);
-    EXPECT_EQ(info->packetStart, buffer.data() + 12);
+    EXPECT_FALSE(info.has_value());
 }
 
 TEST(ARPacketParserPaddingSkip, PurePaddingBufferReturnsNulloptGracefully) {
@@ -396,24 +393,24 @@ TEST(ARPacketParserPaddingSkip, NoPaddingPacketParsesUnchanged) {
     EXPECT_EQ(info->packetStart, buffer.data());
 }
 
-TEST(ARPacketParserPaddingSkip, CallerOffsetAfterPaddedPacketLandsOnBufferEnd) {
-    // Simulates RxPath's while-loop: call ParseNext, advance offset by
-    // totalLength, then call again. With the fix, offset must land exactly on
-    // bufferSize and the next call must return nullopt (buffer exhausted, no
-    // drop). Without the fix, the padding would cause a drop on the first call.
+TEST(ARPacketParserPaddingSkip, ValidPacketThenPaddingTailReturnsPacketThenNullopt) {
+    // Contract inversion (fix67): a buffer of [valid packet | padding tail]
+    // must parse the packet, then the caller's next ParseNext at the tail
+    // offset returns nullopt (offset lands on 0xFF fill = unknown tCode).
     std::vector<uint8_t> buffer;
-    buffer.insert(buffer.end(), kPaddingQuadlet.begin(), kPaddingQuadlet.end());
     buffer.insert(buffer.end(),
                   kValidReadQuadletResponseLE.begin(),
                   kValidReadQuadletResponseLE.end());
     buffer.insert(buffer.end(), kTrailerZero.begin(), kTrailerZero.end());
+    buffer.insert(buffer.end(), kPaddingQuadlet.begin(), kPaddingQuadlet.end());
 
     size_t offset = 0;
     const auto first = ARPacketParser::ParseNext(
         std::span<const uint8_t>(buffer.data(), buffer.size()), offset);
     ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(first->tCode, 0x6);
+    EXPECT_EQ(first->totalLength, 16u + 4u);
     offset += first->totalLength;
-    EXPECT_EQ(offset, buffer.size());
 
     const auto second = ARPacketParser::ParseNext(
         std::span<const uint8_t>(buffer.data(), buffer.size()), offset);
