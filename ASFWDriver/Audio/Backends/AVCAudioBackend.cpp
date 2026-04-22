@@ -251,6 +251,9 @@ IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
             transport = avcDiscovery_->GetFCPTransportForNodeID(record->nodeId);
         }
         record->protocol->UpdateRuntimeContext(record->nodeId, transport);
+        record->protocol->UpdateDiscoveredStreamFormatBlocks(
+            config.playback48kRawFormatBlock,
+            config.capture48kRawFormatBlock);
     }
 
     cmpClient_->SetDeviceNode(static_cast<uint8_t>(record->nodeId),

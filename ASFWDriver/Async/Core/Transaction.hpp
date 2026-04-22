@@ -316,7 +316,7 @@ private:
     uint8_t tCode_{0};          // Transaction code (0x4=read quad, 0x5=read block, etc.)
     uint8_t retryCount_{0};
     CompletionStrategy completionStrategy_{CompletionStrategy::CompleteOnAT};  // Explicit two-path model
-    bool skipATCompletion_{false};  // For CompleteOnAR transactions
+    bool skipATCompletion_{false};  // Read-only fast path; locks still process gotAck
     std::atomic<bool> completedByPath_{false};  // Completion latch (prevents double-completion)
 
     // Resources (Phase 1.3: UniquePayload for automatic cleanup)

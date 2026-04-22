@@ -250,7 +250,6 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
     }
 
     ASFW::Isoch::Audio::BuildFallbackBoolControls(parsedConfig);
-    ASFW::Isoch::Audio::ApplyBringupSingleFormatPolicy(parsedConfig);
     ASFW::Isoch::Audio::ClampAudioDriverChannels(parsedConfig, ASFW::Isoch::Config::kMaxPcmChannels);
 
     ivars->device.guid = parsedConfig.guid;
@@ -306,10 +305,6 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
     ASFW_LOG(Audio, "ASFWAudioDriver: Stream mode from nub: %{public}s",
                  ivars->device.streamModeRaw == std::to_underlying(ASFW::Isoch::Audio::StreamMode::kBlocking)
                 ? "blocking" : "non-blocking");
-
-    // Temporary bring-up policy: expose exactly one format/rate in ADK.
-    // Bring-up note: dynamic sample-rate advertisement is intentionally deferred.
-    ASFW_LOG(Audio, "ASFWAudioDriver: Forcing single advertised format: 48kHz / 24-bit");
 
     // Get shared TX queue from provider (ASFWAudioNub)
     // This enables cross-process audio streaming to IsochTransmitContext.
@@ -481,6 +476,19 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
     IOUserAudioStreamBasicDescription inputFormats[8] = {};
     IOUserAudioStreamBasicDescription outputFormats[8] = {};
     uint32_t formatCount = ivars->device.sampleRateCount > 8 ? 8 : ivars->device.sampleRateCount;
+    uint32_t currentFormatIndex = 0;
+
+    if (formatCount == 0) {
+        ivars->device.sampleRates[0] = (ivars->device.currentSampleRate > 0.0)
+            ? ivars->device.currentSampleRate
+            : ASFW::Isoch::Audio::kDefaultSampleRate;
+        ivars->device.sampleRateCount = 1;
+        formatCount = 1;
+        ASFW_LOG_WARNING(Audio,
+                         "ASFWAudioDriver: No advertised sample rates from nub; "
+                         "falling back to %.0f Hz",
+                         ivars->device.sampleRates[0]);
+    }
 
     for (uint32_t i = 0; i < formatCount; i++) {
         // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
@@ -500,13 +508,20 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
 
         fillFormat(inputFormats[i], ivars->device.sampleRates[i], ivars->device.inputChannelCount);
         fillFormat(outputFormats[i], ivars->device.sampleRates[i], ivars->device.outputChannelCount);
+        if (static_cast<uint32_t>(ivars->device.sampleRates[i]) ==
+            static_cast<uint32_t>(ivars->device.currentSampleRate)) {
+            currentFormatIndex = i;
+        }
     }
 
     ASFW_LOG(Audio,
-             "ASFWAudioDriver: Created %u stream formats (24-bit) in=%u out=%u channels",
+             "ASFWAudioDriver: Created %u stream formats (24-bit) in=%u out=%u channels "
+             "currentIndex=%u currentRate=%.0f Hz",
              formatCount,
              ivars->device.inputChannelCount,
-             ivars->device.outputChannelCount);
+             ivars->device.outputChannelCount,
+             currentFormatIndex,
+             ivars->device.currentSampleRate);
 
     // Buffer sizes (still use 32-bit containers for 24-bit audio)
     const uint32_t inputBufferBytes =
@@ -534,7 +549,7 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
     auto inputName = OSSharedPtr(OSString::withCString(ivars->device.inputPlugName), OSNoRetain);
     ivars->inputStream->SetName(inputName.get());
     ivars->inputStream->SetAvailableStreamFormats(inputFormats, formatCount);
-    ivars->inputStream->SetCurrentStreamFormat(&inputFormats[0]);  // Initial format
+    ivars->inputStream->SetCurrentStreamFormat(&inputFormats[currentFormatIndex]);
     
     // ========================================================================
     // ZERO-COPY: Try to get shared output buffer from ASFWAudioNub
@@ -590,7 +605,7 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
     auto outputName = OSSharedPtr(OSString::withCString(ivars->device.outputPlugName), OSNoRetain);
     ivars->outputStream->SetName(outputName.get());
     ivars->outputStream->SetAvailableStreamFormats(outputFormats, formatCount);
-    ivars->outputStream->SetCurrentStreamFormat(&outputFormats[0]);  // Initial format
+    ivars->outputStream->SetCurrentStreamFormat(&outputFormats[currentFormatIndex]);
 
     // Stream-level latency (no additional latency beyond device-level)
     ivars->outputStream->SetLatency(0);

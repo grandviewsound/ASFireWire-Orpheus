@@ -26,6 +26,13 @@ struct FilledBufferInfo {
     // Without this, the controller can stay paused at a buffer boundary and
     // silently drop subsequent packets. See fix64b root-cause memo.
     bool autoRecycledPrev{false};
+    // True iff virtualAddress points into the per-ring scratch buffer, not
+    // the DMA region. Set when Dequeue's auto-recycle path copied a straddle
+    // window (old buffer tail + new buffer head) into scratch to preserve the
+    // straddling packet's bytes before resetting the old descriptor. Parser
+    // walks this as a normal byte stream; no special handling needed. See
+    // fix66-test-results memo for the straddling-packet root cause.
+    bool isStraddleScratch{false};
 };
 
 class BufferRing {
@@ -33,6 +40,12 @@ public:
     BufferRing() = default;
     ~BufferRing() = default;
     [[nodiscard]] bool Initialize(std::span<HW::OHCIDescriptor> descriptors, std::span<uint8_t> buffers, size_t bufferCount, size_t bufferSize) noexcept;
+    // Optional: attach a per-ring scratch buffer used by Dequeue's
+    // auto-recycle path to preserve straddling packets (old buffer tail +
+    // new buffer head). Recommended size: 8 KB (matches AppleFWOHCI's
+    // IOMalloc(0x2000u) per-context scratch). If not attached, straddling
+    // packets at buffer boundaries will be lost.
+    void AttachScratch(std::span<uint8_t> scratch) noexcept { scratch_ = scratch; }
     [[nodiscard]] bool Finalize(uint64_t descriptorsPhysBase, uint64_t buffersPhysBase) noexcept;
     [[nodiscard]] std::optional<FilledBufferInfo> Dequeue() noexcept;
     [[nodiscard]] kern_return_t Recycle(size_t index) noexcept;
@@ -79,6 +92,7 @@ private:
     uint32_t descIOVABase_{0};
     uint32_t bufIOVABase_{0};
     IDMAMemory* dma_{nullptr};
+    std::span<uint8_t> scratch_{};  // optional per-ring straddle scratch
 };
 
 } // namespace ASFW::Shared

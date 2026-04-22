@@ -19,6 +19,7 @@
 
 #include "../AVCCommand.hpp"
 #include <functional>
+#include <vector>
 
 namespace ASFW::Protocols::AVC::StreamFormats {
 
@@ -97,6 +98,14 @@ public:
                                     bool hasMidi)
         : AVCCommand(transport, BuildControlCdb(isInput, plugId, audioPairs, hasMidi)) {}
 
+    /// Construct a CONTROL command that replays a previously discovered raw
+    /// Extended Stream Format block.
+    AVCExtendedStreamFormatCommand(AVC::FCPTransport& transport,
+                                    bool isInput,
+                                    uint8_t plugId,
+                                    const std::vector<uint8_t>& rawFormatBlock)
+        : AVCCommand(transport, BuildControlCdb(isInput, plugId, rawFormatBlock)) {}
+
     /// Construct a STATUS query command for a unit isoch plug.
     AVCExtendedStreamFormatCommand(AVC::FCPTransport& transport,
                                     bool isInput,
@@ -146,6 +155,37 @@ private:
         if (hasMidi) {
             cdb.operands[ix++] = 0x01;           // 1 channel
             cdb.operands[ix++] = kStreamFmtMIDI;
+        }
+
+        cdb.operandLength = ix;
+        return cdb;
+    }
+
+    static AVC::AVCCdb BuildControlCdb(bool isInput,
+                                        uint8_t plugId,
+                                        const std::vector<uint8_t>& rawFormatBlock) {
+        AVC::AVCCdb cdb{};
+        cdb.ctype   = static_cast<uint8_t>(AVC::AVCCommandType::kControl);
+        cdb.subunit = kAVCSubunitUnit;
+        cdb.opcode  = kOpcodeExtStreamFormat;
+
+        const uint8_t plugDir = isInput ? kPlugDirInput : kPlugDirOutput;
+
+        size_t ix = 0;
+        cdb.operands[ix++] = kSubFuncSingle;
+        cdb.operands[ix++] = plugDir;
+        cdb.operands[ix++] = kAddrModeUnitIsoch;
+        cdb.operands[ix++] = plugId;
+        cdb.operands[ix++] = 0x00;          // status
+        cdb.operands[ix++] = 0xFF;          // ext_length_hi
+        cdb.operands[ix++] = 0xFF;          // ext_length_lo
+
+        const size_t maxRawBytes =
+            (AVC::kAVCOperandMaxLength > ix) ? (AVC::kAVCOperandMaxLength - ix) : 0;
+        const size_t rawBytes =
+            (rawFormatBlock.size() < maxRawBytes) ? rawFormatBlock.size() : maxRawBytes;
+        for (size_t i = 0; i < rawBytes; ++i) {
+            cdb.operands[ix++] = rawFormatBlock[i];
         }
 
         cdb.operandLength = ix;

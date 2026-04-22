@@ -12,6 +12,7 @@ TxMetadata LockCommand::BuildMetadata(const TransactionContext& txCtx) {
     meta.sourceNodeID = txCtx.sourceNodeID;
     meta.destinationNodeID = params_.destinationID;
     meta.tCode = 0x9;  // LOCK_REQUEST
+    meta.timeoutMs = params_.timeoutMs;
     // Lock operations must wait for AR response to know the outcome (rCode + data)
     meta.completionStrategy = CompletionStrategy::CompleteOnAR;
 

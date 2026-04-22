@@ -54,6 +54,14 @@ struct ContextManager::State {
     std::span<uint8_t>            arReqBuf{};
     std::span<uint8_t>            arRspBuf{};
 
+    // Per-ring straddle scratch (fix67). CPU-only memory: hardware never sees
+    // these; used by BufferRing::Dequeue to preserve packets that straddle
+    // the old→new buffer boundary during auto-recycle. 8 KB mirrors
+    // AppleFWOHCI's IOMalloc(0x2000u) per-AR-context scratch.
+    static constexpr size_t kStraddleScratchBytes = 8192;
+    uint8_t arReqScratch[kStraddleScratchBytes]{};
+    uint8_t arRspScratch[kStraddleScratchBytes]{};
+
     DescriptorRing atReqRing{};
     DescriptorRing atRspRing{};
     BufferRing     arReqRing{};
@@ -217,6 +225,15 @@ kern_return_t ContextManager::provision(ASFW::Driver::HardwareInterface& hw,
         // Bind DMA manager to AR rings and publish all descriptors before arming
         state_->arReqRing.BindDma(&state_->dmaImpl);
         state_->arRspRing.BindDma(&state_->dmaImpl);
+
+        // Attach per-ring straddle scratch (fix67 root-cause for tCode=0xF at
+        // buffer boundaries). See State::arReqScratch comment + BufferRing
+        // auto-recycle path.
+        state_->arReqRing.AttachScratch(std::span<uint8_t>(state_->arReqScratch,
+                                                           State::kStraddleScratchBytes));
+        state_->arRspRing.AttachScratch(std::span<uint8_t>(state_->arRspScratch,
+                                                           State::kStraddleScratchBytes));
+
         state_->arReqRing.PublishAllDescriptorsOnce();
         state_->arRspRing.PublishAllDescriptorsOnce();
 

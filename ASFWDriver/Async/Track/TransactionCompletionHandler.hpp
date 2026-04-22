@@ -43,16 +43,16 @@ public:
      * \param comp TxCompletion from OHCI driver
      *
      * \par State Transitions
-     * - ackCode==0x1 (pending): ATCompleted → AwaitingAR (wait for AR response)
-     * - ackCode==0x0 (complete): ATCompleted → Completed (immediate completion)
+     * - ackCode==0x2 (pending): ATCompleted → AwaitingAR (wait for AR response)
+     * - ackCode==0x1 (complete): ATCompleted → Completed (immediate completion)
      * - ackCode==0x4-0x6 (busy): ATCompleted (stay, timeout will retry)
-     * - ackCode==0xF (timeout): ATCompleted → Failed
+     * - other ACK codes: fail immediately (Apple's gotAck() maps them through gotPacket(rcode=6))
      * - eventCode errors: ATCompleted → Failed
      *
      * \par Critical Logic
      * Per IEEE 1394-1995 section 6.2.4.3, ACK codes determine transaction flow:
-     * - ack_pending (0x1): Split transaction, wait for response packet
-     * - ack_complete (0x0): Unified transaction, done immediately
+     * - ack_complete (0x1): Unified transaction, done immediately
+     * - ack_pending (0x2): Split transaction, wait for response packet
      * - ack_busy_X/A/B (0x4-0x6): Retry after backoff
      */
     void OnATCompletion(const TxCompletion& comp) noexcept {
@@ -135,12 +135,12 @@ public:
             // eventCode 0x0A = evt_timeout, 0x03 = evt_missing_ack
             if (eventCode == 0x0A || eventCode == 0x03) {
                 // Hardware timeout - but ACK code tells us what actually happened
-                // If ackCode is 0x1 (pending), the AT completed but we're waiting for AR
+                // If ackCode is 0x2 (pending), the AT completed but we're waiting for AR
                 // If ackCode is 0xF or invalid, the transmission truly failed
                 ASFW_LOG(Async, "  → Hardware event: %{public}s (ackCode=0x%X)",
                          ToString(comp.eventCode), ackCode);
 
-                if (ackCode == 0x1) {
+                if (ackCode == kAckPending) {
                     // ack_pending: AT transmission succeeded, wait for AR response
                     ASFW_LOG(Async, "  → AwaitingAR (ackPending despite hw timeout)");
                     txn->TransitionTo(TransactionState::ATCompleted, "OnATCompletion: hw_timeout_pending");
@@ -173,17 +173,17 @@ public:
             // Now handle ACK code (IEEE 1394 acknowledgment from target device)
             // Per COMPLETION_ARCHITECTURE.md and IEEE 1394-1995 section 6.2.4.3
             const auto strategy = txn->GetCompletionStrategy();
-            const bool needsARData = txn->IsReadOperation() || strategy == CompletionStrategy::CompleteOnAR;
+            const bool needsARData = txn->IsReadOperation() || RequiresARResponse(strategy);
 
             switch (ackCode) {
-                case 0x1:  // kFWAckPending (split transaction)
+                case kAckPending:
                     ASFW_LOG_V2(Async, "  → AwaitingAR (ackPending, need AR response)");
                     txn->TransitionTo(TransactionState::ATCompleted, "OnATCompletion: ackPending");
                     txn->TransitionTo(TransactionState::AwaitingAR, "OnATCompletion: ackPending");
                     // Keep transaction alive, wait for AR response
                     break;
 
-                case 0x0:  // kFWAckComplete (unified transaction)
+                case kAckComplete:
                     if (needsARData) {
                         ASFW_LOG_V2(Async, "  → AwaitingAR (ackComplete but data required)");
                         txn->TransitionTo(TransactionState::ATCompleted, "OnATCompletion: ackComplete_read");
@@ -201,36 +201,29 @@ public:
                     }
                     break;
 
-                case 0x4:  // kFWAckBusyX
-                case 0x5:  // kFWAckBusyA
-                case 0x6:  // kFWAckBusyB
+                case kAckBusyX:
+                case kAckBusyA:
+                case kAckBusyB:
                     ASFW_LOG_V2(Async, "  → Busy (0x%X), extending deadline for retry", ackCode);
                     txn->TransitionTo(TransactionState::ATCompleted, "OnATCompletion: busy");
 
-                    // Phase 2: Extend deadline immediately to prevent rapid timeout
-                    // Device is busy, give it time to recover (200ms) before checking again
-                    txn->SetDeadline(Engine::NowUs() + 200000);  // +200ms from now
+                    // Keep the transaction alive using its existing timeout budget.
+                    // Apple re-executes the command object on timeout; our current
+                    // driver doesn't have that same-command replay path yet, so the
+                    // safest approximation is to preserve the original per-transaction
+                    // timeout window instead of using a separate hard-coded delay.
+                    txn->SetDeadline(Engine::NowUs() + RetryDelayUsec(*txn));
 
                     // Stay in ATCompleted, timeout handler will retry if still busy
                     break;
 
-                case 0xC:  // kFWAckTardy (CRITICAL FIX!)
-                case 0x11: // Missing ACK after multiple retries
-                case 0x1B: // Hardware-level tardy indication
-                    // CRITICAL FIX: ack_tardy means the device acknowledged receipt but is slow to respond.
-                    // Per Apple's IOFWAsyncCommand::gotAck(), we should NOT fail here - wait for AR response.
-                    // The AT element completed successfully (packet was transmitted), now wait for the
-                    // response packet to arrive via AR path.
-                    ASFW_LOG_V2(Async, "  → AwaitingAR (ackCode=0x%X tardy/slow, wait for response)", ackCode);
-                    txn->TransitionTo(TransactionState::ATCompleted, "OnATCompletion: tardy");
-                    txn->TransitionTo(TransactionState::AwaitingAR, "OnATCompletion: tardy");
-                    // Keep transaction alive, wait for AR response (don't fail!)
-                    break;
-
-                case 0xD:  // kFWAckDataError
-                case 0xE:  // kFWAckTypeError
+                case 0x0:
+                case 0x3:
+                case 0x7:
+                case 0xD:
+                case 0xE:
+                case 0xF:
                     ASFW_LOG_V1(Async, "  → Failed (ackError 0x%X)", ackCode);
-                    
                     postAction = PostAction::kCompleteError;
                     transitionTag1 = "OnATCompletion: ackError";
                     transitionTag2 = "OnATCompletion: ackError";
@@ -238,12 +231,11 @@ public:
                     break;
 
                 default:
-                    ASFW_LOG_V2(Async, "  → Unknown ackCode=0x%X, treating as tardy (wait for AR)", ackCode);
-                    // CRITICAL FIX: Unknown ACKs should wait for AR response, not fail immediately.
-                    // Per Apple's split-transaction model, only explicit errors (0xD, 0xE) should fail.
-                    // Everything else might still result in a valid AR response.
-                    txn->TransitionTo(TransactionState::ATCompleted, "OnATCompletion: unknown_ack");
-                    txn->TransitionTo(TransactionState::AwaitingAR, "OnATCompletion: unknown_ack");
+                    ASFW_LOG_V1(Async, "  → Failed (unexpected ackCode=0x%X)", ackCode);
+                    postAction = PostAction::kCompleteError;
+                    transitionTag1 = "OnATCompletion: unexpectedAck";
+                    transitionTag2 = "OnATCompletion: unexpectedAck";
+                    postKr = kIOReturnError;
                     break;
             }
         });
@@ -387,7 +379,7 @@ public:
      *
      * \par Smart Retry Logic
      * - If ackCode is busy (0x4-0x6) and retries remain: resubmit
-     * - If in AwaitingAR with ackPending (0x1): might be spurious timeout
+     * - If in AwaitingAR with ackPending (0x2): might be spurious timeout
      * - Otherwise: complete with timeout error
      */
     void OnTimeout(TLabel label) noexcept {
@@ -407,20 +399,21 @@ public:
                         txn->label().value, ToString(state), ackCode, txn->retryCount());
 
             // Smart retry based on ACK code and state
-            if (ackCode == 0x4 || ackCode == 0x5 || ackCode == 0x6) {  // Busy
+            if (ackCode == kAckBusyX || ackCode == kAckBusyA || ackCode == kAckBusyB) {
                 const uint8_t kMaxBusyRetries = 3;
                 if (txn->retryCount() < kMaxBusyRetries) {
                     txn->IncrementRetry();
 
-                    // Extend deadline to allow device time to become non-busy
-                    // Phase 2: Simple deadline extension (prevents rapid retimeout)
-                    // Device returned busy ACK, give it 200ms to recover
-                    const uint64_t newDeadline = Engine::NowUs() + 200000;  // +200ms
+                    // Preserve the transaction's current timeout window rather than
+                    // using a separate ad-hoc retry delay.
+                    const uint64_t newDeadline = Engine::NowUs() + RetryDelayUsec(*txn);
                     txn->SetDeadline(newDeadline);
 
                     ASFW_LOG_V1(Async, "🔄 RECOVERY: tLabel=%u Busy ACK (0x%X). "
-                             "Device is busy, extending deadline +200ms (attempt %u/%u)",
-                             txn->label().value, ackCode, txn->retryCount(), kMaxBusyRetries);
+                             "Device is busy, extending deadline +%lluus (attempt %u/%u)",
+                             txn->label().value, ackCode,
+                             static_cast<unsigned long long>(RetryDelayUsec(*txn)),
+                             txn->retryCount(), kMaxBusyRetries);
 
                     // Don't complete transaction - let timeout engine check again at new deadline
                     // If device becomes non-busy and sends AR response, OnARResponse will complete it
@@ -437,15 +430,18 @@ public:
                 if (txn->retryCount() < kMaxATRetries) {
                     txn->IncrementRetry();
                     
-                    // Extend deadline: give AT context more time to process
-                    const uint64_t newDeadline = Engine::NowUs() + 250000;  // +250ms
+                    // Extend deadline: give AT context more time to process.
+                    const uint64_t retryDelayUsec = RetryDelayUsec(*txn);
+                    const uint64_t newDeadline = Engine::NowUs() + retryDelayUsec;
                     txn->SetDeadline(newDeadline);
                     
                     ASFW_LOG_V1(Async, 
                              "🔄 RECOVERY: tLabel=%u ATPosted timeout with no ACK. "
-                             "Packet may be queued in AT context. Extending deadline +250ms "
+                             "Packet may be queued in AT context. Extending deadline +%lluus "
                              "(attempt %u/%u)",
-                             txn->label().value, txn->retryCount(), kMaxATRetries);
+                             txn->label().value,
+                             static_cast<unsigned long long>(retryDelayUsec),
+                             txn->retryCount(), kMaxATRetries);
                     return;  // Don't fail, let AT complete
                 }
                 ASFW_LOG_V1(Async, 
@@ -454,29 +450,28 @@ public:
                          txn->label().value, kMaxATRetries);
             }
 
-            // Apple-style retry: When waiting for AR response and ACK indicated device
-            // acknowledged the request (ackPending), give it more time instead of failing.
-            // This matches IOFWAsyncCommand::complete() which retries on timeout when
-            // ACK was pending/busy. See IOFireWireFamily.kmodproj/IOFWAsyncCommand.cpp:425-470
+            // Apple-style retry approximation: When waiting for AR response and the
+            // target already returned ack_pending, keep the transaction alive for more
+            // timeout windows instead of failing immediately. Apple re-executes the same
+            // command object on timeout; our current transaction layer keeps the request
+            // alive in place until the late AR arrives or the retry budget is exhausted.
             if (state == TransactionState::AwaitingAR) {
-                // ackCode 0x1 = ack_pending (device acknowledged, processing)
-                // ackCode 0x8 = used in some device responses (observed in logs)
-                // ackCode 0xC = ack_tardy (slow device)
-                if (ackCode == 0x1 || ackCode == 0x8 || ackCode == 0xC) {
+                if (ackCode == kAckPending) {
                     constexpr uint8_t kMaxPendingRetries = 3;  // Apple's kFWCmdDefaultRetries
                     if (txn->retryCount() < kMaxPendingRetries) {
                         txn->IncrementRetry();
-                        
-                        // Extend deadline: 250ms per retry (matching base timeout)
-                        const uint64_t newDeadline = Engine::NowUs() + 250000;  // +250ms
+
+                        const uint64_t retryDelayUsec = RetryDelayUsec(*txn);
+                        const uint64_t newDeadline = Engine::NowUs() + retryDelayUsec;
                         txn->SetDeadline(newDeadline);
-                        
-                        // Log loudly for debugging - Apple-style recovery
+
                         ASFW_LOG_V1(Async, 
                                  "🔄 RECOVERY: tLabel=%u AwaitingAR timeout with ackCode=0x%X. "
-                                 "Device acknowledged but response late. Extending deadline +250ms "
+                                 "Device acknowledged but response late. Extending deadline +%lluus "
                                  "(attempt %u/%u)",
-                                 txn->label().value, ackCode, txn->retryCount(), kMaxPendingRetries);
+                                 txn->label().value, ackCode,
+                                 static_cast<unsigned long long>(retryDelayUsec),
+                                 txn->retryCount(), kMaxPendingRetries);
                         return;  // Don't fail, let AR response arrive or retry again
                     }
                     ASFW_LOG_V1(Async, 
@@ -515,6 +510,19 @@ public:
     }
 
 private:
+    static constexpr uint8_t kAckComplete = 0x1;
+    static constexpr uint8_t kAckPending  = 0x2;
+    static constexpr uint8_t kAckBusyX    = 0x4;
+    static constexpr uint8_t kAckBusyA    = 0x5;
+    static constexpr uint8_t kAckBusyB    = 0x6;
+
+    static uint64_t RetryDelayUsec(const Transaction& txn) noexcept {
+        constexpr uint64_t kDefaultRetryDelayUsec = 500000;
+        const uint32_t timeoutMs = txn.timeoutMs();
+        return timeoutMs != 0 ? static_cast<uint64_t>(timeoutMs) * 1000ULL
+                              : kDefaultRetryDelayUsec;
+    }
+
     TransactionManager* txnMgr_;
     LabelAllocator* labelAllocator_;
 };

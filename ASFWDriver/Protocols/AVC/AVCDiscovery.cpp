@@ -12,9 +12,12 @@
 #include "../Audio/BeBoB/BeBoBTypes.hpp"
 #include "../Audio/Oxford/Apogee/ApogeeDuetProtocol.hpp"
 #include "../Audio/DeviceStreamModeQuirks.hpp"
+#include "../../Discovery/DeviceRegistry.hpp"
 #include "../../Discovery/DiscoveryTypes.hpp"
+#include "AVCCommand.hpp"
 #include "Music/MusicSubunit.hpp"
 #include "StreamFormats/AVCSignalFormatCommand.hpp"
+#include "StreamFormats/AVCStreamFormatCommands.hpp"
 #include <DriverKit/IOService.h>
 #include <DriverKit/OSSharedPtr.h>
 #include <DriverKit/OSString.h>
@@ -112,6 +115,158 @@ struct PlugChannelSummary {
     return summary;
 }
 
+[[nodiscard]] std::vector<uint8_t> FindRawFormatBlockForRate(
+    const std::vector<ASFW::Protocols::AVC::StreamFormats::PlugInfo>& plugs,
+    bool wantInput,
+    uint32_t targetRateHz) {
+    for (const auto& plug : plugs) {
+        if (plug.type != ASFW::Protocols::AVC::StreamFormats::MusicPlugType::kAudio ||
+            plug.IsInput() != wantInput) {
+            continue;
+        }
+
+        for (const auto& format : plug.supportedFormats) {
+            if (format.GetSampleRateHz() == targetRateHz && !format.rawFormatBlock.empty()) {
+                return format.rawFormatBlock;
+            }
+        }
+
+        if (plug.currentFormat.has_value() &&
+            plug.currentFormat->GetSampleRateHz() == targetRateHz &&
+            !plug.currentFormat->rawFormatBlock.empty()) {
+            return plug.currentFormat->rawFormatBlock;
+        }
+    }
+
+    return {};
+}
+
+struct ParsedDiscoveryFormatRecord {
+    uint8_t subfunction{0};
+    ASFW::Protocols::AVC::StreamFormats::AudioStreamFormat format;
+};
+
+[[nodiscard]] std::optional<ParsedDiscoveryFormatRecord> ParseDiscoveryFormatRecord(
+    const ASFW::Protocols::AVC::AVCUnit::AppleDiscoveryFormatRecord& record) {
+    if (!record.valid ||
+        record.rawResponse.size() < ASFW::Protocols::AVC::kAVCFrameMinSize ||
+        record.rawResponse.size() > ASFW::Protocols::AVC::kAVCFrameMaxSize) {
+        return std::nullopt;
+    }
+
+    ASFW::Protocols::AVC::FCPFrame frame;
+    frame.length = record.rawResponse.size();
+    std::copy(record.rawResponse.begin(), record.rawResponse.end(), frame.data.begin());
+
+    auto cdb = ASFW::Protocols::AVC::AVCCdb::Decode(frame);
+    if (!cdb.has_value() || cdb->operandLength == 0) {
+        return std::nullopt;
+    }
+
+    const uint8_t subfunction = cdb->operands[0];
+    size_t formatOffset = 0;
+    if (subfunction == ASFW::Protocols::AVC::StreamFormats::kStreamFormatSubfunc_Current) {
+        formatOffset = 7;
+    } else if (subfunction == ASFW::Protocols::AVC::StreamFormats::kStreamFormatSubfunc_Supported) {
+        formatOffset = 8;
+    } else {
+        return std::nullopt;
+    }
+
+    if (cdb->operandLength <= formatOffset) {
+        return std::nullopt;
+    }
+
+    auto format = ASFW::Protocols::AVC::StreamFormats::StreamFormatParser::Parse(
+        cdb->operands.data() + formatOffset,
+        cdb->operandLength - formatOffset);
+    if (!format.has_value()) {
+        return std::nullopt;
+    }
+
+    return ParsedDiscoveryFormatRecord{
+        .subfunction = subfunction,
+        .format = *format,
+    };
+}
+
+void CollectUnitIsochSampleRates(const ASFW::Protocols::AVC::AVCUnit& avcUnit,
+                                 std::set<double>& rateSet) {
+    for (const auto& record : avcUnit.GetAppleDiscoveryUnitIsochFormats()) {
+        auto parsed = ParseDiscoveryFormatRecord(record);
+        if (!parsed.has_value() ||
+            parsed->subfunction != ASFW::Protocols::AVC::StreamFormats::kStreamFormatSubfunc_Supported) {
+            continue;
+        }
+
+        const uint32_t rateHz = parsed->format.GetSampleRateHz();
+        if (rateHz > 0) {
+            rateSet.insert(static_cast<double>(rateHz));
+        }
+    }
+}
+
+[[nodiscard]] std::optional<uint32_t> FindCurrentRateFromUnitIsochFormats(
+    const ASFW::Protocols::AVC::AVCUnit& avcUnit) {
+    for (const auto& record : avcUnit.GetAppleDiscoveryUnitIsochFormats()) {
+        auto parsed = ParseDiscoveryFormatRecord(record);
+        if (!parsed.has_value() ||
+            parsed->subfunction != ASFW::Protocols::AVC::StreamFormats::kStreamFormatSubfunc_Current) {
+            continue;
+        }
+
+        const uint32_t rateHz = parsed->format.GetSampleRateHz();
+        if (rateHz > 0) {
+            return rateHz;
+        }
+    }
+
+    return std::nullopt;
+}
+
+[[nodiscard]] std::vector<uint8_t> FindRawUnitIsochFormatBlockForRate(
+    const ASFW::Protocols::AVC::AVCUnit& avcUnit,
+    bool wantInput,
+    uint32_t targetRateHz) {
+    const uint8_t direction = wantInput ? 0x00 : 0x01;
+
+    for (const auto& record : avcUnit.GetAppleDiscoveryUnitIsochFormats()) {
+        if (record.direction != direction) {
+            continue;
+        }
+
+        auto parsed = ParseDiscoveryFormatRecord(record);
+        if (!parsed.has_value() ||
+            parsed->subfunction != ASFW::Protocols::AVC::StreamFormats::kStreamFormatSubfunc_Supported) {
+            continue;
+        }
+
+        if (parsed->format.GetSampleRateHz() == targetRateHz &&
+            !parsed->format.rawFormatBlock.empty()) {
+            return parsed->format.rawFormatBlock;
+        }
+    }
+
+    for (const auto& record : avcUnit.GetAppleDiscoveryUnitIsochFormats()) {
+        if (record.direction != direction) {
+            continue;
+        }
+
+        auto parsed = ParseDiscoveryFormatRecord(record);
+        if (!parsed.has_value() ||
+            parsed->subfunction != ASFW::Protocols::AVC::StreamFormats::kStreamFormatSubfunc_Current) {
+            continue;
+        }
+
+        if (parsed->format.GetSampleRateHz() == targetRateHz &&
+            !parsed->format.rawFormatBlock.empty()) {
+            return parsed->format.rawFormatBlock;
+        }
+    }
+
+    return {};
+}
+
 [[nodiscard]] bool IsPrismOrpheus(uint32_t vendorId, uint32_t modelId) noexcept {
     return vendorId == ASFW::Audio::BeBoB::kPrismSoundVendorId &&
            modelId == ASFW::Audio::BeBoB::kOrpheusModelId;
@@ -183,11 +338,13 @@ void ConfigureDuetPhantomOverrides(
 
 AVCDiscovery::AVCDiscovery(IOService* driver,
                            Discovery::IDeviceManager& deviceManager,
+                           Discovery::DeviceRegistry& registry,
                            Protocols::Ports::FireWireBusOps& busOps,
                            Protocols::Ports::FireWireBusInfo& busInfo,
                            ASFW::Audio::IAVCAudioConfigListener* audioConfigListener)
     : driver_(driver)
     , deviceManager_(deviceManager)
+    , registry_(registry)
     , busOps_(busOps)
     , busInfo_(busInfo)
     , audioConfigListener_(audioConfigListener) {
@@ -435,6 +592,7 @@ void AVCDiscovery::HandleInitializedUnit(uint64_t guid, const std::shared_ptr<AV
             }
         }
     }
+    CollectUnitIsochSampleRates(*avcUnit, rateSet);
     mutableCaps.supportedSampleRates.assign(rateSet.begin(), rateSet.end());
     if (mutableCaps.supportedSampleRates.empty()) {
         mutableCaps.supportedSampleRates = {44100.0, 48000.0};  // Fallback
@@ -472,6 +630,15 @@ void AVCDiscovery::HandleInitializedUnit(uint64_t guid, const std::shared_ptr<AV
     }
 
     // Fallback: Use first supported sample rate if no current rate found
+    if (!foundCurrentRate) {
+        if (auto unitRateHz = FindCurrentRateFromUnitIsochFormats(*avcUnit); unitRateHz.has_value()) {
+            mutableCaps.currentSampleRate = static_cast<double>(*unitRateHz);
+            ASFW_LOG(Audio, "AVCDiscovery: Current sample rate from unit isoch format: %u Hz",
+                     *unitRateHz);
+            foundCurrentRate = true;
+        }
+    }
+
     if (!foundCurrentRate && !mutableCaps.supportedSampleRates.empty()) {
         mutableCaps.currentSampleRate = mutableCaps.supportedSampleRates[0];
         ASFW_LOG(Audio, "AVCDiscovery: Using first supported rate as current: %.0f Hz",
@@ -510,11 +677,21 @@ void AVCDiscovery::HandleInitializedUnit(uint64_t guid, const std::shared_ptr<AV
              plugSummary.outputAudioMaxChannels, plugSummary.outputAudioPlugs,
              channelCount, channelCountSource);
 
+    const uint32_t vendorId = devicePtr->GetVendorID();
+    const uint32_t modelId = devicePtr->GetModelID();
+
     //======================================================================
-    // Phase 1.5: Set sample rate to 48kHz before creating audio nub
+    // Phase 1.5: Choose the rate we publish into the audio nub
     //======================================================================
-    // TODO: Make this configurable. For now, force 48kHz for encoding testing.
+    // When a device protocol owns attach-time format programming, discovery must
+    // not issue its own generic 0x19 sample-rate switch as well. That splits
+    // ownership across two layers and can leave the single-pending FCP transport
+    // busy right as attach-time bring-up starts.
     constexpr double kTargetSampleRate = 48000.0;
+    bool protocolOwnsAttachTimeFormat = false;
+    if (const auto* record = registry_.FindByGuid(guid); record && record->protocol) {
+        protocolOwnsAttachTimeFormat = record->protocol->OwnsAttachTimeFormatProgramming();
+    }
 
     // Check if device supports 48kHz
     bool supports48k = false;
@@ -526,50 +703,58 @@ void AVCDiscovery::HandleInitializedUnit(uint64_t guid, const std::shared_ptr<AV
     }
 
     if (supports48k && mutableCaps.currentSampleRate != kTargetSampleRate) {
-        ASFW_LOG(Audio, "AVCDiscovery: Switching sample rate from %.0f Hz to %.0f Hz (fire-and-forget)",
-                 mutableCaps.currentSampleRate, kTargetSampleRate);
+        if (protocolOwnsAttachTimeFormat) {
+            ASFW_LOG(Audio,
+                     "AVCDiscovery: Publishing preferred 48kHz "
+                     "(current %.0f Hz); protocol-owned attach-time format programming "
+                     "will program the device",
+                     mutableCaps.currentSampleRate);
+            mutableCaps.currentSampleRate = kTargetSampleRate;
+        } else {
+            ASFW_LOG(Audio, "AVCDiscovery: Switching sample rate from %.0f Hz to %.0f Hz (fire-and-forget)",
+                     mutableCaps.currentSampleRate, kTargetSampleRate);
 
-        // Use Unit Plug Signal Format (Oxford/Linux style) - opcode 0x19
-        // This sets the format on Unit Plug 0 which controls both input and output
-        using namespace ASFW::Protocols::AVC;
+            // Use Unit Plug Signal Format (Oxford/Linux style) - opcode 0x19
+            // This sets the format on Unit Plug 0 which controls both input and output
+            using namespace ASFW::Protocols::AVC;
 
-        // Build AV/C CDB for INPUT PLUG SIGNAL FORMAT (0x19) CONTROL command
-        // Subunit 0xFF = Unit level (not Music Subunit)
-        AVCCdb cdb;
-        cdb.ctype = static_cast<uint8_t>(AVCCommandType::kControl);
-        cdb.subunit = 0xFF;  // Unit level (not Music Subunit 0x60)
-        cdb.opcode = 0x19;   // INPUT PLUG SIGNAL FORMAT (Oxford/Linux style)
-        cdb.operands[0] = 0x00;  // Plug 0
-        cdb.operands[1] = 0x90;  // AM824 format
-        cdb.operands[2] = 0x02;  // 48kHz (SFC code per IEC 61883-6)
-        cdb.operands[3] = 0xFF;  // Padding/Sync
-        cdb.operands[4] = 0xFF;  // Padding/Sync
-        cdb.operandLength = 5;
+            // Build AV/C CDB for INPUT PLUG SIGNAL FORMAT (0x19) CONTROL command
+            // Subunit 0xFF = Unit level (not Music Subunit)
+            AVCCdb cdb;
+            cdb.ctype = static_cast<uint8_t>(AVCCommandType::kControl);
+            cdb.subunit = 0xFF;  // Unit level (not Music Subunit 0x60)
+            cdb.opcode = 0x19;   // INPUT PLUG SIGNAL FORMAT (Oxford/Linux style)
+            cdb.operands[0] = 0x00;  // Plug 0
+            cdb.operands[1] = 0x90;  // AM824 format
+            cdb.operands[2] = 0x02;  // 48kHz (SFC code per IEC 61883-6)
+            cdb.operands[3] = 0xFF;  // Padding/Sync
+            cdb.operands[4] = 0xFF;  // Padding/Sync
+            cdb.operandLength = 5;
 
-        // Create command with shared ownership (required by AVCCommand)
-        auto setRateCmd = std::make_shared<AVCCommand>(
-            avcUnit->GetFCPTransport(),
-            cdb
-        );
+            // Create command with shared ownership (required by AVCCommand)
+            auto setRateCmd = std::make_shared<AVCCommand>(
+                avcUnit->GetFCPTransport(),
+                cdb
+            );
 
-        // Fire-and-forget: Submit and assume success
-        // Don't wait - the device will switch asynchronously
-        // The callback just logs the result
-        setRateCmd->Submit([setRateCmd](AVCResult result, const AVCCdb&) {
-            // Capture setRateCmd to keep it alive until completion
-            if (IsSuccess(result)) {
-                ASFW_LOG(Audio, "✅ AVCDiscovery: Sample rate change command accepted");
-            } else {
-                ASFW_LOG_WARNING(Audio, "AVCDiscovery: Sample rate change command response: %d",
-                                 static_cast<int>(result));
-            }
-        });
+            // Fire-and-forget: Submit and assume success
+            // Don't wait - the device will switch asynchronously
+            // The callback just logs the result
+            setRateCmd->Submit([setRateCmd](AVCResult result, const AVCCdb&) {
+                // Capture setRateCmd to keep it alive until completion
+                if (IsSuccess(result)) {
+                    ASFW_LOG(Audio, "✅ AVCDiscovery: Sample rate change command accepted");
+                } else {
+                    ASFW_LOG_WARNING(Audio, "AVCDiscovery: Sample rate change command response: %d",
+                                     static_cast<int>(result));
+                }
+            });
 
-        // Assume success - set to 48kHz
-        // The device typically switches within milliseconds
-        mutableCaps.currentSampleRate = kTargetSampleRate;
-        ASFW_LOG(Audio, "AVCDiscovery: Assuming 48kHz - nub will use this rate");
-
+            // Assume success - set to 48kHz
+            // The device typically switches within milliseconds
+            mutableCaps.currentSampleRate = kTargetSampleRate;
+            ASFW_LOG(Audio, "AVCDiscovery: Assuming 48kHz - nub will use this rate");
+        }
     } else if (!supports48k) {
         ASFW_LOG(Audio, "AVCDiscovery: Device does not support 48kHz, using %.0f Hz",
                  mutableCaps.currentSampleRate);
@@ -593,8 +778,6 @@ void AVCDiscovery::HandleInitializedUnit(uint64_t guid, const std::shared_ptr<AV
         }
     }
 
-    const uint32_t vendorId = devicePtr->GetVendorID();
-    const uint32_t modelId = devicePtr->GetModelID();
     const char* streamModeReason = "default-nonblocking";
     const auto streamMode = ResolveStreamMode(mutableCaps, vendorId, modelId, streamModeReason);
 
@@ -647,7 +830,26 @@ void AVCDiscovery::HandleInitializedUnit(uint64_t guid, const std::shared_ptr<AV
     audioDeviceConfig.currentSampleRate = currentRate;
     audioDeviceConfig.inputPlugName = mutableCaps.inputPlugName;
     audioDeviceConfig.outputPlugName = mutableCaps.outputPlugName;
+    audioDeviceConfig.playback48kRawFormatBlock =
+        FindRawFormatBlockForRate(musicSubunit->GetPlugs(), /*wantInput=*/true, 48000);
+    audioDeviceConfig.capture48kRawFormatBlock =
+        FindRawFormatBlockForRate(musicSubunit->GetPlugs(), /*wantInput=*/false, 48000);
+    if (audioDeviceConfig.playback48kRawFormatBlock.empty()) {
+        audioDeviceConfig.playback48kRawFormatBlock =
+            FindRawUnitIsochFormatBlockForRate(*avcUnit, /*wantInput=*/true, 48000);
+    }
+    if (audioDeviceConfig.capture48kRawFormatBlock.empty()) {
+        audioDeviceConfig.capture48kRawFormatBlock =
+            FindRawUnitIsochFormatBlockForRate(*avcUnit, /*wantInput=*/false, 48000);
+    }
     audioDeviceConfig.streamMode = streamMode;
+
+    ASFW_LOG(Audio,
+             "AVCDiscovery: Cached raw 48k format blocks playback=%zu capture=%zu "
+             "GUID=%llx",
+             audioDeviceConfig.playback48kRawFormatBlock.size(),
+             audioDeviceConfig.capture48kRawFormatBlock.size(),
+             guid);
 
     if (IsApogeeDuet(*devicePtr)) {
         ConfigureDuetPhantomOverrides(audioDeviceConfig, std::nullopt);

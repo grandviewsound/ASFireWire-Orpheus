@@ -26,6 +26,7 @@
 
 #include <DriverKit/IOLib.h>
 #include <memory>
+#include <vector>
 
 namespace ASFW::Audio::BeBoB {
 
@@ -83,6 +84,11 @@ constexpr uint32_t kVendorCommandTimeoutMs = 250;
         default:
             return kIOReturnError;
     }
+}
+
+[[nodiscard]] bool RawFormatBlockLooksUsable(const std::vector<uint8_t>& rawFormatBlock) noexcept
+{
+    return rawFormatBlock.size() >= 3 && rawFormatBlock[0] == 0x90;
 }
 
 } // namespace
@@ -177,6 +183,20 @@ void BeBoBProtocol::UpdateRuntimeContext(uint16_t nodeId,
     transport_.store(transport, std::memory_order_release);
 }
 
+void BeBoBProtocol::UpdateDiscoveredStreamFormatBlocks(
+    const std::vector<uint8_t>& playback48kRawFormatBlock,
+    const std::vector<uint8_t>& capture48kRawFormatBlock)
+{
+    playback48kRawFormatBlock_ = playback48kRawFormatBlock;
+    capture48kRawFormatBlock_ = capture48kRawFormatBlock;
+
+    ASFW_LOG(Audio,
+             "BeBoBProtocol: Updated discovered 48k raw format blocks "
+             "(playback=%zu bytes capture=%zu bytes)",
+             playback48kRawFormatBlock_.size(),
+             capture48kRawFormatBlock_.size());
+}
+
 // ---------------------------------------------------------------------------
 // PreparePlaybackPath — Apple cmds #2/#3: post-iPCR-connect re-send
 // ---------------------------------------------------------------------------
@@ -206,8 +226,26 @@ IOReturn BeBoBProtocol::PreparePlaybackPath()
 
     auto submitOne = [&](bool isInput, uint8_t audioPairs, const char* tag) -> IOReturn {
         auto state = std::make_shared<CommandState>();
-        auto command = std::make_shared<AVCExtendedStreamFormatCommand>(
-            *transport, isInput, /*plugId=*/0x00, audioPairs, /*hasMidi=*/true);
+        const auto& rawFormatBlock =
+            isInput ? playback48kRawFormatBlock_ : capture48kRawFormatBlock_;
+
+        std::shared_ptr<AVCExtendedStreamFormatCommand> command;
+        if (RawFormatBlockLooksUsable(rawFormatBlock)) {
+            command = std::make_shared<AVCExtendedStreamFormatCommand>(
+                *transport, isInput, /*plugId=*/0x00, rawFormatBlock);
+            ASFW_LOG(Audio,
+                     "BeBoBProtocol: Post-CMP ExtStreamFormat %{public}s using discovered "
+                     "raw block (%zu bytes)",
+                     tag,
+                     rawFormatBlock.size());
+        } else {
+            command = std::make_shared<AVCExtendedStreamFormatCommand>(
+                *transport, isInput, /*plugId=*/0x00, audioPairs, /*hasMidi=*/true);
+            ASFW_LOG_WARNING(Audio,
+                             "BeBoBProtocol: Post-CMP ExtStreamFormat %{public}s falling back "
+                             "to synthetic Orpheus payload",
+                             tag);
+        }
         command->Submit([state](AVCResult result) {
             state->status.store(MapAVCResultToIOReturn(result), std::memory_order_release);
             state->done.store(true, std::memory_order_release);
@@ -243,7 +281,7 @@ IOReturn BeBoBProtocol::PreparePlaybackPath()
 }
 
 // ---------------------------------------------------------------------------
-// SendExtStreamFormatControl — 0xBF CONTROL at music subunit (0x60)
+// SendExtStreamFormatControl — 0xBF CONTROL at unit isoch plug
 // ---------------------------------------------------------------------------
 
 void BeBoBProtocol::SendExtStreamFormatControl(uint32_t sequence,
@@ -263,14 +301,26 @@ void BeBoBProtocol::SendExtStreamFormatControl(uint32_t sequence,
     const uint8_t audioPairs = isInput ? kOrpheusInputMBLAPairs : kOrpheusOutputMBLAPairs;
     const char* plugStr = isInput ? "dest" : "source";
     const char* dirStr = PlugDirectionString(isInput);
+    const auto& rawFormatBlock =
+        isInput ? playback48kRawFormatBlock_ : capture48kRawFormatBlock_;
 
-    auto command = std::make_shared<AVCExtendedStreamFormatCommand>(
-        *transport, isInput, plugId, audioPairs, /*hasMidi=*/true);
+    std::shared_ptr<AVCExtendedStreamFormatCommand> command;
+    if (RawFormatBlockLooksUsable(rawFormatBlock)) {
+        command = std::make_shared<AVCExtendedStreamFormatCommand>(
+            *transport, isInput, plugId, rawFormatBlock);
+    } else {
+        command = std::make_shared<AVCExtendedStreamFormatCommand>(
+            *transport, isInput, plugId, audioPairs, /*hasMidi=*/true);
+    }
 
     ASFW_LOG(Audio,
-             "BeBoBProtocol: Sending ExtStreamFormat CONTROL to music subunit "
-             "(%s plug %u, %s, %u MBLA pairs + MIDI)",
-             plugStr, plugId, dirStr, audioPairs);
+             "BeBoBProtocol: Sending ExtStreamFormat CONTROL to unit isoch plug "
+             "(%s plug %u, %s, source=%{public}s, payload=%zu bytes)",
+             plugStr,
+             plugId,
+             dirStr,
+             RawFormatBlockLooksUsable(rawFormatBlock) ? "discovered-raw" : "synthetic-fallback",
+             RawFormatBlockLooksUsable(rawFormatBlock) ? rawFormatBlock.size() : 0u);
 
     command->Submit([this, sequence, plugStr, dirStr, completion = std::move(completion)](
                         AVCResult result) mutable {

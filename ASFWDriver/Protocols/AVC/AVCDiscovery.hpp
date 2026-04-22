@@ -26,7 +26,10 @@
 #include "../Audio/Oxford/Apogee/ApogeeTypes.hpp"
 
 // Forward declarations
-namespace ASFW::Discovery { struct DeviceRecord; }
+namespace ASFW::Discovery {
+    struct DeviceRecord;
+    class DeviceRegistry;
+}
 namespace ASFW::Audio::Model { struct ASFWAudioDevice; }
 
 namespace ASFW::Protocols::AVC {
@@ -41,6 +44,7 @@ class AVCDiscovery : public Discovery::IUnitObserver,
 public:
     AVCDiscovery(IOService* driver,
                  Discovery::IDeviceManager& deviceManager,
+                 Discovery::DeviceRegistry& registry,
                  Protocols::Ports::FireWireBusOps& busOps,
                  Protocols::Ports::FireWireBusInfo& busInfo,
                  ASFW::Audio::IAVCAudioConfigListener* audioConfigListener);
@@ -109,6 +113,7 @@ private:
 
     IOService* driver_{nullptr};
     Discovery::IDeviceManager& deviceManager_;
+    Discovery::DeviceRegistry& registry_;
     Protocols::Ports::FireWireBusOps& busOps_;
     Protocols::Ports::FireWireBusInfo& busInfo_;
     ASFW::Audio::IAVCAudioConfigListener* audioConfigListener_{nullptr};

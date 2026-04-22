@@ -1,6 +1,7 @@
 #include "BufferRing.hpp"
 
 #include <atomic>
+#include <cstring>
 
 #include "../../Common/BarrierUtils.hpp"
 #include "../Memory/DMAMemoryManager.hpp"
@@ -105,36 +106,125 @@ std::optional<FilledBufferInfo> BufferRing::Dequeue() noexcept {
     const uint16_t next_resCount = HW::AR_resCount(next_desc);
     const uint16_t next_reqCount = static_cast<uint16_t>(next_desc.control & 0xFFFF);
 
-    // If next buffer has data, hardware has moved to it
+    // If next buffer has data, hardware has moved to it.
+    // STRADDLE HANDLING (fix67, per AppleFWOHCI): before the old descriptor is
+    // reset, the old buffer's tail may contain the HEAD of a packet whose
+    // payload lies in the new buffer. If we reset + republish the old
+    // descriptor without preserving those bytes, hardware reuses the old
+    // buffer for fresh packets and the straddling packet's head is lost.
+    // Fix66 HW test (console log fix 66.txt) captured this exact event: a
+    // 24-byte straddle at buffer[1]+0 whose FCP response was in the discarded
+    // old-buffer tail, producing tCode=0xF at the parser.
+    //
+    // Apple's getPacket/getQuadlet copy [old_tail + new_head] into an 8 KB
+    // scratch (IOMalloc(0x2000u)) and return scratch to the parser. We mirror
+    // that shape here. Buffers in our arch are VA-contiguous so direct reads
+    // would also work, but the scratch copy is race-safe against hardware
+    // reusing the old buffer the instant we publish the reset.
     if (next_resCount != next_reqCount) {
-        // Hardware advanced to next buffer! Recycle current buffer.
-        // Fix-65 diagnostic: elevated to V0 so we see auto-recycle events
-        // in the default log; these are suspect correlators for tCode=0xF
-        // drops (startOffset resets to 0 on a potentially-mid-write buffer).
-        ASFW_LOG_V0(Async,
-                    "🔄 BufferRing::Dequeue: Hardware advanced to buffer[%zu] (resCount=%u/%u). "
-                    "Auto-recycling buffer[%zu] (prev last_dequeued=%zu)",
-                    next_index, next_resCount, next_reqCount, index,
-                    last_dequeued_bytes_);
-
-        // Recycle current buffer (resets resCount=reqCount)
         auto& desc_to_recycle = descriptors_[index];
         const uint16_t reqCount_recycle = static_cast<uint16_t>(desc_to_recycle.control & 0xFFFF);
-        HW::AR_init_status(desc_to_recycle, reqCount_recycle);
 
+        // Old buffer's new tail bytes (those the parser hasn't returned yet).
+        // Auto-recycle fires when HW has moved on, so total_in_old ≈ reqCount.
+        const size_t total_in_old = reqCount_recycle;
+        const size_t old_tail_len =
+            (total_in_old > last_dequeued_bytes_) ? (total_in_old - last_dequeued_bytes_) : 0;
+
+        // New buffer bytes already written (may grow; this is a snapshot).
+        const size_t new_head_len = (next_reqCount > next_resCount)
+            ? static_cast<size_t>(next_reqCount - next_resCount) : 0;
+
+        ASFW_LOG_V0(Async,
+                    "🔄 BufferRing::Dequeue: HW advanced to buffer[%zu] (resCount=%u/%u). "
+                    "Auto-recycling buffer[%zu] (prev last_dequeued=%zu old_tail=%zu new_head=%zu)",
+                    next_index, next_resCount, next_reqCount, index,
+                    last_dequeued_bytes_, old_tail_len, new_head_len);
+
+        if (!scratch_.empty() && (old_tail_len > 0 || new_head_len > 0)) {
+            const size_t scratchCap = scratch_.size();
+            const size_t copyOld = (old_tail_len < scratchCap) ? old_tail_len : scratchCap;
+            const size_t remainAfterOld = scratchCap - copyOld;
+            const size_t copyNew = (new_head_len < remainAfterOld) ? new_head_len : remainAfterOld;
+
+            // Invalidate CPU cache for the source ranges before memcpy — these
+            // were written by DMA and may not be visible to the CPU yet.
+            auto* old_vaddr = static_cast<uint8_t*>(GetBufferAddress(index));
+            auto* new_vaddr = static_cast<uint8_t*>(GetBufferAddress(next_index));
+            if (dma_) {
+                if (copyOld > 0 && old_vaddr) {
+                    dma_->FetchFromDevice(old_vaddr + last_dequeued_bytes_, copyOld);
+                }
+                if (copyNew > 0 && new_vaddr) {
+                    dma_->FetchFromDevice(new_vaddr, copyNew);
+                }
+            }
+            // Source is a cache-inhibited DMA mapping (Device memory on arm64),
+            // which rejects unaligned NEON vector loads — std::memcpy compiles
+            // to _platform_memmove, which uses LDP Q0,Q1. That raises
+            // EXC_ARM_DA_ALIGN on any copy ≥16B at a non-16-aligned offset.
+            // Mirror the scalar volatile-store loop used in
+            // DMAMemoryManager.cpp:305 for the same reason, on the read side.
+            if (copyOld > 0 && old_vaddr) {
+                auto* src = reinterpret_cast<volatile const uint8_t*>(old_vaddr + last_dequeued_bytes_);
+                auto* dst = scratch_.data();
+                for (size_t i = 0; i < copyOld; ++i) {
+                    dst[i] = src[i];
+                }
+            }
+            if (copyNew > 0 && new_vaddr) {
+                auto* src = reinterpret_cast<volatile const uint8_t*>(new_vaddr);
+                auto* dst = scratch_.data() + copyOld;
+                for (size_t i = 0; i < copyNew; ++i) {
+                    dst[i] = src[i];
+                }
+            }
+
+            // Reset old descriptor and publish AFTER the copy — hardware may
+            // now reuse the old buffer without losing straddle data.
+            HW::AR_init_status(desc_to_recycle, reqCount_recycle);
+            if (dma_) {
+                dma_->PublishToDevice(&desc_to_recycle, sizeof(desc_to_recycle));
+            }
+            Driver::WriteBarrier();
+
+            // Advance head. The new buffer's first `copyNew` bytes were just
+            // delivered via scratch — next Dequeue resumes parsing from there.
+            head_ = next_index;
+            last_dequeued_bytes_ = copyNew;
+
+            ASFW_LOG_V0(Async,
+                        "♻️  BufferRing: Straddle-scratch: %zu old_tail + %zu new_head = %zu bytes. "
+                        "head_→%zu, last_dequeued_bytes_→%zu",
+                        copyOld, copyNew, copyOld + copyNew, next_index, last_dequeued_bytes_);
+
+            return FilledBufferInfo{
+                .virtualAddress    = scratch_.data(),
+                .startOffset       = 0,
+                .bytesFilled       = copyOld + copyNew,
+                .descriptorIndex   = index,  // old index; caller may use for WAKE accounting
+                .autoRecycledPrev  = true,
+                .isStraddleScratch = true,
+            };
+        }
+
+        // No scratch attached (legacy path) OR nothing to copy: fall back to
+        // the original behaviour — reset old descriptor, advance head, lose
+        // any straddle bytes. Rings without scratch (e.g. isoch RX) take this
+        // branch and are unaffected by the async straddle bug.
+        HW::AR_init_status(desc_to_recycle, reqCount_recycle);
         if (dma_) {
             dma_->PublishToDevice(&desc_to_recycle, sizeof(desc_to_recycle));
         }
         Driver::WriteBarrier();
 
-        // Advance to next buffer
         head_ = next_index;
-        last_dequeued_bytes_ = 0;  // Reset tracking for new buffer
-        index = next_index;  // Process the new buffer now
-        autoRecycledPrev = true;  // Caller must write WAKE bit (see FilledBufferInfo doc)
+        last_dequeued_bytes_ = 0;
+        index = next_index;
+        autoRecycledPrev = true;
 
         ASFW_LOG_V4(Async,
-                    "✅ BufferRing: Auto-recycled buffer, advanced head_ →%zu",
+                    "✅ BufferRing: Auto-recycled buffer (no scratch), advanced head_→%zu",
                     index);
     }
 

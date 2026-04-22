@@ -62,13 +62,6 @@ void BuildFallbackBoolControls(ParsedAudioDriverConfig& inOutConfig) {
     }
 }
 
-void ApplyBringupSingleFormatPolicy(ParsedAudioDriverConfig& inOutConfig) {
-    // Bring-up note: dynamic sample-rate advertisement is intentionally deferred.
-    inOutConfig.sampleRates[0] = kDefaultSampleRate;
-    inOutConfig.sampleRateCount = 1;
-    inOutConfig.currentSampleRate = kDefaultSampleRate;
-}
-
 void ClampAudioDriverChannels(ParsedAudioDriverConfig& inOutConfig,
                               uint32_t maxSupportedChannels) {
     if (inOutConfig.inputChannelCount == 0) {

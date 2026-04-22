@@ -213,7 +213,8 @@ kern_return_t IMPL(ASFWDriver, Start) {
     if (!ctx.deps.avcDiscovery && ctx.deps.deviceManager) {
         auto& bus = ctx.controller->Bus();
         ctx.deps.avcDiscovery = std::make_shared<ASFW::Protocols::AVC::AVCDiscovery>(
-            this, *ctx.deps.deviceManager, bus, bus, ctx.audioCoordinator.get());
+            this, *ctx.deps.deviceManager, *ctx.deps.deviceRegistry, bus, bus,
+            ctx.audioCoordinator.get());
         ctx.controller->SetAVCDiscovery(ctx.deps.avcDiscovery);
         if (ctx.audioCoordinator) {
             ctx.audioCoordinator->SetAVCDiscovery(ctx.deps.avcDiscovery.get());

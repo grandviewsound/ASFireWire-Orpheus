@@ -35,6 +35,60 @@ namespace {
                (static_cast<uint32_t>(data[2]) << 8) |
                 data[3];
     }
+
+    void MergePreservedChannelDetails(
+        std::optional<StreamFormats::AudioStreamFormat>& destination,
+        const std::vector<StreamFormats::ChannelFormatInfo>& preservedChannelFormats) {
+        if (!destination.has_value() || preservedChannelFormats.empty()) {
+            return;
+        }
+
+        for (size_t i = 0; i < std::min(preservedChannelFormats.size(),
+                                        destination->channelFormats.size()); ++i) {
+            destination->channelFormats[i].channels = preservedChannelFormats[i].channels;
+        }
+
+        for (size_t i = destination->channelFormats.size();
+             i < preservedChannelFormats.size(); ++i) {
+            destination->channelFormats.push_back(preservedChannelFormats[i]);
+        }
+    }
+
+    std::optional<StreamFormats::AudioStreamFormat> ParseDiscoveryFormatResponse(
+        const std::vector<uint8_t>& rawResponse,
+        uint8_t& outSubfunction) {
+        if (rawResponse.size() < kAVCFrameMinSize || rawResponse.size() > kAVCFrameMaxSize) {
+            return std::nullopt;
+        }
+
+        FCPFrame frame;
+        frame.length = rawResponse.size();
+        std::copy(rawResponse.begin(), rawResponse.end(), frame.data.begin());
+
+        auto cdb = AVCCdb::Decode(frame);
+        if (!cdb.has_value() || cdb->operandLength == 0) {
+            return std::nullopt;
+        }
+
+        outSubfunction = cdb->operands[0];
+
+        size_t formatOffset = 0;
+        if (outSubfunction == StreamFormats::kStreamFormatSubfunc_Current) {
+            formatOffset = 7;
+        } else if (outSubfunction == StreamFormats::kStreamFormatSubfunc_Supported) {
+            formatOffset = 8;
+        } else {
+            return std::nullopt;
+        }
+
+        if (cdb->operandLength <= formatOffset) {
+            return std::nullopt;
+        }
+
+        return StreamFormats::StreamFormatParser::Parse(
+            cdb->operands.data() + formatOffset,
+            cdb->operandLength - formatOffset);
+    }
 } // namespace
 
 MusicSubunit::MusicSubunit(AVCSubunitType type, uint8_t id)
@@ -147,24 +201,7 @@ void MusicSubunit::QueryPlugFormats(AVCUnit& unit, size_t plugIndex, std::functi
             
             // Update with new format from AV/C query
             plugs_[plugIndex].currentFormat = *format;
-            
-            // Merge preserved channel details into the new format
-            // If descriptor had channel info, use it; otherwise keep what AV/C query provided
-            if (!preservedChannelFormats.empty()) {
-                // Copy channel details (musicPlugID, position, name) from preserved formats
-                for (size_t i = 0; i < std::min(preservedChannelFormats.size(), 
-                                                  plugs_[plugIndex].currentFormat->channelFormats.size()); ++i) {
-                    plugs_[plugIndex].currentFormat->channelFormats[i].channels = 
-                        std::move(preservedChannelFormats[i].channels);
-                }
-                
-                // If AV/C query returned fewer channelFormats, append the rest from preserved
-                for (size_t i = plugs_[plugIndex].currentFormat->channelFormats.size(); 
-                     i < preservedChannelFormats.size(); ++i) {
-                    plugs_[plugIndex].currentFormat->channelFormats.push_back(
-                        std::move(preservedChannelFormats[i]));
-                }
-            }
+            MergePreservedChannelDetails(plugs_[plugIndex].currentFormat, preservedChannelFormats);
             
             // Calculate actual channel count:
             // - For compound formats, sum up channelFormats[i].channelCount
@@ -1075,6 +1112,8 @@ void MusicSubunit::ParseDescriptorBlock(const uint8_t* data, size_t length) {
         uint16_t audioOutputPlugs = 0;
         uint16_t audioInputMaxChannels = capabilities_.maxAudioInputChannels.value_or(0);
         uint16_t audioOutputMaxChannels = capabilities_.maxAudioOutputChannels.value_or(0);
+        const uint16_t descriptorMidiIns = capabilities_.maxMidiInputPorts.value_or(0);
+        const uint16_t descriptorMidiOuts = capabilities_.maxMidiOutputPorts.value_or(0);
         uint16_t midiIns = 0;
         uint16_t midiOuts = 0;
 
@@ -1115,14 +1154,26 @@ void MusicSubunit::ParseDescriptorBlock(const uint8_t* data, size_t length) {
         if (audioOutputMaxChannels > 0) {
             capabilities_.maxAudioOutputChannels = audioOutputMaxChannels;
         }
-        capabilities_.maxMidiInputPorts = midiIns;
-        capabilities_.maxMidiOutputPorts = midiOuts;
+        const uint16_t effectiveMidiIns = midiIns > 0 ? midiIns : descriptorMidiIns;
+        const uint16_t effectiveMidiOuts = midiOuts > 0 ? midiOuts : descriptorMidiOuts;
+        capabilities_.maxMidiInputPorts = effectiveMidiIns;
+        capabilities_.maxMidiOutputPorts = effectiveMidiOuts;
+
+        if ((midiIns == 0 && descriptorMidiIns > 0) ||
+            (midiOuts == 0 && descriptorMidiOuts > 0)) {
+            ASFW_LOG_V1(MusicSubunit,
+                        "Preserving descriptor-derived MIDI counts: plugs In=%u Out=%u, descriptor In=%u Out=%u",
+                        midiIns,
+                        midiOuts,
+                        descriptorMidiIns,
+                        descriptorMidiOuts);
+        }
         
         ASFW_LOG_V1(MusicSubunit,
                     "Updated Capabilities from Plugs: Audio In maxCh=%u (plugs=%u) Out maxCh=%u (plugs=%u), MIDI In=%u Out=%u",
                     capabilities_.maxAudioInputChannels.value_or(0), audioInputPlugs,
                     capabilities_.maxAudioOutputChannels.value_or(0), audioOutputPlugs,
-                    midiIns, midiOuts);
+                    effectiveMidiIns, effectiveMidiOuts);
     }
 }
 
@@ -1394,6 +1445,48 @@ void MusicSubunit::LoadFromDiscovery(uint8_t destPlugs, uint8_t srcPlugs,
                 statusDescriptorHasPlugs_,
                 plugs_.size(),
                 capabilities_.hasAudioCapability);
+}
+
+void MusicSubunit::ApplyDiscoveryFormatResponse(uint8_t plugId, bool isInput,
+                                                const std::vector<uint8_t>& rawResponse) {
+    auto plugIt = std::find_if(plugs_.begin(), plugs_.end(),
+                               [plugId, isInput](const PlugInfo& plug) {
+                                   return plug.plugID == plugId && plug.IsInput() == isInput;
+                               });
+    if (plugIt == plugs_.end()) {
+        return;
+    }
+
+    uint8_t subfunction = 0;
+    auto parsed = ParseDiscoveryFormatResponse(rawResponse, subfunction);
+    if (!parsed.has_value()) {
+        return;
+    }
+
+    if (subfunction == StreamFormats::kStreamFormatSubfunc_Current) {
+        std::vector<StreamFormats::ChannelFormatInfo> preservedChannelFormats;
+        if (plugIt->currentFormat.has_value()) {
+            preservedChannelFormats = plugIt->currentFormat->channelFormats;
+        }
+
+        plugIt->currentFormat = *parsed;
+        MergePreservedChannelDetails(plugIt->currentFormat, preservedChannelFormats);
+        return;
+    }
+
+    if (subfunction == StreamFormats::kStreamFormatSubfunc_Supported) {
+        const auto alreadyPresent = std::any_of(
+            plugIt->supportedFormats.begin(),
+            plugIt->supportedFormats.end(),
+            [&parsed](const StreamFormats::AudioStreamFormat& existing) {
+                return existing.GetSampleRateHz() == parsed->GetSampleRateHz() &&
+                       existing.totalChannels == parsed->totalChannels &&
+                       existing.rawFormatBlock == parsed->rawFormatBlock;
+            });
+        if (!alreadyPresent) {
+            plugIt->supportedFormats.push_back(*parsed);
+        }
+    }
 }
 
 } // namespace ASFW::Protocols::AVC::Music

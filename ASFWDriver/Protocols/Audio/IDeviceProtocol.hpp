@@ -7,6 +7,7 @@
 
 #include <DriverKit/IOReturn.h>
 #include <cstdint>
+#include <vector>
 
 namespace ASFW::Protocols::AVC {
     class FCPTransport;
@@ -63,6 +64,20 @@ public:
     /// Drivers can call this before starting host IR/IT contexts.
     /// Implementations should be idempotent and return quickly.
     virtual IOReturn StartDuplex48k() { return kIOReturnUnsupported; }
+
+    /// Returns true when this protocol, rather than generic discovery, owns the
+    /// device's initial attach-time stream-format programming.
+    virtual bool OwnsAttachTimeFormatProgramming() const { return false; }
+
+    /// Provide discovery-time raw ExtendedStreamFormat blocks for the preferred
+    /// attach operating mode. Protocols can use these exact bytes when issuing
+    /// SetExtendedStreamFormat instead of synthesizing the payload.
+    virtual void UpdateDiscoveredStreamFormatBlocks(
+        const std::vector<uint8_t>& playback48kRawFormatBlock,
+        const std::vector<uint8_t>& capture48kRawFormatBlock) {
+        (void)playback48kRawFormatBlock;
+        (void)capture48kRawFormatBlock;
+    }
 
     /// Returns true once StartDuplex48k() has completed successfully at least once.
     /// Used by the bus-reset recovery path to decide whether to retry SetFormat

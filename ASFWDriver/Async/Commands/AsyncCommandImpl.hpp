@@ -112,12 +112,14 @@ AsyncHandle AsyncCommand<Derived>::Submit(AsyncSubsystem& subsys) {
         return AsyncHandle{0};
     }
     
-    // Step 10: Schedule timeout
-    // Increased from 250ms to 500ms: with retries, this aligns better with
-    // FCP timeout windows and avoids expiring just before valid AR responses.
+    // Step 10: Schedule timeout.
+    // Most transactions keep the 500 ms default, but a few transport paths
+    // (notably CMP PCR compare-swap during cold attach) need a larger per-op
+    // budget to match observed device latency without inflating every command.
     const uint64_t now = subsys.GetCurrentTimeUsec();
-    constexpr uint64_t kDefaultTimeoutUsec = 500'000;  // 500ms per attempt
-    subsys.GetTracking()->OnTxPosted(handle, now, kDefaultTimeoutUsec);
+    constexpr uint32_t kDefaultTimeoutMs = 500;
+    const uint32_t timeoutMs = meta.timeoutMs != 0 ? meta.timeoutMs : kDefaultTimeoutMs;
+    subsys.GetTracking()->OnTxPosted(handle, now, static_cast<uint64_t>(timeoutMs) * 1000ULL);
     
     // Step 11: Attach payload to PayloadRegistry (if non-null)
     // Convert unique_ptr to shared_ptr before attaching to registry (consumes unique_ptr)
