@@ -210,15 +210,11 @@ IsochTxDmaRing::RefillOutcome IsochTxDmaRing::Refill(Driver::HardwareInterface& 
     }
 
     // Cycle resync from hardware timestamp (descriptor completion timestamp)
-    bool resyncFired = false;          // DIAG (2026-05-22)
-    uint32_t resyncHwCycle = 0;        // DIAG
-    uint32_t resyncStatusWord = 0;     // DIAG
     if (deltaConsumed > 0 && cycleTrackingValid_) {
         const uint32_t lastProcessedPkt = (hwPacketIndex + Layout::kNumPackets - 1) % Layout::kNumPackets;
         auto* processedOL = slab_.GetDescriptorPtr(lastProcessedPkt * Layout::kBlocksPerPacket + 2);
         const uint16_t hwTimestamp = static_cast<uint16_t>(processedOL->statusWord & 0xFFFF);
         out.hwTimestamp = hwTimestamp;
-        resyncStatusWord = processedOL->statusWord;
 
         if (processedOL->statusWord != 0) {
             const uint32_t hwCycle = hwTimestamp & 0x1FFF;
@@ -226,24 +222,12 @@ IsochTxDmaRing::RefillOutcome IsochTxDmaRing::Refill(Driver::HardwareInterface& 
 
             const uint32_t aheadCount = (softwareFillIndex_ + Layout::kNumPackets - lastProcessedPkt) % Layout::kNumPackets;
             nextTransmitCycle_ = (hwCycle + aheadCount) % 8000;
-            resyncFired = true;
-            resyncHwCycle = hwCycle;
         }
     }
 
     // Phase 2: keep ring full with silent/cadence-correct packets
     const uint32_t toFill = (ringPacketsAhead_ < Layout::kMaxWriteAhead)
         ? (Layout::kMaxWriteAhead - ringPacketsAhead_) : 0;
-
-    // DIAG (2026-05-22): trace cycle-tracking inputs feeding the SYT generator.
-    // Throttled ~2/sec. resync=0 (statusWord==0) means the HW timestamp resync never
-    // fires → nextTxCycle free-runs from seed; pairs with the SYTGen trace to localise
-    // whether the frozen wire SYT comes from a stuck txCycle or a stuck accumulator.
-    ASFW_LOG_RL(Isoch, "tx/refill_cycle", 500, OS_LOG_TYPE_DEFAULT,
-                "Refill: toFill=%u deltaConsumed=%u resync=%u statusWord=0x%08x hwCycle=%u "
-                "nextTxCycle=%u ringAhead=%u swFill=%u hwPkt=%u",
-                toFill, deltaConsumed, resyncFired ? 1u : 0u, resyncStatusWord, resyncHwCycle,
-                nextTransmitCycle_, ringPacketsAhead_, softwareFillIndex_, hwPacketIndex);
 
     if (toFill > 0) {
         counters_.refills.fetch_add(1, std::memory_order_relaxed);

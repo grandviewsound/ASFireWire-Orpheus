@@ -348,6 +348,19 @@ void IsochTxVerifier::RunWork() noexcept {
             state_.lastDataDbc = cip.dbc;
         }
 
+        // Sample the on-wire SYT for DATA packets. The class checks above only flag
+        // a SYT that is wrong for the data/no-data class — a SYT frozen at a single
+        // *valid* value (e.g. 0x8a00) would pass them silently. Throttled 1/sec; grep
+        // "txverify/syt_sample" across a run: identical syt => frozen wire SYT,
+        // varying syt => forward-ticking. Answers the open wire-level question.
+        if (isData) {
+            const uint32_t sytQ0Wire = ASFW::Isoch::TxVerify::ByteSwap32(e.cipQ0Host);
+            const uint32_t sytQ1Wire = ASFW::Isoch::TxVerify::ByteSwap32(e.cipQ1Host);
+            ASFW_LOG_RL(Isoch, "txverify/syt_sample", 1000, OS_LOG_TYPE_DEFAULT,
+                        "IT TX VERIFY: wire SYT sample pkt=%u syt=0x%04x dbc=0x%02x cip=[%08x %08x]",
+                        e.packetIndex, cip.syt, cip.dbc, sytQ0Wire, sytQ1Wire);
+        }
+
         if (isData && e.audioQuadletCount > 0) {
             const uint32_t silenceHost = Encoding::AM824Encoder::encodeSilence();
             const uint32_t slotsPerFrame = (expectedAm824Slots != 0) ? expectedAm824Slots : 1;

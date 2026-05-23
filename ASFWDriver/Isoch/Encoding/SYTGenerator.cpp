@@ -44,7 +44,6 @@ uint16_t SYTGenerator::computeDataSYT(uint32_t transmitCycle, uint32_t samplesIn
     if (samplesInPacket == 0 || ticksPerSample_ == 0) return kNoInfo;
 
     // Total presentation offset = sample position offset + transfer delay
-    const uint32_t offsetBefore = sytOffsetTicks_;   // DIAG (2026-05-22)
     uint32_t totalTicks = sytOffsetTicks_ + kTransferDelayTicks;
 
     // Split into whole cycles and remaining ticks
@@ -66,15 +65,6 @@ uint16_t SYTGenerator::computeDataSYT(uint32_t transmitCycle, uint32_t samplesIn
     }
 
     dataPacketCount_++;
-
-    // DIAG (2026-05-22): trace why the wire SYT is pinned at one value. Throttled
-    // ~2/sec. Reveals whether offBefore (accumulator) and txCycle advance per DATA
-    // packet, or are stuck (which would freeze the emitted SYT).
-    ASFW_LOG_RL(Isoch, "tx/syt_trace", 500, OS_LOG_TYPE_DEFAULT,
-                "SYTGen: txCycle=%u offBefore=%u extraCyc=%u remTicks=%u presCyc=%u "
-                "syt=0x%04x samplesInPkt=%u tps=%u dataPkts=%llu",
-                transmitCycle, offsetBefore, extraCycles, remainingTicks, presentationCycle,
-                syt, samplesInPacket, ticksPerSample_, dataPacketCount_);
 
     return syt;
 }
