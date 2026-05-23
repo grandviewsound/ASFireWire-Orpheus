@@ -4,7 +4,7 @@ set -u
 script_dir="${0:A:h}"
 repo_dir="${script_dir}"
 if [[ ! -x "${repo_dir}/tools/collect_orpheus_hardware_test.sh" ]]; then
-  repo_dir="/Users/kevinpeters/Desktop/Projects/Claude Projects/Firewire/ASFireWire-Orpheus"
+  repo_dir="${HOME}/Desktop/Projects/Claude Projects/Firewire/ASFireWire-Orpheus"
 fi
 
 capture_script="${repo_dir}/tools/collect_orpheus_hardware_test.sh"

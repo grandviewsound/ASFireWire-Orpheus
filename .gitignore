@@ -44,6 +44,10 @@ ASFWDriver/Version/DriverVersion.hpp
 # Exclude docs/ from public repository
 docs/
 
+# Exclude reports/ from public repository (local research analyses;
+# several contained hardcoded /Users/<name> paths)
+reports/
+
 # Exclude Plugins/VersionGeneratorPlugin from public repository
 Plugins/VersionGeneratorPlugin
 
