@@ -17,4 +17,13 @@ void ResponseSender::SendWriteResponse(const ARPacketView& request, ResponseCode
     (void)rcode;
 }
 
+void ResponseSender::SendReadQuadletResponse(const ARPacketView& request,
+                                             ResponseCode rcode,
+                                             uint32_t quadletData) noexcept {
+    // Stub implementation
+    (void)request;
+    (void)rcode;
+    (void)quadletData;
+}
+
 } // namespace ASFW::Async

@@ -117,21 +117,10 @@ TEST(AudioDriverConfigPolicyTests, BuildFallbackBoolControlsIsNoopWhenOverridesE
     EXPECT_EQ(config.boolControls[0].element, 7u);
 }
 
-TEST(AudioDriverConfigPolicyTests, BringupPolicyForcesSingle48kFormat) {
-    ParsedAudioDriverConfig config{};
-    ASFW::Isoch::Audio::InitializeAudioDriverConfigDefaults(config);
-    config.sampleRateCount = 3;
-    config.sampleRates[0] = 44100;
-    config.sampleRates[1] = 48000;
-    config.sampleRates[2] = 96000;
-    config.currentSampleRate = 96000;
-
-    ASFW::Isoch::Audio::ApplyBringupSingleFormatPolicy(config);
-
-    EXPECT_EQ(config.sampleRateCount, 1u);
-    EXPECT_DOUBLE_EQ(config.sampleRates[0], ASFW::Isoch::Audio::kDefaultSampleRate);
-    EXPECT_DOUBLE_EQ(config.currentSampleRate, ASFW::Isoch::Audio::kDefaultSampleRate);
-}
+// NOTE: the "force a single 48k format at bring-up" policy
+// (ApplyBringupSingleFormatPolicy) was intentionally removed — the driver now
+// publishes all discovered sample rates (6 for Orpheus). Its test is deleted
+// rather than resurrected, which would regress multi-rate support.
 
 TEST(AudioDriverConfigPolicyTests, ScopeLabelMapsKnownScopes) {
     EXPECT_STREQ(ASFW::Isoch::Audio::ScopeLabel(static_cast<uint32_t>('inpt')), "Input");
