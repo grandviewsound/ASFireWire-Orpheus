@@ -13,6 +13,7 @@
 		3A27C5302ECDE045009CA664 /* bump.sh in Resources */ = {isa = PBXBuildFile; fileRef = 3A27C52E2ECDE045009CA664 /* bump.sh */; };
 		3A27C5322ECDE045009CA664 /* bump.sh in Resources */ = {isa = PBXBuildFile; fileRef = 3A27C52E2ECDE045009CA664 /* bump.sh */; };
 		3ABA31132EF8564A0046405D /* AudioDriverKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3ABA31122EF8564A0046405D /* AudioDriverKit.framework */; };
+		3AC0D0012F00000100C0D000 /* MIDIDriverKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3AC0D0002F00000100C0D000 /* MIDIDriverKit.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -55,6 +56,7 @@
 		3AB4713F2EE31CF0003A4E2A /* ASFWTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ASFWTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3AB471482EE31E7A003A4E2A /* ASFW.xctestplan */ = {isa = PBXFileReference; lastKnownFileType = text; path = ASFW.xctestplan; sourceTree = "<group>"; };
 		3ABA31122EF8564A0046405D /* AudioDriverKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioDriverKit.framework; path = Platforms/DriverKit.platform/Developer/SDKs/DriverKit25.1.sdk/System/DriverKit/System/Library/Frameworks/AudioDriverKit.framework; sourceTree = DEVELOPER_DIR; };
+		3AC0D0002F00000100C0D000 /* MIDIDriverKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MIDIDriverKit.framework; path = Platforms/DriverKit.platform/Developer/SDKs/DriverKit25.2.sdk/System/DriverKit/System/Library/Frameworks/MIDIDriverKit.framework; sourceTree = DEVELOPER_DIR; };
 		ASFWAPPENTITLEMENTS /* App.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = App.entitlements; sourceTree = "<group>"; };
 		ASFWDRIVERENTITLEMENTS /* ASFWDriver.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ASFWDriver.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -105,6 +107,7 @@
 				3A1694002E8087BD000BD368 /* PCIDriverKit.framework in Frameworks */,
 				3A1693F02E808765000BD368 /* DriverKit.framework in Frameworks */,
 				3ABA31132EF8564A0046405D /* AudioDriverKit.framework in Frameworks */,
+				3AC0D0012F00000100C0D000 /* MIDIDriverKit.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -146,6 +149,7 @@
 		3A1693EE2E808765000BD368 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				3AC0D0002F00000100C0D000 /* MIDIDriverKit.framework */,
 				3ABA31122EF8564A0046405D /* AudioDriverKit.framework */,
 				3A1693FF2E8087BD000BD368 /* PCIDriverKit.framework */,
 				3A1693EF2E808765000BD368 /* DriverKit.framework */,

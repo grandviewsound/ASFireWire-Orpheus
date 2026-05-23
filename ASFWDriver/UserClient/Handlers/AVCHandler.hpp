@@ -13,8 +13,9 @@
 #include <DriverKit/OSString.h>
 #include <DriverKit/OSNumber.h>
 #include <memory>
-// Include MusicSubunit for static helper types
+// Include subunit types for static helper serialization.
 #include "../../Protocols/AVC/Music/MusicSubunit.hpp" // Adjusted path: Handler is under UserClient/Handlers. Music is Protocols/AVC/Music/
+#include "../../Protocols/AVC/Audio/AudioSubunit.hpp"
 
 struct IOUserClientMethodArguments;
 
@@ -64,6 +65,13 @@ public:
         const ASFW::Protocols::AVC::Music::MusicSubunitCapabilities& caps,
         const std::vector<ASFW::Protocols::AVC::Music::MusicSubunit::PlugInfo>& plugs,
         const std::vector<ASFW::Protocols::AVC::Music::MusicSubunit::MusicPlugChannel>& channels,
+        IOUserClientMethodArguments* args
+    );
+
+    // Helper for testing/UI: serialize Audio-subunit discovery data using the
+    // same wire shape the Swift capabilities view already understands.
+    static kern_return_t SerializeAudioCapabilities(
+        const ASFW::Protocols::AVC::Audio::AudioSubunit& audioSubunit,
         IOUserClientMethodArguments* args
     );
 

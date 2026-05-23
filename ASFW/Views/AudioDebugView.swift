@@ -15,7 +15,22 @@ struct AudioDebugView: View {
         HSplitView {
             // Left Pane: Device List
             VStack(spacing: 0) {
-                List(viewModel.devices, id: \.id, selection: $viewModel.selectedDevice) { device in
+                List(
+                    viewModel.devices,
+                    id: \.id,
+                    selection: Binding(
+                        get: { viewModel.selectedDevice },
+                        set: { newValue in
+                            if let device = newValue {
+                                viewModel.selectDevice(device)
+                            } else {
+                                viewModel.stopTone()
+                                viewModel.selectedDevice = nil
+                                viewModel.selectedDeviceStreams = []
+                            }
+                        }
+                    )
+                ) { device in
                     HStack(spacing: 8) {
                         Image(systemName: device.transportType.iconName)
                             .foregroundStyle(.blue)
@@ -66,6 +81,7 @@ struct AudioDebugView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
                         DeviceHeaderView(device: device)
+                        ToneGeneratorSection(viewModel: viewModel, device: device)
                         
                         Divider()
                         
@@ -118,6 +134,155 @@ struct AudioDebugView: View {
 }
 
 // MARK: - Subviews
+
+struct ToneGeneratorSection: View {
+    @ObservedObject var viewModel: AudioDebugViewModel
+    let device: AudioWrapperDevice
+
+    private let gridColumns = [
+        GridItem(.adaptive(minimum: 90), spacing: 10)
+    ]
+
+    private var outputChannels: Int {
+        device.outputChannelCount
+    }
+
+    private var stereoPairs: [(label: String, channels: [Int])] {
+        stride(from: 0, to: outputChannels, by: 2).map { start in
+            let end = min(start + 1, outputChannels - 1)
+            if start == end {
+                return ("Ch \(start + 1)", [start])
+            }
+            return ("\(start + 1)/\(end + 1)", [start, end])
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Test Tone")
+                    .font(.title2)
+                    .bold()
+
+                if viewModel.isTonePlaying, let active = viewModel.activeToneLabel {
+                    Badge(text: "Playing \(active)", color: .orange, icon: "waveform")
+                } else {
+                    Badge(text: "Idle", color: .gray)
+                }
+            }
+
+            Text("Play a steady sine tone directly to the selected Core Audio device so we can verify which physical Orpheus output each host channel reaches.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            if let error = viewModel.toneError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .font(.callout)
+            }
+
+            if outputChannels == 0 {
+                ContentUnavailableView(
+                    "No Output Channels",
+                    systemImage: "speaker.slash",
+                    description: Text("The selected device does not report any output channels.")
+                )
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 20) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Frequency")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            HStack {
+                                Slider(value: $viewModel.toneFrequency, in: 100...4000, step: 10)
+                                Text("\(Int(viewModel.toneFrequency)) Hz")
+                                    .monospacedDigit()
+                                    .frame(width: 70, alignment: .trailing)
+                            }
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Level")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            HStack {
+                                Slider(value: $viewModel.toneAmplitude, in: 0.05...0.50, step: 0.01)
+                                Text("\(Int(viewModel.toneAmplitude * 100))%")
+                                    .monospacedDigit()
+                                    .frame(width: 50, alignment: .trailing)
+                            }
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Stereo Pairs")
+                            .font(.headline)
+
+                        LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 10) {
+                            ForEach(stereoPairs, id: \.label) { pair in
+                                ToneTargetButton(label: pair.label,
+                                                 isActive: viewModel.activeToneLabel == "Pair \(pair.label)") {
+                                    viewModel.toggleTone(channels: pair.channels, label: "Pair \(pair.label)")
+                                }
+                            }
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Individual Channels")
+                            .font(.headline)
+
+                        LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 10) {
+                            ForEach(Array(0..<outputChannels), id: \.self) { channel in
+                                let label = "Ch \(channel + 1)"
+                                ToneTargetButton(label: label,
+                                                 isActive: viewModel.activeToneLabel == label) {
+                                    viewModel.toggleTone(channels: [channel], label: label)
+                                }
+                            }
+                        }
+                    }
+
+                    HStack {
+                        Text("Device: \(device.name) • \(outputChannels) outputs")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Stop Tone") {
+                            viewModel.stopTone()
+                        }
+                        .disabled(!viewModel.isTonePlaying)
+                    }
+                }
+                .padding(16)
+                .background(.thinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
+        }
+    }
+}
+
+struct ToneTargetButton: View {
+    let label: String
+    let isActive: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: isActive ? "stop.fill" : "play.fill")
+                    .font(.caption)
+                Text(label)
+                    .font(.subheadline.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(isActive ? .red : .accentColor)
+    }
+}
 
 struct DeviceHeaderView: View {
     let device: AudioWrapperDevice

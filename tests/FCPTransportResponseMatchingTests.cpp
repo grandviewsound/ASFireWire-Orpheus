@@ -68,3 +68,17 @@ TEST_F(FCPTransportResponseMatchingTests, SignalSourceStatusRejectsWrongDestinat
 
     EXPECT_FALSE(Validate({0x0c, 0xff, 0x1a, 0x70, 0x60, 0x01, 0x08, 0x01}));
 }
+
+TEST_F(FCPTransportResponseMatchingTests,
+       SignalSourceStatusWithZeroFOperandAcceptsRewrittenSourceBytes) {
+    // Regression for fix 76: panel-style sync STATUS read uses operand[0]=0x0F
+    // (the standard "all-ones-upper-nibble" STATUS sentinel). The device
+    // rewrites bytes 4..5 with the actual signal-source identifier and only
+    // echoes the destination tuple in bytes 6..7. Validator must NOT treat
+    // byte 3 = 0x0F as SPECIFIC INQUIRY — it should branch on CTYPE instead.
+    //   CMD: 01 ff 1a 0f ff ff 60 07
+    //   RSP: 0c ff 1a 10 ff 87 60 07
+    SetPending({0x01, 0xff, 0x1a, 0x0f, 0xff, 0xff, 0x60, 0x07});
+
+    EXPECT_TRUE(Validate({0x0c, 0xff, 0x1a, 0x10, 0xff, 0x87, 0x60, 0x07}));
+}

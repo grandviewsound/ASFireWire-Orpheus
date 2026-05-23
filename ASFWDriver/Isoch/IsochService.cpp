@@ -71,6 +71,8 @@ kern_return_t IsochService::StartReceive(uint8_t channel,
         ASFW_LOG(Controller, "[Isoch] ✅ provisioned IR Context with Dedicated Memory");
     }
 
+    isochReceiveContext_->GetStreamProcessor().SetMidiRxSink(midiRxSinkContext_,
+                                                             midiRxSinkCallback_);
     isochReceiveContext_->SetExternalSyncBridge(&externalSyncBridge_);
 
     auto result = isochReceiveContext_->Configure(channel, 0);
@@ -124,7 +126,9 @@ kern_return_t IsochService::StartTransmit(uint8_t channel,
                                           uint64_t txQueueBytes,
                                           void* zeroCopyBase,
                                           uint64_t zeroCopyBytes,
-                                          uint32_t zeroCopyFrames) {
+                                          uint32_t zeroCopyFrames,
+                                          const uint8_t* outputChannelMap,
+                                          uint32_t outputChannelMapCount) {
 
     if (isochTransmitContext_ &&
         isochTransmitContext_->GetState() == ASFW::Isoch::ITState::Running) {
@@ -208,26 +212,22 @@ kern_return_t IsochService::StartTransmit(uint8_t channel,
         return kIOReturnNotReady;
     }
 
-    if (!isochReceiveContext_ ||
-        isochReceiveContext_->GetState() != ASFW::Isoch::IRPolicy::State::Running) {
-        ASFW_LOG(Controller, "[Isoch] ❌ StartTransmit blocked: IR context is not running");
-        isochTransmitContext_->SetZeroCopyOutputBuffer(nullptr, 0, 0);
-        isochTransmitContext_->SetSharedTxQueue(nullptr, 0);
-        txQueue_.Reset();
-        return kIOReturnNotReady;
-    }
-
     // SYT gate: IT pipeline handles "no SYT" gracefully by sending silence until
     // IR SYT clock is established (ExternalSyncBridge discipline activates automatically).
     // We start IT immediately rather than blocking — this avoids timing out during the
     // BeBoB bus reset window (which delays SYT establishment by 2-8 seconds).
-    if (externalSyncBridge_.clockEstablished.load(std::memory_order_acquire)) {
+    if (!isochReceiveContext_ ||
+        isochReceiveContext_->GetState() != ASFW::Isoch::IRPolicy::State::Running) {
+        ASFW_LOG(Controller,
+                 "[Isoch] IT starting before IR context is running — Apple output-first path");
+    } else if (externalSyncBridge_.clockEstablished.load(std::memory_order_acquire)) {
         ASFW_LOG(Controller, "[Isoch] IT starting with IR SYT already established");
     } else {
         ASFW_LOG(Controller, "[Isoch] IT starting before IR SYT established — will sync once IR clock ready");
     }
 
     isochTransmitContext_->SetExternalSyncBridge(&externalSyncBridge_);
+    isochTransmitContext_->SetOutputChannelMap(outputChannelMap, outputChannelMapCount);
 
     auto result = isochTransmitContext_->Configure(channel,
                                                    sid,
@@ -332,7 +332,9 @@ kern_return_t IsochService::StartDuplex(const IsochDuplexStartParams& params,
                                             params.txQueueBytes,
                                             params.zeroCopyBase,
                                             params.zeroCopyBytes,
-                                            params.zeroCopyFrames);
+                                            params.zeroCopyFrames,
+                                            params.hostOutputIsochChannelPositions.data(),
+                                            static_cast<uint32_t>(params.hostOutputIsochChannelPositions.size()));
     if (krTx != kIOReturnSuccess) {
         StopReceive();
         return krTx;
@@ -359,6 +361,18 @@ kern_return_t IsochService::StopDuplex(uint64_t guid) {
     return kIOReturnSuccess;
 }
 
+void IsochService::SyncOutputInputStreams() noexcept {
+    if (!isochTransmitContext_ || !isochReceiveContext_) {
+        ASFW_LOG(Controller, "[Isoch] Apple SyncInputStreams skipped (tx=%d rx=%d)",
+                 isochTransmitContext_ != nullptr,
+                 isochReceiveContext_ != nullptr);
+        return;
+    }
+
+    ASFW_LOG(Controller, "[Isoch] Apple SyncInputStreams hook: syncing output writer after direction start");
+    isochTransmitContext_->SyncOutputInputStreams();
+}
+
 void IsochService::ReconnectOPCR(ASFW::CMP::CMPClient* cmpClient) {
     if (!cmpClient || irChannel_ == 0xFF || !isochReceiveContext_) {
         return;
@@ -375,6 +389,22 @@ void IsochService::ReconnectOPCR(ASFW::CMP::CMPClient* cmpClient) {
             }
         });
     });
+}
+
+uint32_t IsochService::PushTransmitMidiBytes(const uint8_t* bytes, uint32_t count) noexcept {
+    if (!isochTransmitContext_) {
+        return 0;
+    }
+    return isochTransmitContext_->PushMidiTxBytes(bytes, count);
+}
+
+void IsochService::SetReceiveMidiSink(void* context,
+                                      ASFW::Isoch::StreamProcessor::MidiRxCallback callback) noexcept {
+    midiRxSinkContext_ = context;
+    midiRxSinkCallback_ = callback;
+    if (isochReceiveContext_) {
+        isochReceiveContext_->GetStreamProcessor().SetMidiRxSink(context, callback);
+    }
 }
 
 void IsochService::ReconnectIPCR(ASFW::CMP::CMPClient* cmpClient) {

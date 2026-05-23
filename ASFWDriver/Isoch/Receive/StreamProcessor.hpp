@@ -15,6 +15,7 @@
 #include "../Core/ExternalSyncBridge.hpp"
 #include "../Config/AudioConstants.hpp"
 #include "../Audio/AM824Decoder.hpp"
+#include "../../MIDI/AM824MidiCodec.hpp"
 #include "../../Logging/Logging.hpp"
 #include "../../Shared/TxSharedQueue.hpp"
 
@@ -23,6 +24,7 @@ namespace ASFW::Isoch {
 class StreamProcessor {
 public:
     StreamProcessor() = default;
+    using MidiRxCallback = void (*)(void* context, const uint8_t* bytes, uint8_t count) noexcept;
 
     static constexpr size_t kIsochHeaderSize = 8;  // Timestamp + isoch header
 
@@ -205,12 +207,18 @@ public:
                          // Store in temp buffer for this event
                          eventSamples_[ch] = *sample;
                      } else if (AM824Decoder::IsMIDI(sampleQuad)) {
-                         // MIDI: ignore for now, could route elsewhere
+                         HandleMidiRxQuadlet(sampleQuad, ch);
                          eventSamples_[ch] = 0;
                      } else {
                          // Unknown or Empty
                          eventSamples_[ch] = 0;
                      }
+                 }
+
+                 // Decode extra AM824 slots after the host PCM queue. On Orpheus
+                 // capture this is typically slot 10 for IR MIDI.
+                 for (size_t slot = decodeSlotsPerEvent; slot < wireSlotsPerEvent; ++slot) {
+                     HandleMidiRxQuadlet(dataPtr[(i * wireSlotsPerEvent) + slot], slot);
                  }
                  
                  // Write this event (1 frame of all channels) to shared RX queue
@@ -261,6 +269,8 @@ public:
     uint64_t EmptyPacketCount() const { return emptyPacketCount_.load(std::memory_order_relaxed); }
     uint64_t ErrorCount() const { return errorCount_.load(std::memory_order_relaxed); }
     uint64_t DiscontinuityCount() const { return discontinuityCount_.load(std::memory_order_relaxed); }
+    uint64_t MidiRxByteCount() const { return midiRxByteCount_.load(std::memory_order_relaxed); }
+    uint64_t MidiRxQuadletCount() const { return midiRxQuadletCount_.load(std::memory_order_relaxed); }
     
     uint8_t LastDBC() const { return lastDBC_.load(std::memory_order_relaxed); }
     uint16_t LastSYT() const { return lastSYT_.load(std::memory_order_relaxed); }
@@ -311,9 +321,45 @@ public:
         lastPollLatencyUs_ = 0;
         lastPollPackets_ = 0;
         lastUnsupportedWireDbs_ = 0;
+        midiRxByteCount_ = 0;
+        midiRxQuadletCount_ = 0;
+        midiRxEmptyQuadletCount_ = 0;
+        midiRxNoSinkCount_ = 0;
+        midiRxLoggedFirstPayload_ = false;
     }
 
 private:
+    void HandleMidiRxQuadlet(uint32_t wireQuadlet, size_t slot) noexcept {
+        if (!ASFW::MIDI::AM824MidiCodec::IsMidiQuadlet(wireQuadlet)) {
+            return;
+        }
+
+        midiRxQuadletCount_.fetch_add(1, std::memory_order_relaxed);
+        const auto decoded = ASFW::MIDI::AM824MidiCodec::DecodeBytes(wireQuadlet);
+        if (decoded.count == 0) {
+            midiRxEmptyQuadletCount_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
+        midiRxByteCount_.fetch_add(decoded.count, std::memory_order_relaxed);
+        if (!midiRxLoggedFirstPayload_) {
+            midiRxLoggedFirstPayload_ = true;
+            ASFW_LOG(Isoch,
+                     "IR RX MIDI: slot=%zu bytes=%02x %02x %02x count=%u",
+                     slot,
+                     decoded.bytes[0],
+                     decoded.bytes[1],
+                     decoded.bytes[2],
+                     decoded.count);
+        }
+
+        if (midiRxCallback_) {
+            midiRxCallback_(midiRxContext_, decoded.bytes, decoded.count);
+        } else {
+            midiRxNoSinkCount_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
     std::atomic<uint64_t> packetCount_{0};
     std::atomic<uint64_t> samplePacketCount_{0};
     std::atomic<uint64_t> emptyPacketCount_{0};
@@ -338,6 +384,10 @@ private:
     std::atomic<uint64_t> latencyBucket3_{0}; // >1000µs
     std::atomic<uint32_t> lastPollLatencyUs_{0};
     std::atomic<uint32_t> lastPollPackets_{0};
+    std::atomic<uint64_t> midiRxByteCount_{0};
+    std::atomic<uint64_t> midiRxQuadletCount_{0};
+    std::atomic<uint64_t> midiRxEmptyQuadletCount_{0};
+    std::atomic<uint64_t> midiRxNoSinkCount_{0};
     
     uint64_t minEvents_{UINT64_MAX};
     uint64_t maxEvents_{0};
@@ -349,8 +399,11 @@ private:
     
     // Output shared queue for decoded RX samples (set by IsochReceiveContext)
     ASFW::Shared::TxSharedQueueSPSC* sharedRxQueue_{nullptr};
+    void* midiRxContext_{nullptr};
+    MidiRxCallback midiRxCallback_{nullptr};
     
     uint8_t lastUnsupportedWireDbs_{0};
+    bool midiRxLoggedFirstPayload_{false};
 
     // Temp buffer for one PCM event's worth of samples (host-facing channels only).
     int32_t eventSamples_[Config::kMaxPcmChannels]{};
@@ -360,6 +413,14 @@ public:
     /// @param queue Pointer to shared RX queue (owned externally, typically by IsochReceiveContext)
     void SetOutputSharedQueue(ASFW::Shared::TxSharedQueueSPSC* queue) noexcept {
         sharedRxQueue_ = queue;
+    }
+
+    void SetMidiRxSink(void* context, MidiRxCallback callback) noexcept {
+        midiRxContext_ = context;
+        midiRxCallback_ = callback;
+        ASFW_LOG(Isoch,
+                 "IR RX MIDI sink %{public}s",
+                 (context && callback) ? "attached" : "detached");
     }
 
     /// Get current output shared queue (for diagnostics).

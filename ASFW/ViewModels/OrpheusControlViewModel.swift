@@ -1,18 +1,30 @@
 import Foundation
 import Combine
+import os
+
+private let orpheusDiagnosticsLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "ASFW",
+                                              category: "OrpheusDiagnostics")
 
 final class OrpheusControlViewModel: ObservableObject {
     @Published var isConnected: Bool = false
     @Published var isLoading: Bool = false
+    @Published var isMeterLoading: Bool = false
     @Published var errorMessage: String?
 
     @Published var orpheusGUID: UInt64?
     @Published var state: OrpheusStateSnapshot = OrpheusStateSnapshot()
     @Published var deviceSettings: OrpheusDeviceSettings = OrpheusDeviceSettings()
+    @Published var diagnostics: OrpheusDiagnosticsSnapshot?
+    @Published var isSettingSyncSource: Bool = false
     @Published var lastRefreshTime: Date?
+    @Published var activeToneLabel: String?
+    @Published var toneError: String?
+    @Published var toneDeviceName: String?
 
     private let connector: ASFWDriverConnector
     private var cancellables = Set<AnyCancellable>()
+    private var lastMeterLogTime: Date?
+    private let tonePlayer = DeviceTonePlayer()
 
     init(connector: ASFWDriverConnector) {
         self.connector = connector
@@ -32,6 +44,10 @@ final class OrpheusControlViewModel: ObservableObject {
             .store(in: &cancellables)
 
         isConnected = connector.isConnected
+    }
+
+    deinit {
+        tonePlayer.stop()
     }
 
     // MARK: - Channel Labels
@@ -70,34 +86,120 @@ final class OrpheusControlViewModel: ObservableObject {
                 return
             }
 
-            let snapshot = self.connector.refreshOrpheusState(guid: guid)
-
-            // Read device-level settings (meter mode, digital config)
-            let meterMode = self.connector.getOrpheusMeterMode(guid: guid)
-            let digitalSettings = self.connector.getOrpheusDigitalSettings(guid: guid)
+            let diagnostics = self.connector.refreshOrpheusDiagnostics(guid: guid)
 
             DispatchQueue.main.async {
                 self.isLoading = false
                 self.orpheusGUID = guid
+                self.diagnostics = diagnostics
 
-                guard let snapshot else {
-                    self.errorMessage = "Failed to read Orpheus state"
-                    return
+                var stateSnapshot = OrpheusStateSnapshot()
+                for analog in diagnostics.analogChannels {
+                    stateSnapshot.channels[Int(analog.index)] = analog.state
+                }
+                if !diagnostics.analogChannels.isEmpty {
+                    stateSnapshot.updatedAt = diagnostics.updatedAt
+                    self.state = stateSnapshot
                 }
 
-                self.state = snapshot
-
-                // Merge device settings from both reads
-                var settings = digitalSettings ?? self.deviceSettings
-                if let meter = meterMode {
-                    settings.meterMode = meter
+                var settings = self.deviceSettings
+                if let device = diagnostics.device {
+                    settings.meterMode = device.metersMode
+                }
+                if let digital = diagnostics.digital {
+                    settings.sampleRate = digital.sampleRateCode
+                    settings.syncSource = digital.syncSource
+                    settings.bitDepth = digital.bitDepth
+                    settings.digitalInputType = digital.inputType
+                    settings.channelStatus = digital.channelStatus
+                }
+                if let sync = diagnostics.bestSignalSource {
+                    settings.syncSource = sync.decodedSync
                 }
                 self.deviceSettings = settings
 
                 self.lastRefreshTime = Date()
-                self.errorMessage = nil
+                self.errorMessage = diagnostics.errors.count > 12 ? "Most Orpheus reads failed" : nil
+                self.logDiagnosticsSnapshot(diagnostics, reason: "refresh")
             }
         }
+    }
+
+    func refreshMeters() {
+        guard connector.isConnected else {
+            errorMessage = "Driver not connected"
+            return
+        }
+        guard let guid = orpheusGUID else { return }
+        guard !isMeterLoading else { return }
+
+        isMeterLoading = true
+        let version = diagnostics?.deviceVersion
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let meters = self.connector.refreshOrpheusMeters(guid: guid, deviceVersion: version)
+
+            DispatchQueue.main.async {
+                self.isMeterLoading = false
+                if let meters {
+                    var diagnostics = self.diagnostics ?? OrpheusDiagnosticsSnapshot()
+                    diagnostics.meters = meters
+                    diagnostics.updatedAt = Date()
+                    self.diagnostics = diagnostics
+                    self.lastRefreshTime = Date()
+                    self.logDiagnosticsSnapshot(diagnostics, reason: "meters")
+                } else {
+                    self.errorMessage = "Meter read failed"
+                    orpheusDiagnosticsLogger.error("OrpheusMeters[meters] read failed guid=\(String(format: "0x%016llX", guid), privacy: .public) connectorError=\(self.connector.lastError ?? "none", privacy: .public)")
+                }
+            }
+        }
+    }
+
+    // MARK: - Tone Probe
+
+    var isTonePlaying: Bool {
+        tonePlayer.isRunning
+    }
+
+    func toggleTone(channels: [Int], label: String) {
+        if activeToneLabel == label {
+            stopTone()
+        } else {
+            playTone(channels: channels, label: label)
+        }
+    }
+
+    func playTone(channels: [Int], label: String) {
+        guard let device = findOrpheusAudioDevice() else {
+            toneError = "ASFW Orpheus Core Audio device not found"
+            activeToneLabel = nil
+            return
+        }
+
+        do {
+            try tonePlayer.start(device: device,
+                                 channels: channels,
+                                 frequency: 1_000,
+                                 amplitude: 0.20)
+            activeToneLabel = label
+            toneDeviceName = device.name
+            toneError = nil
+            orpheusDiagnosticsLogger.info("OrpheusTone start label=\(label, privacy: .public) device=\(device.name, privacy: .public) uid=\(device.uid, privacy: .public) channels=\(channels.map(String.init).joined(separator: ","), privacy: .public)")
+        } catch {
+            activeToneLabel = nil
+            toneError = error.localizedDescription
+            orpheusDiagnosticsLogger.error("OrpheusTone start failed label=\(label, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    func stopTone() {
+        tonePlayer.stop()
+        if let activeToneLabel {
+            orpheusDiagnosticsLogger.info("OrpheusTone stop label=\(activeToneLabel, privacy: .public)")
+        }
+        activeToneLabel = nil
     }
 
     // MARK: - Refresh Single Channel
@@ -216,6 +318,25 @@ final class OrpheusControlViewModel: ObservableObject {
         }
     }
 
+    /// Mic preamp gain — continuous value for channels 0..3. Caller clamps to
+    /// the slider's range; we forward the raw byte to the device. On failure
+    /// we refresh the channel via the 0xCF bulk read so the UI snaps back to
+    /// the device's actual current value.
+    func setMicGain(channel: Int, value: UInt8) {
+        guard (0...3).contains(channel) else { return }
+        guard let guid = orpheusGUID else { return }
+        state.channels[channel].micGain = value
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let ok = self.connector.setOrpheusMicGain(guid: guid, channel: channel, value: value)
+            if !ok {
+                self.refreshChannel(channel)
+                DispatchQueue.main.async { self.errorMessage = "Failed to set mic gain" }
+            }
+        }
+    }
+
     // MARK: - Device Settings Setters
 
     func setMeterMode(_ mode: UInt8) {
@@ -236,15 +357,30 @@ final class OrpheusControlViewModel: ObservableObject {
     }
 
     func setSyncSource(_ source: UInt8) {
+        guard let syncSource = OrpheusSyncSource(rawValue: source) else {
+            errorMessage = "Unsupported sync source"
+            return
+        }
+        setSyncSource(syncSource)
+    }
+
+    func setSyncSource(_ source: OrpheusSyncSource) {
         guard let guid = orpheusGUID else { return }
         let oldValue = deviceSettings.syncSource
-        deviceSettings.syncSource = source
+        deviceSettings.syncSource = source.rawValue
+        isSettingSyncSource = true
+        let useAdatPlug = shouldUseAdatSignalSourcePlug(for: source)
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            let ok = self.connector.setOrpheusSyncSource(guid: guid, source: source)
-            if !ok {
-                DispatchQueue.main.async {
+            let ok = self.connector.setOrpheusSignalSource(guid: guid,
+                                                           source: source,
+                                                           useAdatPlug: useAdatPlug)
+            DispatchQueue.main.async {
+                self.isSettingSyncSource = false
+                if ok {
+                    self.refresh()
+                } else {
                     self.deviceSettings.syncSource = oldValue
                     self.errorMessage = "Failed to set sync source"
                 }
@@ -267,5 +403,73 @@ final class OrpheusControlViewModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func logDiagnosticsSnapshot(_ diagnostics: OrpheusDiagnosticsSnapshot, reason: String) {
+        if reason == "meters" {
+            let now = Date()
+            if let lastMeterLogTime, now.timeIntervalSince(lastMeterLogTime) < 1.0 {
+                return
+            }
+            lastMeterLogTime = now
+        }
+
+        let guidLabel = orpheusGUID.map { String(format: "0x%016llX", $0) } ?? "unknown"
+        let source = diagnostics.device?.outputSourceName ?? "unread"
+        let sync = diagnostics.bestSignalSource.map {
+            String(format: "%@/%@ plug=0x%02X raw4=0x%02X raw5=0x%02X",
+                   $0.syncName, $0.riskLabel, $0.plug, $0.responseByte4, $0.responseByte5)
+        } ?? "unread"
+        let version = diagnostics.deviceVersion?.displayName ?? "unread"
+        let dawMeters = meterSummary(diagnostics.meters, group: .dawFeeds)
+        let outputMeters = meterSummary(diagnostics.meters, group: .physicalOutputs)
+        let connectorError = diagnostics.errors.isEmpty ? "none" : (connector.lastError ?? "none")
+
+        orpheusDiagnosticsLogger.info("OrpheusDiagnostics[\(reason, privacy: .public)] guid=\(guidLabel, privacy: .public) version=\(version, privacy: .public) source=\(source, privacy: .public) sync=\(sync, privacy: .public) errors=\(diagnostics.errors.count, privacy: .public) connectorError=\(connectorError, privacy: .public)")
+        orpheusDiagnosticsLogger.info("OrpheusMeters[\(reason, privacy: .public)] daw=\(dawMeters, privacy: .public) outputs=\(outputMeters, privacy: .public)")
+        if !diagnostics.errors.isEmpty {
+            let errorSummary = diagnostics.errors.prefix(8).joined(separator: " | ")
+            orpheusDiagnosticsLogger.info("OrpheusDiagnosticsErrors[\(reason, privacy: .public)] \(errorSummary, privacy: .public)")
+        }
+
+        for path in diagnostics.playbackPaths {
+            let route = "out=\(path.label) mode=\(path.modeLabel) muted=\(path.outputMuted ? 1 : 0) daw=\(path.dawRawPairLabel) physical=\(path.outputRawPairLabel) mixerDAW=\(path.mixerDawLabel) probe=\(path.probeLabel)"
+            orpheusDiagnosticsLogger.info("OrpheusPath[\(reason, privacy: .public)] \(route, privacy: .public)")
+        }
+    }
+
+    private func meterSummary(_ meters: OrpheusMeterSnapshot?,
+                              group: OrpheusMeterLevelState.Group) -> String {
+        guard let meters else { return "unread" }
+        return meters.levels(in: group)
+            .map { "\($0.label)=\($0.rawLabel)" }
+            .joined(separator: ",")
+    }
+
+    private func findOrpheusAudioDevice() -> AudioWrapperDevice? {
+        let guidLabel = orpheusGUID.map { String(format: "%016llX", $0).lowercased() }
+        let devices = AudioSystem.shared.devices
+
+        return devices.first { device in
+            let haystack = "\(device.uid) \(device.name) \(device.modelUID)".lowercased()
+            if let guidLabel, haystack.contains(guidLabel) {
+                return true
+            }
+            return haystack.contains("orpheus")
+                || haystack.contains("asfwaudiodevice")
+                || haystack.contains("asfw")
+        } ?? devices.first { device in
+            device.transportType == .fireWire && device.outputChannelCount >= 12
+        }
+    }
+
+    private func shouldUseAdatSignalSourcePlug(for source: OrpheusSyncSource) -> Bool {
+        if source == .adat {
+            return true
+        }
+        if diagnostics?.hasAdatInput == true {
+            return true
+        }
+        return diagnostics?.bestSignalSource?.plug == 0x08
     }
 }

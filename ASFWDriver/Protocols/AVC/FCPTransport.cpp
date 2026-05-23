@@ -639,20 +639,16 @@ bool FCPTransport::ValidateResponse(std::span<const uint8_t> response) const {
 
     if (cmdOpcode == 0x1A) {
         // SIGNAL SOURCE has response layouts that do NOT mirror the request's
-        // first operand byte.
-        //
-        // Working Apple Orpheus captures show two important cases:
-        //  - QuerySyncPlugReconnect (SPECIFIC INQUIRY, operand[0]=0x0F):
-        //    the response changes byte 3 to 0x30 / 0x08, but preserves bytes
-        //    4..7 as the queried target tuple.
-        //  - STATUS signal-source topology queries:
-        //    the response rewrites bytes 3..5 with source information and only
-        //    echoes the destination tuple in bytes 6..7.
-        //
-        // Matching byte 3 as if it were echoed causes valid Apple-style
-        // responses to be rejected, which leaves discovery wedged behind a
-        // "pending" command until timeout.
-        if (pending_->command.length > 3 && pending_->command.data[3] == 0x0F) {
+        // first operand byte. Discriminate by CTYPE (byte 0), not byte 3:
+        //  - SPECIFIC INQUIRY (CTYPE 0x02), e.g. QuerySyncPlugReconnect with
+        //    operand[0]=0x0F: response rewrites byte 3 (0x30/0x08) but echoes
+        //    the queried target tuple in bytes 4..7.
+        //  - STATUS (CTYPE 0x01): response rewrites bytes 3..5 with the actual
+        //    source identifier and only echoes the destination tuple in
+        //    bytes 6..7. Byte 3 = 0x0F is the standard wildcard sentinel
+        //    here, so do NOT use it to distinguish from SPECIFIC INQUIRY.
+        uint8_t cmdCtype = pending_->command.data[0] & 0x0F;
+        if (cmdCtype == 0x02) {
             return matchByte(4, "target-subunit") &&
                    matchByte(5, "target-plug") &&
                    matchByte(6, "signal-source-arg0") &&

@@ -749,6 +749,7 @@ kern_return_t ASFWAudioDriver::StartDevice(IOUserAudioObjectID in_object_id,
         const kern_return_t startKr = ivars->device.audioNub->StartAudioStreaming();
         if (startKr != kIOReturnSuccess) {
             ASFW_LOG(Audio, "ASFWAudioDriver: StartAudioStreaming failed: 0x%x", startKr);
+            return startKr;
         }
     }
 

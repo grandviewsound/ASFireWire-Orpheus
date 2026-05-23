@@ -27,6 +27,7 @@
 #include <set>
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <functional>
 
 using namespace ASFW::Protocols::AVC;
@@ -265,6 +266,110 @@ void CollectUnitIsochSampleRates(const ASFW::Protocols::AVC::AVCUnit& avcUnit,
     }
 
     return {};
+}
+
+struct AppleStartOrderDecision {
+    bool inputBeforeOutput{false};
+    const char* reason{"apple-default-output-first"};
+};
+
+[[nodiscard]] std::vector<uint8_t> BuildIsochChannelPositionMap(
+    const std::vector<ASFW::Protocols::AVC::StreamFormats::PlugInfo>& plugs,
+    bool wantMusicInput,
+    uint32_t channelLimit) {
+    using ASFW::Protocols::AVC::StreamFormats::MusicPlugType;
+    using ASFW::Protocols::AVC::StreamFormats::StreamFormatCode;
+
+    std::vector<uint8_t> map;
+    if (channelLimit == 0) {
+        return map;
+    }
+
+    for (const auto& plug : plugs) {
+        if (plug.type != MusicPlugType::kAudio || plug.IsInput() != wantMusicInput ||
+            !plug.currentFormat.has_value()) {
+            continue;
+        }
+
+        const auto& fmt = *plug.currentFormat;
+        for (const auto& channelFormat : fmt.channelFormats) {
+            if (channelFormat.formatCode == StreamFormatCode::kMIDI) {
+                continue;
+            }
+
+            if (!channelFormat.channels.empty()) {
+                for (const auto& detail : channelFormat.channels) {
+                    map.push_back(detail.position);
+                    if (map.size() >= channelLimit) {
+                        return map;
+                    }
+                }
+            } else {
+                for (uint8_t ch = 0; ch < channelFormat.channelCount && map.size() < channelLimit; ++ch) {
+                    map.push_back(ch);
+                }
+            }
+        }
+
+        if (!map.empty()) {
+            return map;
+        }
+    }
+
+    return map;
+}
+
+void LogIsochChannelPositionMap(const char* label, const std::vector<uint8_t>& map) {
+    if (map.empty()) {
+        ASFW_LOG(Audio, "AVCDiscovery: Apple isoch channel map %{public}s=<identity/absent>", label);
+        return;
+    }
+
+    char buffer[256];
+    int written = snprintf(buffer, sizeof(buffer), "%s count=%zu", label, map.size());
+    if (written < 0) {
+        return;
+    }
+
+    size_t offset = static_cast<size_t>(written);
+    for (size_t i = 0; i < map.size() && offset < sizeof(buffer); ++i) {
+        written = snprintf(buffer + offset, sizeof(buffer) - offset, " ch%zu->slot%u", i, map[i]);
+        if (written < 0) {
+            return;
+        }
+        offset += static_cast<size_t>(written);
+    }
+
+    ASFW_LOG(Audio, "AVCDiscovery: Apple isoch channel map %{public}s", buffer);
+}
+
+[[nodiscard]] bool HasAppleInputClockMarker(
+    const ASFW::Protocols::AVC::StreamFormats::AudioStreamFormat& format) noexcept {
+    const auto& raw = format.rawFormatBlock;
+    // analysis: AppleFWAudioDevice::InitializeDeviceInfo sets its input-first flag
+    // when GetExtendedStreamFormat exposes sync/clock marker 0x40 in the
+    // compact response slot (`__str[3]`) or the compound slot (`__str[7]`).
+    return (raw.size() > 3 && raw[3] == 0x40) ||
+           (raw.size() > 7 && raw[7] == 0x40);
+}
+
+[[nodiscard]] AppleStartOrderDecision DetermineAppleStartOrder(
+    const ASFW::Protocols::AVC::AVCUnit& avcUnit) {
+    AppleStartOrderDecision decision{};
+
+    for (const auto& record : avcUnit.GetAppleDiscoveryUnitIsochFormats()) {
+        auto parsed = ParseDiscoveryFormatRecord(record);
+        if (!parsed.has_value()) {
+            continue;
+        }
+        if (HasAppleInputClockMarker(parsed->format)) {
+            decision.inputBeforeOutput = true;
+            decision.reason = "apple-format-sync-marker-0x40";
+            return decision;
+        }
+    }
+
+    return decision;
 }
 
 [[nodiscard]] bool IsPrismOrpheus(uint32_t vendorId, uint32_t modelId) noexcept {
@@ -780,12 +885,18 @@ void AVCDiscovery::HandleInitializedUnit(uint64_t guid, const std::shared_ptr<AV
 
     const char* streamModeReason = "default-nonblocking";
     const auto streamMode = ResolveStreamMode(mutableCaps, vendorId, modelId, streamModeReason);
+    const auto startOrder = DetermineAppleStartOrder(*avcUnit);
 
     ASFW_LOG(Audio,
              "AVCDiscovery: stream mode selected vendor=0x%06x model=0x%06x mode=%{public}s reason=%{public}s",
              vendorId, modelId,
              ASFW::Audio::Quirks::StreamModeToString(streamMode),
              streamModeReason);
+    ASFW_LOG(Audio,
+             "AVCDiscovery: Apple start order selected vendor=0x%06x model=0x%06x order=%{public}s reason=%{public}s",
+             vendorId, modelId,
+             startOrder.inputBeforeOutput ? "input-first" : "output-first",
+             startOrder.reason);
     uint32_t publishedAggregateChannels = channelCount;
     uint32_t publishedInputChannels =
         (plugSummary.outputAudioMaxChannels > 0) ? plugSummary.outputAudioMaxChannels : channelCount;
@@ -826,30 +937,71 @@ void AVCDiscovery::HandleInitializedUnit(uint64_t guid, const std::shared_ptr<AV
     audioDeviceConfig.channelCount = publishedAggregateChannels;
     audioDeviceConfig.inputChannelCount = publishedInputChannels;
     audioDeviceConfig.outputChannelCount = publishedOutputChannels;
+    audioDeviceConfig.midiInputPorts  = mutableCaps.maxMidiInputPorts.value_or(0);
+    audioDeviceConfig.midiOutputPorts = mutableCaps.maxMidiOutputPorts.value_or(0);
+    audioDeviceConfig.unitIsoInputPlugCount = avcUnit->GetCachedPlugCounts().isoInputPlugs;
+    audioDeviceConfig.unitIsoOutputPlugCount = avcUnit->GetCachedPlugCounts().isoOutputPlugs;
     audioDeviceConfig.sampleRates = sampleRates;
     audioDeviceConfig.currentSampleRate = currentRate;
     audioDeviceConfig.inputPlugName = mutableCaps.inputPlugName;
     audioDeviceConfig.outputPlugName = mutableCaps.outputPlugName;
-    audioDeviceConfig.playback48kRawFormatBlock =
+    // ExtStreamFormat CONTROL block source (gap 5.1).
+    //
+    // Apple sends the SetExtendedStreamFormat CONTROL at the UNIT (0xff) using
+    // the UNIT iso plug format — byte-confirmed in apr12 dtrace: iPCR(playback)
+    // byte3=0xFE, oPCR(capture) byte3=0xFA. The MUSIC SUBUNIT plug format
+    // (queried at subunit 0x60) differs at byte 3 (playback reads 0xFA there),
+    // so the prior "music-subunit first" order made us send the wrong byte on
+    // the iPCR (playback) path. Prefer the UNIT iso source like Apple; fall
+    // back to the music-subunit block only when the unit-iso format is absent.
+    // (reports/apple_vs_ours_gaps.md §5.1; may20-iPCR-extfmt-byte3-root-cause)
+    const std::vector<uint8_t> playbackUnitIso =
+        FindRawUnitIsochFormatBlockForRate(*avcUnit, /*wantInput=*/true, 48000);
+    const std::vector<uint8_t> playbackSubunit =
         FindRawFormatBlockForRate(musicSubunit->GetPlugs(), /*wantInput=*/true, 48000);
-    audioDeviceConfig.capture48kRawFormatBlock =
+    const std::vector<uint8_t> captureUnitIso =
+        FindRawUnitIsochFormatBlockForRate(*avcUnit, /*wantInput=*/false, 48000);
+    const std::vector<uint8_t> captureSubunit =
         FindRawFormatBlockForRate(musicSubunit->GetPlugs(), /*wantInput=*/false, 48000);
-    if (audioDeviceConfig.playback48kRawFormatBlock.empty()) {
-        audioDeviceConfig.playback48kRawFormatBlock =
-            FindRawUnitIsochFormatBlockForRate(*avcUnit, /*wantInput=*/true, 48000);
-    }
-    if (audioDeviceConfig.capture48kRawFormatBlock.empty()) {
-        audioDeviceConfig.capture48kRawFormatBlock =
-            FindRawUnitIsochFormatBlockForRate(*avcUnit, /*wantInput=*/false, 48000);
-    }
+
+    audioDeviceConfig.playback48kRawFormatBlock =
+        !playbackUnitIso.empty() ? playbackUnitIso : playbackSubunit;
+    audioDeviceConfig.capture48kRawFormatBlock =
+        !captureUnitIso.empty() ? captureUnitIso : captureSubunit;
+
+    // Diagnostic: byte 3 of BOTH candidate sources, so a single attach confirms
+    // the unit-vs-subunit divergence regardless of which block is used.
+    auto fmtByte3 = [](const std::vector<uint8_t>& b) -> int {
+        return b.size() > 3 ? static_cast<int>(b[3]) : -1;
+    };
+    ASFW_LOG(Audio,
+             "AVCDiscovery: ExtFmt source byte3 playback[unitIso=%d subunit=%d used=%{public}s] "
+             "capture[unitIso=%d subunit=%d used=%{public}s]",
+             fmtByte3(playbackUnitIso), fmtByte3(playbackSubunit),
+             !playbackUnitIso.empty() ? "unitIso" : "subunit",
+             fmtByte3(captureUnitIso), fmtByte3(captureSubunit),
+             !captureUnitIso.empty() ? "unitIso" : "subunit");
+    audioDeviceConfig.hostOutputIsochChannelPositions =
+        BuildIsochChannelPositionMap(musicSubunit->GetPlugs(),
+                                     /*wantMusicInput=*/true,
+                                     publishedOutputChannels);
+    audioDeviceConfig.hostInputIsochChannelPositions =
+        BuildIsochChannelPositionMap(musicSubunit->GetPlugs(),
+                                     /*wantMusicInput=*/false,
+                                     publishedInputChannels);
     audioDeviceConfig.streamMode = streamMode;
+    audioDeviceConfig.startInputBeforeOutput = startOrder.inputBeforeOutput;
 
     ASFW_LOG(Audio,
              "AVCDiscovery: Cached raw 48k format blocks playback=%zu capture=%zu "
-             "GUID=%llx",
+             "unitIso=%u/%u GUID=%llx",
              audioDeviceConfig.playback48kRawFormatBlock.size(),
              audioDeviceConfig.capture48kRawFormatBlock.size(),
+             audioDeviceConfig.unitIsoInputPlugCount,
+             audioDeviceConfig.unitIsoOutputPlugCount,
              guid);
+    LogIsochChannelPositionMap("hostOutput", audioDeviceConfig.hostOutputIsochChannelPositions);
+    LogIsochChannelPositionMap("hostInput", audioDeviceConfig.hostInputIsochChannelPositions);
 
     if (IsApogeeDuet(*devicePtr)) {
         ConfigureDuetPhantomOverrides(audioDeviceConfig, std::nullopt);
@@ -1342,6 +1494,8 @@ void AVCDiscovery::EnsureHardcodedAudioNubForDevice(const Discovery::DeviceRecor
     hardcoded.channelCount = 12;
     hardcoded.inputChannelCount = 10;   // 10 audio channels (device oPCR DBS=11 = 10 audio + 1 MIDI)
     hardcoded.outputChannelCount = 12;  // 12 audio channels (device iPCR DBS=13 = 12 audio + 1 MIDI)
+    hardcoded.midiInputPorts = 1;       // Orpheus oPCR carries 1 MIDI port (slot 12, AM824 label 0x80)
+    hardcoded.midiOutputPorts = 1;      // Orpheus iPCR carries 1 MIDI port (slot 12, AM824 label 0x80)
     hardcoded.sampleRates = {48000};
     hardcoded.currentSampleRate = 48000;
     hardcoded.inputPlugName = "Orpheus Input";

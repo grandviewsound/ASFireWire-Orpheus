@@ -12,6 +12,7 @@
 #include "Backends/AVCAudioBackend.hpp"
 #include "Backends/DiceAudioBackend.hpp"
 
+#include "../MIDI/MidiNubPublisher.hpp"
 #include "../Logging/Logging.hpp"
 #include "../Protocols/Audio/DeviceProtocolFactory.hpp"
 
@@ -64,6 +65,7 @@ private:
     [[nodiscard]] IAudioBackend* BackendForGuid(uint64_t guid) noexcept;
 
     AudioNubPublisher publisher_;
+    ASFW::MIDI::MidiNubPublisher midiPublisher_;
     DiceAudioBackend dice_;
     AVCAudioBackend avc_;
 

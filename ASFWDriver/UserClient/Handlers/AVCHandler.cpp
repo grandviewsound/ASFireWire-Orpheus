@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <unordered_map>
 #include <DriverKit/OSData.h>
@@ -259,6 +260,9 @@ kern_return_t AVCHandler::GetSubunitCapabilities(IOUserClientMethodArguments* ar
 
                         // Call static helper
                         return SerializeMusicCapabilities(caps, plugs, channels, args);
+                    } else if (subunitType == Protocols::AVC::AVCSubunitType::kAudio) {
+                        auto audioSubunit = std::static_pointer_cast<Protocols::AVC::Audio::AudioSubunit>(subunit);
+                        return SerializeAudioCapabilities(*audioSubunit, args);
                     } else {
                         ASFW_LOG(UserClient, "GetSubunitCapabilities: not implemented for subunit type 0x%02x", static_cast<uint8_t>(subunitType));
                         return kIOReturnUnsupported;
@@ -477,6 +481,177 @@ kern_return_t AVCHandler::SerializeMusicCapabilities(
     return kIOReturnSuccess;
 }
 
+kern_return_t AVCHandler::SerializeAudioCapabilities(
+    const ASFW::Protocols::AVC::Audio::AudioSubunit& audioSubunit,
+    IOUserClientMethodArguments* args)
+{
+    using namespace ASFW::Shared;
+
+    struct AudioPlugView {
+        const ASFW::Protocols::AVC::Audio::AudioPlugInfo* plug{nullptr};
+        bool isInput{false};
+    };
+
+    std::vector<AudioPlugView> plugViews;
+    plugViews.reserve(audioSubunit.GetInputPlugs().size() + audioSubunit.GetOutputPlugs().size());
+    for (const auto& plug : audioSubunit.GetInputPlugs()) {
+        plugViews.push_back({.plug = &plug, .isInput = true});
+    }
+    for (const auto& plug : audioSubunit.GetOutputPlugs()) {
+        plugViews.push_back({.plug = &plug, .isInput = false});
+    }
+
+    uint8_t globalCurrentRate = 0xFF;
+    uint32_t globalSupportedMask = 0;
+    size_t totalSize = sizeof(AVCMusicCapabilitiesWire);
+    size_t numPlugsToSerialize = 0;
+
+    struct PlugSerializeInfo {
+        size_t plugSize{sizeof(PlugInfoWire)};
+        bool hasCurrentFormat{false};
+        uint8_t numSignalBlocks{0};
+        std::vector<uint8_t> channelCounts;
+        uint8_t numSupportedFormats{0};
+    };
+    std::vector<PlugSerializeInfo> plugInfos;
+    plugInfos.reserve(plugViews.size());
+
+    for (const auto& view : plugViews) {
+        if (!view.plug) {
+            continue;
+        }
+
+        PlugSerializeInfo info{};
+        if (view.plug->currentFormat && view.plug->currentFormat->IsValid()) {
+            info.hasCurrentFormat = true;
+            info.numSignalBlocks = 1;
+            const size_t detailCount = std::min(view.plug->channelNames.size(), size_t(255));
+            info.channelCounts.push_back(static_cast<uint8_t>(detailCount));
+            info.plugSize += sizeof(SignalBlockWire) + detailCount * sizeof(ChannelDetailWire);
+            if (globalCurrentRate == 0xFF) {
+                globalCurrentRate = view.plug->currentFormat->sampleRate;
+            }
+        } else if (!view.plug->channelMap.empty() || !view.plug->channelNames.empty()) {
+            info.numSignalBlocks = 1;
+            const size_t detailCount = std::min(
+                std::max(view.plug->channelMap.size(), view.plug->channelNames.size()),
+                size_t(255));
+            info.channelCounts.push_back(static_cast<uint8_t>(detailCount));
+            info.plugSize += sizeof(SignalBlockWire) + detailCount * sizeof(ChannelDetailWire);
+        }
+
+        info.numSupportedFormats = static_cast<uint8_t>(
+            std::min(view.plug->supportedFormats.size(), size_t(32)));
+        info.plugSize += info.numSupportedFormats * sizeof(SupportedFormatWire);
+
+        for (const auto& fmt : view.plug->supportedFormats) {
+            if (fmt.sampleRate < 32) {
+                globalSupportedMask |= (1u << fmt.sampleRate);
+            }
+        }
+
+        if (totalSize + info.plugSize > kMaxWireSize) {
+            break;
+        }
+
+        totalSize += info.plugSize;
+        plugInfos.push_back(info);
+        ++numPlugsToSerialize;
+    }
+
+    OSData* data = OSData::withCapacity(static_cast<uint32_t>(totalSize));
+    if (!data) {
+        return kIOReturnNoMemory;
+    }
+
+    AVCMusicCapabilitiesWire wire{};
+    wire.hasAudio = 1;
+    wire.hasMIDI = 0;
+    wire.hasSMPTE = 0;
+    wire.currentRate = globalCurrentRate;
+    wire.supportedRatesMask = globalSupportedMask;
+    wire.audioInputPorts = audioSubunit.GetNumInputPlugs();
+    wire.audioOutputPorts = audioSubunit.GetNumOutputPlugs();
+    wire.midiInputPorts = 0;
+    wire.midiOutputPorts = 0;
+    wire.smpteInputPorts = 0;
+    wire.smpteOutputPorts = 0;
+    wire.numPlugs = static_cast<uint8_t>(numPlugsToSerialize);
+    wire._reserved = 0;
+    data->appendBytes(&wire, sizeof(wire));
+
+    for (size_t i = 0; i < numPlugsToSerialize; ++i) {
+        const auto& view = plugViews[i];
+        const auto& info = plugInfos[i];
+        const auto& plug = *view.plug;
+
+        PlugInfoWire plugWire{};
+        plugWire.plugID = plug.plugNumber;
+        plugWire.isInput = view.isInput ? 1 : 0;
+        plugWire.type = 0x00;
+        plugWire.numSignalBlocks = info.numSignalBlocks;
+        plugWire.numSupportedFormats = info.numSupportedFormats;
+
+        char name[32];
+        if (!plug.name.empty()) {
+            snprintf(name, sizeof(name), "%s", plug.name.c_str());
+        } else {
+            snprintf(name, sizeof(name), "%s Plug %u", view.isInput ? "Dest" : "Source", plug.plugNumber);
+        }
+        const size_t copyLen = std::min(std::strlen(name), sizeof(plugWire.name) - 1);
+        std::memcpy(plugWire.name, name, copyLen);
+        plugWire.name[copyLen] = '\0';
+        plugWire.nameLength = static_cast<uint8_t>(copyLen);
+        data->appendBytes(&plugWire, sizeof(plugWire));
+
+        if (info.numSignalBlocks > 0) {
+            SignalBlockWire blockWire{};
+            blockWire.formatCode = 0x06;
+            if (plug.currentFormat && plug.currentFormat->numChannels > 0) {
+                blockWire.channelCount = plug.currentFormat->numChannels;
+            } else if (!plug.channelMap.empty()) {
+                blockWire.channelCount = static_cast<uint8_t>(std::min(plug.channelMap.size(), size_t(255)));
+            } else {
+                blockWire.channelCount = info.channelCounts.empty() ? 0 : info.channelCounts[0];
+            }
+            blockWire.numChannelDetails = info.channelCounts.empty() ? 0 : info.channelCounts[0];
+            blockWire._padding = 0;
+            data->appendBytes(&blockWire, sizeof(blockWire));
+
+            for (size_t c = 0; c < blockWire.numChannelDetails; ++c) {
+                ChannelDetailWire chWire{};
+                chWire.musicPlugID = c < plug.channelMusicPlugIDs.size()
+                                   ? plug.channelMusicPlugIDs[c]
+                                   : static_cast<uint16_t>(c);
+                chWire.position = c < plug.channelMap.size() ? plug.channelMap[c] : static_cast<uint8_t>(c);
+
+                const std::string chName = c < plug.channelNames.size() ? plug.channelNames[c] : std::string{};
+                const size_t chCopyLen = std::min(chName.length(), sizeof(chWire.name) - 1);
+                if (chCopyLen > 0) {
+                    std::memcpy(chWire.name, chName.c_str(), chCopyLen);
+                }
+                chWire.name[chCopyLen] = '\0';
+                chWire.nameLength = static_cast<uint8_t>(chCopyLen);
+                data->appendBytes(&chWire, sizeof(chWire));
+            }
+        }
+
+        for (size_t s = 0; s < info.numSupportedFormats; ++s) {
+            const auto& fmt = plug.supportedFormats[s];
+            SupportedFormatWire fmtWire{};
+            fmtWire.sampleRateCode = fmt.sampleRate;
+            fmtWire.formatCode = 0x06;
+            fmtWire.channelCount = fmt.numChannels;
+            fmtWire._padding = 0;
+            data->appendBytes(&fmtWire, sizeof(fmtWire));
+        }
+    }
+
+    args->structureOutput = data;
+    args->structureOutputDescriptor = nullptr;
+    return kIOReturnSuccess;
+}
+
 kern_return_t AVCHandler::GetSubunitDescriptor(IOUserClientMethodArguments* args) {
     if (!args) return kIOReturnBadArgument;
     if (!discovery_) return kIOReturnNotReady;
@@ -526,6 +701,28 @@ kern_return_t AVCHandler::GetSubunitDescriptor(IOUserClientMethodArguments* args
                         args->structureOutputDescriptor = nullptr;
                         
                         ASFW_LOG(UserClient, "GetSubunitDescriptor: returning %zu bytes", dataVec.size());
+                        return kIOReturnSuccess;
+                    } else if (subunitType == Protocols::AVC::AVCSubunitType::kAudio) {
+                        auto audioSubunit = std::static_pointer_cast<Protocols::AVC::Audio::AudioSubunit>(subunit);
+                        const auto& descriptorData = audioSubunit->GetStatusDescriptorData();
+                        if (!descriptorData) {
+                            ASFW_LOG(UserClient, "GetSubunitDescriptor: audio descriptor data not available");
+                            return kIOReturnNotFound;
+                        }
+
+                        const auto& dataVec = descriptorData.value();
+                        if (dataVec.size() > kMaxWireSize) {
+                            ASFW_LOG_ERROR(UserClient, "GetSubunitDescriptor: audio descriptor size %zu exceeds wire limit %zu", dataVec.size(), kMaxWireSize);
+                            return kIOReturnMessageTooLarge;
+                        }
+
+                        OSData* osData = OSData::withBytes(dataVec.data(), static_cast<uint32_t>(dataVec.size()));
+                        if (!osData) return kIOReturnNoMemory;
+
+                        args->structureOutput = osData;
+                        args->structureOutputDescriptor = nullptr;
+
+                        ASFW_LOG(UserClient, "GetSubunitDescriptor: returning audio descriptor %zu bytes", dataVec.size());
                         return kIOReturnSuccess;
                     } else {
                         // TODO: Support other subunits if they have descriptors

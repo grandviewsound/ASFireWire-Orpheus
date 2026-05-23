@@ -94,6 +94,60 @@ TEST(IsochTransmitContext, ConfigureFailsOnInvalidQueueChannelValue) {
               kIOReturnBadArgument);
 }
 
+TEST(IsochAudioTxPipeline, ActivatesAppleOutputChannelPositionMapWhenValid) {
+    constexpr uint32_t kQueueChannels = 4;
+    constexpr uint32_t kCapacityFrames = 256;
+    const uint64_t bytes = ASFW::Shared::TxSharedQueueSPSC::RequiredBytes(kCapacityFrames, kQueueChannels);
+    std::vector<uint8_t> storage(bytes);
+
+    ASSERT_TRUE(ASFW::Shared::TxSharedQueueSPSC::InitializeInPlace(storage.data(),
+                                                                    bytes,
+                                                                    kCapacityFrames,
+                                                                    kQueueChannels));
+
+    IsochAudioTxPipeline pipeline;
+    pipeline.SetSharedTxQueue(storage.data(), bytes);
+    const std::array<uint8_t, kQueueChannels> map = {1, 0, 3, 2};
+    pipeline.SetOutputChannelMap(map.data(), static_cast<uint32_t>(map.size()));
+
+    ASSERT_EQ(pipeline.Configure(/*sid=*/0x3F,
+                                 /*streamModeRaw=*/0,
+                                 /*requestedChannels=*/kQueueChannels,
+                                 /*requestedAm824Slots=*/kQueueChannels + 1),
+              kIOReturnSuccess);
+    EXPECT_TRUE(pipeline.IsOutputChannelMapActive());
+    EXPECT_EQ(pipeline.OutputChannelSlotForChannel(0), 1);
+    EXPECT_EQ(pipeline.OutputChannelSlotForChannel(1), 0);
+    EXPECT_EQ(pipeline.OutputChannelSlotForChannel(2), 3);
+    EXPECT_EQ(pipeline.OutputChannelSlotForChannel(3), 2);
+}
+
+TEST(IsochAudioTxPipeline, IgnoresInvalidAppleOutputChannelPositionMap) {
+    constexpr uint32_t kQueueChannels = 4;
+    constexpr uint32_t kCapacityFrames = 256;
+    const uint64_t bytes = ASFW::Shared::TxSharedQueueSPSC::RequiredBytes(kCapacityFrames, kQueueChannels);
+    std::vector<uint8_t> storage(bytes);
+
+    ASSERT_TRUE(ASFW::Shared::TxSharedQueueSPSC::InitializeInPlace(storage.data(),
+                                                                    bytes,
+                                                                    kCapacityFrames,
+                                                                    kQueueChannels));
+
+    IsochAudioTxPipeline pipeline;
+    pipeline.SetSharedTxQueue(storage.data(), bytes);
+    const std::array<uint8_t, kQueueChannels> duplicateSlotMap = {0, 1, 1, 3};
+    pipeline.SetOutputChannelMap(duplicateSlotMap.data(),
+                                 static_cast<uint32_t>(duplicateSlotMap.size()));
+
+    ASSERT_EQ(pipeline.Configure(/*sid=*/0x3F,
+                                 /*streamModeRaw=*/0,
+                                 /*requestedChannels=*/kQueueChannels,
+                                 /*requestedAm824Slots=*/kQueueChannels + 1),
+              kIOReturnSuccess);
+    EXPECT_FALSE(pipeline.IsOutputChannelMapActive());
+    EXPECT_EQ(pipeline.OutputChannelSlotForChannel(2), 2);
+}
+
 TEST(IsochTransmitContext, BlockingCadenceCountsMatchOneSecond) {
     PacketAssembler assembler(2, 0x3F);
 

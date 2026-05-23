@@ -45,12 +45,20 @@ void IsochTransmitContext::SetExternalSyncBridge(Core::ExternalSyncBridge* bridg
     audio_.SetExternalSyncBridge(bridge);
 }
 
+void IsochTransmitContext::SetOutputChannelMap(const uint8_t* map, uint32_t count) noexcept {
+    audio_.SetOutputChannelMap(map, count);
+}
+
 uint32_t IsochTransmitContext::SharedTxFillLevelFrames() const noexcept {
     return audio_.SharedTxFillLevelFrames();
 }
 
 uint32_t IsochTransmitContext::SharedTxCapacityFrames() const noexcept {
     return audio_.SharedTxCapacityFrames();
+}
+
+uint32_t IsochTransmitContext::PushMidiTxBytes(const uint8_t* bytes, uint32_t count) noexcept {
+    return audio_.PushMidiTxBytes(bytes, count);
 }
 
 void IsochTransmitContext::SetZeroCopyOutputBuffer(void* base, uint64_t bytes, uint32_t frameCapacity) noexcept {
@@ -225,6 +233,13 @@ void IsochTransmitContext::Stop() noexcept {
     }
 
     verifier_.Shutdown();
+}
+
+void IsochTransmitContext::SyncOutputInputStreams() noexcept {
+    if (state_ != State::Running) {
+        return;
+    }
+    audio_.SyncOutputInputStreams();
 }
 
 void IsochTransmitContext::DoRefillOnce() noexcept {

@@ -174,6 +174,8 @@ bool AVCUnit::InitializeWithAppleDiscovery() {
     ASFW_LOG_V1(AVC, "AVCUnit: InitializeWithAppleDiscovery starting...");
 
     appleDiscoveryUnitIsochFormats_.clear();
+    appleDiscoverySignalSources_.clear();
+    appleDiscoveryMixerReads_.clear();
 
     AppleDiscoverySequence discovery(*fcpTransport_);
     auto result = discovery.RunSync();
@@ -242,6 +244,14 @@ bool AVCUnit::InitializeWithAppleDiscovery() {
             audio->LoadFromDiscovery(result.audioDestPlugs,
                                      result.audioSrcPlugs,
                                      result.audioDescriptorData);
+            for (const auto& formatResult : result.audioSubunitFormats) {
+                if (!formatResult.valid) {
+                    continue;
+                }
+                audio->ApplyDiscoveryFormatResponse(formatResult.plugNum,
+                                                    formatResult.direction == 0,
+                                                    formatResult.rawResponse);
+            }
         }
     }
 
@@ -251,6 +261,36 @@ bool AVCUnit::InitializeWithAppleDiscovery() {
             .direction = formatResult.direction,
             .plugNum = formatResult.plugNum,
             .rawResponse = formatResult.rawResponse,
+        });
+    }
+
+    for (const auto& signalSource : result.signalSources) {
+        appleDiscoverySignalSources_.push_back({
+            .valid = signalSource.valid,
+            .targetSubunit = signalSource.targetSubunit,
+            .targetPlug = signalSource.targetPlug,
+            .sourceSubunit = signalSource.sourceSubunit,
+            .sourcePlug = signalSource.sourcePlug,
+            .signalStatus = signalSource.signalStatus,
+            .streamStatus = signalSource.streamStatus,
+            .hasFeedback = signalSource.hasFeedback,
+            .rawResponse = signalSource.rawResponse,
+        });
+    }
+
+    for (const auto& mixerRead : result.mixerReads) {
+        appleDiscoveryMixerReads_.push_back({
+            .valid = mixerRead.valid,
+            .functionBlockId = mixerRead.functionBlockId,
+            .infoType = mixerRead.infoType,
+            .channel = mixerRead.channel,
+            .controlSelector = mixerRead.controlSelector,
+            .selectorAttribute = mixerRead.selectorAttribute,
+            .isMute = mixerRead.isMute,
+            .isVolume = mixerRead.isVolume,
+            .mute = mixerRead.mute,
+            .volume = mixerRead.volume,
+            .rawResponse = mixerRead.rawResponse,
         });
     }
 
@@ -281,6 +321,8 @@ void AVCUnit::ReScan(std::function<void(bool)> completion) {
     plugCounts_ = {};
     descriptorInfo_ = {};
     appleDiscoveryUnitIsochFormats_.clear();
+    appleDiscoverySignalSources_.clear();
+    appleDiscoveryMixerReads_.clear();
     
     // Re-initialize
     Initialize(completion);

@@ -40,13 +40,22 @@ struct ASFWAudioDevice {
     uint32_t channelCount{2};
     uint32_t inputChannelCount{2};
     uint32_t outputChannelCount{2};
+    uint32_t midiInputPorts{0};
+    uint32_t midiOutputPorts{0};
+    uint32_t unitIsoInputPlugCount{0};
+    uint32_t unitIsoOutputPlugCount{0};
     std::vector<uint32_t> sampleRates{};
     uint32_t currentSampleRate{48000};
     std::string inputPlugName{"Input"};
     std::string outputPlugName{"Output"};
     std::vector<uint8_t> playback48kRawFormatBlock{};
     std::vector<uint8_t> capture48kRawFormatBlock{};
+    // AppleFWAudioStream keeps a per-channel "position in isoch stream" table.
+    // Host output is the map from CoreAudio playback channel index to AM824 slot.
+    std::vector<uint8_t> hostOutputIsochChannelPositions{};
+    std::vector<uint8_t> hostInputIsochChannelPositions{};
     StreamMode streamMode{StreamMode::kNonBlocking};
+    bool startInputBeforeOutput{false};
     bool hasPhantomOverride{false};
     uint32_t phantomSupportedMask{0};
     uint32_t phantomInitialMask{0};
@@ -66,6 +75,12 @@ struct ASFWAudioDevice {
         auto modelIdNum = OSSharedPtr(OSNumber::withNumber(modelId, 32), OSNoRetain);
         auto inputChannelCountNum = OSSharedPtr(OSNumber::withNumber(inputChannelCount, 32), OSNoRetain);
         auto outputChannelCountNum = OSSharedPtr(OSNumber::withNumber(outputChannelCount, 32), OSNoRetain);
+        auto midiInputPortsNum = OSSharedPtr(OSNumber::withNumber(midiInputPorts, 32), OSNoRetain);
+        auto midiOutputPortsNum = OSSharedPtr(OSNumber::withNumber(midiOutputPorts, 32), OSNoRetain);
+        auto unitIsoInputPlugCountNum = OSSharedPtr(
+            OSNumber::withNumber(unitIsoInputPlugCount, 32), OSNoRetain);
+        auto unitIsoOutputPlugCountNum = OSSharedPtr(
+            OSNumber::withNumber(unitIsoOutputPlugCount, 32), OSNoRetain);
         auto sampleRatesArray = OSSharedPtr(
             OSArray::withCapacity(static_cast<uint32_t>(sampleRates.size())), OSNoRetain);
         auto inputPlugNameStr = OSSharedPtr(OSString::withCString(inputPlugName.c_str()), OSNoRetain);
@@ -73,6 +88,9 @@ struct ASFWAudioDevice {
         auto currentRateNum = OSSharedPtr(OSNumber::withNumber(currentSampleRate, 32), OSNoRetain);
         auto streamModeNum = OSSharedPtr(
             OSNumber::withNumber(static_cast<uint32_t>(streamMode), 32), OSNoRetain);
+        auto startInputBeforeOutputBool = OSSharedPtr(
+            startInputBeforeOutput ? kOSBooleanTrue : kOSBooleanFalse,
+            OSNoRetain);
         auto hasPhantomOverrideBool = OSSharedPtr(
             hasPhantomOverride ? kOSBooleanTrue : kOSBooleanFalse,
             OSNoRetain);
@@ -83,8 +101,10 @@ struct ASFWAudioDevice {
 
         if (!deviceNameStr || !channelCountNum || !guidNum || !vendorIdNum || !modelIdNum ||
             !inputChannelCountNum || !outputChannelCountNum ||
+            !midiInputPortsNum || !midiOutputPortsNum ||
+            !unitIsoInputPlugCountNum || !unitIsoOutputPlugCountNum ||
             !sampleRatesArray || !inputPlugNameStr || !outputPlugNameStr ||
-            !currentRateNum || !streamModeNum || !hasPhantomOverrideBool ||
+            !currentRateNum || !streamModeNum || !startInputBeforeOutputBool || !hasPhantomOverrideBool ||
             !phantomSupportedMaskNum || !phantomInitialMaskNum || !boolControlOverridesArray) {
             return false;
         }
@@ -126,10 +146,15 @@ struct ASFWAudioDevice {
         properties->setObject("ASFWModelID", modelIdNum.get());
         properties->setObject("ASFWInputChannelCount", inputChannelCountNum.get());
         properties->setObject("ASFWOutputChannelCount", outputChannelCountNum.get());
+        properties->setObject("ASFWMidiInputPorts", midiInputPortsNum.get());
+        properties->setObject("ASFWMidiOutputPorts", midiOutputPortsNum.get());
+        properties->setObject("ASFWUnitIsoInputPlugCount", unitIsoInputPlugCountNum.get());
+        properties->setObject("ASFWUnitIsoOutputPlugCount", unitIsoOutputPlugCountNum.get());
         properties->setObject("ASFWInputPlugName", inputPlugNameStr.get());
         properties->setObject("ASFWOutputPlugName", outputPlugNameStr.get());
         properties->setObject("ASFWCurrentSampleRate", currentRateNum.get());
         properties->setObject("ASFWStreamMode", streamModeNum.get());
+        properties->setObject("ASFWStartInputBeforeOutput", startInputBeforeOutputBool.get());
         properties->setObject("ASFWHasPhantomOverride", hasPhantomOverrideBool.get());
         properties->setObject("ASFWPhantomSupportedMask", phantomSupportedMaskNum.get());
         properties->setObject("ASFWPhantomInitialMask", phantomInitialMaskNum.get());

@@ -19,13 +19,11 @@ AudioFunctionBlockCommand::AudioFunctionBlockCommand(IAVCCommandSubmitter& submi
 void AudioFunctionBlockCommand::Submit(std::function<void(AVCResult, const std::vector<uint8_t>&)> completion) {
     submitter_.SubmitCommand(cdb_, [completion](AVCResult result, const AVCCdb& response) {
         if (IsSuccess(result)) {
-            // Extract control data from response
-            // Response format: [Opcode, FuncBlkType, FuncBlkID, CtlAttr, Len, Selector, Data...]
-            // Data starts at offset 6 (if Len > 1)
+            // Apple AM824 feature responses place selector data after:
+            // type, blockID, infoType, pathLength, channel, selector, selectorAttr.
             std::vector<uint8_t> responseData;
-            if (response.operandLength > 6) {
-                // Copy from offset 6 to end
-                for (size_t i = 6; i < response.operandLength; ++i) {
+            if (response.operandLength > 7) {
+                for (size_t i = 7; i < response.operandLength; ++i) {
                     responseData.push_back(response.operands[i]);
                 }
             }
@@ -47,6 +45,9 @@ AVCCdb AudioFunctionBlockCommand::BuildCdb(uint8_t subunitAddr,
     cdb.opcode = 0xB8; // FUNCTION BLOCK
 
     size_t offset = 0;
+    const uint8_t kCurrentInfoType = 0x10;
+    const uint8_t kChannelPathLength = 0x02;
+    const uint8_t kMasterChannel = 0x00;
 
     // Function Block Type: Feature (0x81)
     cdb.operands[offset++] = 0x81;
@@ -54,16 +55,18 @@ AVCCdb AudioFunctionBlockCommand::BuildCdb(uint8_t subunitAddr,
     // Function Block ID
     cdb.operands[offset++] = functionBlockId;
 
-    // Control Attribute
-    // 0x10 = Current
-    cdb.operands[offset++] = 0x10;
-
-    // Selector Length
-    // 1 (Selector) + Data Length
-    cdb.operands[offset++] = static_cast<uint8_t>(1 + data.size());
+    // Apple AM824AVC::SetChannelVolume/SetChannelMute use infoType 0x10
+    // (current value), a one-byte channel path, and then selector metadata.
+    cdb.operands[offset++] = kCurrentInfoType;
+    cdb.operands[offset++] = kChannelPathLength;
+    cdb.operands[offset++] = kMasterChannel;
 
     // Control Selector
     cdb.operands[offset++] = static_cast<uint8_t>(selector);
+
+    // Selector attribute/value length. analysis shows 0x02 for volume and 0x01
+    // for mute; those are the data lengths we pass from the call sites.
+    cdb.operands[offset++] = static_cast<uint8_t>(data.size());
 
     // Control Data
     for (uint8_t byte : data) {

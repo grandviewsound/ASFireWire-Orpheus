@@ -29,6 +29,31 @@
 			<key>IOUserServerName</key>
 			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 		</dict>
+		<key>ASFWMIDIDriverService</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+			<key>IOClass</key>
+			<string>IOUserService</string>
+			<key>IOPropertyMatch</key>
+			<dict>
+				<key>ASFWNubType</key>
+				<string>MIDI</string>
+			</dict>
+			<key>IOProviderClass</key>
+			<string>IOUserService</string>
+			<key>IOUserMIDIDriverUserClientProperties</key>
+			<dict>
+				<key>IOClass</key>
+				<string>IOUserUserClient</string>
+				<key>IOUserClass</key>
+				<string>IOUserMIDIDriverUserClient</string>
+			</dict>
+			<key>IOUserClass</key>
+			<string>ASFWMIDIDriver</string>
+			<key>IOUserServerName</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+		</dict>
 		<key>ASFWDriverService</key>
 		<dict>
 			<key>ASFWAsyncVerbosity</key>
@@ -41,6 +66,15 @@
 				<string>IOUserService</string>
 				<key>IOUserClass</key>
 				<string>ASFWAudioNub</string>
+			</dict>
+			<key>ASFWMIDINubProperties</key>
+			<dict>
+				<key>ASFWNubType</key>
+				<string>MIDI</string>
+				<key>IOClass</key>
+				<string>IOUserService</string>
+				<key>IOUserClass</key>
+				<string>ASFWMIDINub</string>
 			</dict>
 			<key>ASFWControllerVerbosity</key>
 			<integer>1</integer>
@@ -55,6 +89,10 @@
 			<false/>
 			<key>ASFWEnableIsochTxVerifier</key>
 			<false/>
+			<key>ASFWEnableMIDITxSelfTest</key>
+			<true/>
+			<key>ASFWEnableMIDIRxSelfTest</key>
+			<true/>
 			<key>ASFWHardwareVerbosity</key>
 			<integer>1</integer>
 			<key>ASFWAutoStartAudioStreams</key>

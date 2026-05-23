@@ -34,6 +34,18 @@ TEST(LabelAllocator, ExhaustAndRecover) {
     EXPECT_EQ(alloc.Allocate(), labels[10]) << "allocator should return the freed slot first";
 }
 
+TEST(LabelAllocator, ReportsAnyInUse) {
+    LabelAllocator alloc;
+    alloc.Reset();
+
+    EXPECT_FALSE(alloc.HasAnyLabelInUse());
+    const uint8_t first = alloc.Allocate();
+    ASSERT_NE(first, LabelAllocator::kInvalidLabel);
+    EXPECT_TRUE(alloc.HasAnyLabelInUse());
+    alloc.Free(first);
+    EXPECT_FALSE(alloc.HasAnyLabelInUse());
+}
+
 // NextLabel() must wrap 63→0 and never return an out-of-range value.
 TEST(LabelAllocator, NextLabelWraps) {
     LabelAllocator alloc;

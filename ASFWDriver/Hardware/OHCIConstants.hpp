@@ -93,6 +93,20 @@ struct ContextControl {
     static constexpr uint32_t kEventCodeShift = 0;
     static constexpr uint32_t kIsochHeader = 1u << 30;     // IR: includes isoch header (OHCI §10.2.2)
     static constexpr uint32_t kCycleMatchEnable = 1u << 30; // IT: stall until cycle match (OHCI §9.2)
+    // IR-only mode bits (OHCI §10.2.2 IsochReceiveContextControl):
+    //   bit 31 bufferFill — packets fill consecutively across descriptors;
+    //                        software parses per-packet boundaries from the
+    //                        4-byte hardware-prepended cycleTimestamp + the
+    //                        4-byte wire isoch header. Apple ALWAYS sets this
+    //                        for IR contexts (verified via analysis of
+    //                        AppleFWOHCI_DMAManager::Context::start at sym
+    //                        0xac68 — sets 0x80000000 for type=2 single IR and
+    //                        type=3 multiIsoch).
+    //   bit 28 multiChanMode — Apple's MultiIsochReceiver type=3 only.
+    //   bit 27 dualBufferMode — alternate dual-buffer receive (rare).
+    static constexpr uint32_t kBufferFill     = 1u << 31;
+    static constexpr uint32_t kMultiChanMode  = 1u << 28;
+    static constexpr uint32_t kDualBufferMode = 1u << 27;
     // Mask of all writable bits (for safe clearing without hitting reserved bits)
     static constexpr uint32_t kWritableBits = kRun | kWake | kCycleMatchEnable;
 };

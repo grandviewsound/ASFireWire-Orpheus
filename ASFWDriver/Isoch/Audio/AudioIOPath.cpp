@@ -4,12 +4,91 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 namespace ASFW::Isoch::Audio {
 namespace detail {
 
 constexpr uint32_t kRxTargetFillFrames = 2048;
+
+struct PcmScanSummary {
+    bool hasNonZero{false};
+    uint32_t nonZeroFrames{0};
+    uint32_t firstFrame{0};
+    uint32_t firstChannel{0};
+    uint32_t channelMask{0};
+    int32_t firstSample{0};
+    int32_t peakSample{0};
+};
+
+void ScanPcmSpan(const int32_t* pcm,
+                 uint32_t frames,
+                 uint32_t channels,
+                 uint32_t baseFrame,
+                 PcmScanSummary& summary) {
+    if (!pcm || frames == 0 || channels == 0) {
+        return;
+    }
+
+    for (uint32_t frame = 0; frame < frames; ++frame) {
+        bool frameHasNonZero = false;
+        for (uint32_t ch = 0; ch < channels; ++ch) {
+            const int32_t sample = pcm[(static_cast<size_t>(frame) * channels) + ch];
+            if (sample == 0) {
+                continue;
+            }
+
+            if (!summary.hasNonZero) {
+                summary.hasNonZero = true;
+                summary.firstFrame = baseFrame + frame;
+                summary.firstChannel = ch;
+                summary.firstSample = sample;
+            }
+            if (ch < 32) {
+                summary.channelMask |= (1u << ch);
+            }
+            int32_t absSample = (sample < 0) ? -sample : sample;
+            if (absSample > summary.peakSample) {
+                summary.peakSample = absSample;
+            }
+            frameHasNonZero = true;
+        }
+        if (frameHasNonZero) {
+            ++summary.nonZeroFrames;
+        }
+    }
+}
+
+void LogFirstPcmFrameChannels(const int32_t* frame, uint32_t channels) {
+    if (!frame || channels == 0) {
+        return;
+    }
+
+    char buffer[512];
+    int written = std::snprintf(buffer,
+                                sizeof(buffer),
+                                "WriteEnd frame channels=%u",
+                                channels);
+    if (written < 0) {
+        return;
+    }
+
+    size_t offset = static_cast<size_t>(written);
+    for (uint32_t ch = 0; ch < channels && offset < sizeof(buffer); ++ch) {
+        written = std::snprintf(buffer + offset,
+                                sizeof(buffer) - offset,
+                                " ch%u=0x%08x",
+                                ch,
+                                static_cast<uint32_t>(frame[ch]));
+        if (written < 0) {
+            return;
+        }
+        offset += static_cast<size_t>(written);
+    }
+
+    ASFW_LOG(Audio, "%{public}s", buffer);
+}
 
 void MaybeDrainRxStartup(AudioIOPathState& state) {
     if (!state.rxQueueValid || !state.rxQueueReader || !state.rxStartupDrained || *state.rxStartupDrained) {
@@ -172,6 +251,7 @@ uint32_t WriteEndZeroCopyPublish(AudioIOPathState& state,
 static uint64_t sWriteEndCallCount = 0;
 static uint64_t sWriteEndNonZeroFrames = 0;
 static int32_t  sWriteEndPeakSample = 0;
+static bool     sWriteEndFirstNonZeroLogged = false;
 
 kern_return_t HandleWriteEnd(AudioIOPathState& state,
                              uint32_t ioBufferFrameSize,
@@ -204,21 +284,20 @@ kern_return_t HandleWriteEnd(AudioIOPathState& state,
     const auto* pcmDataFirst = reinterpret_cast<const int32_t*>(segment.address + offsetBytes);
     const auto* pcmDataSecond = reinterpret_cast<const int32_t*>(segment.address);
 
-    // Fix #24: Diagnostic — scan for non-zero audio and track peak sample
-    {
-        const uint32_t totalSamples = firstFrames * state.channelCount;
-        bool hasNonZero = false;
-        for (uint32_t i = 0; i < totalSamples; ++i) {
-            int32_t s = pcmDataFirst[i];
-            if (s != 0) hasNonZero = true;
-            int32_t abs_s = (s < 0) ? -s : s;
-            if (abs_s > sWriteEndPeakSample) sWriteEndPeakSample = abs_s;
-        }
-        if (hasNonZero) sWriteEndNonZeroFrames += firstFrames;
+    PcmScanSummary scan{};
+    ScanPcmSpan(pcmDataFirst, firstFrames, ch, offsetFrames, scan);
+    if (secondFrames > 0) {
+        ScanPcmSpan(pcmDataSecond, secondFrames, ch, 0, scan);
+    }
+    sWriteEndNonZeroFrames += scan.nonZeroFrames;
+    if (scan.peakSample > sWriteEndPeakSample) {
+        sWriteEndPeakSample = scan.peakSample;
     }
 
     uint32_t framesWritten = 0;
     uint32_t framesRequested = ioBufferFrameSize;
+    const uint32_t txFillBefore =
+        (state.txQueueValid && state.txQueueWriter) ? state.txQueueWriter->FillLevelFrames() : 0;
 
     if (state.txQueueValid && state.txQueueWriter) {
         if (state.zeroCopyEnabled && state.zeroCopyTimeline) {
@@ -240,28 +319,56 @@ kern_return_t HandleWriteEnd(AudioIOPathState& state,
             framesWritten += state.packetAssembler->ringBuffer().write(pcmDataSecond, secondFrames);
         }
     }
+    const uint32_t txFillAfter =
+        (state.txQueueValid && state.txQueueWriter) ? state.txQueueWriter->FillLevelFrames() : 0;
 
     if (framesWritten < framesRequested && state.encodingOverruns) {
         (*state.encodingOverruns)++;
+    }
+
+    if (scan.hasNonZero && !sWriteEndFirstNonZeroLogged) {
+        sWriteEndFirstNonZeroLogged = true;
+        ASFW_LOG(Audio,
+                 "WriteEnd FIRST NONZERO: call=%llu sampleTime=%llu frame=%u ch=%u "
+                 "sample=0x%08x peak=0x%08x chMask=0x%08x written=%u requested=%u txFill=%u->%u",
+                 sWriteEndCallCount + 1,
+                 sampleTime,
+                 scan.firstFrame,
+                 scan.firstChannel,
+                 static_cast<uint32_t>(scan.firstSample),
+                 static_cast<uint32_t>(scan.peakSample),
+                 scan.channelMask,
+                 framesWritten,
+                 framesRequested,
+                 txFillBefore,
+                 txFillAfter);
     }
 
     // Fix #24: Periodic diagnostic log (every ~500 calls ≈ every 5 seconds at 48kHz/512)
     ++sWriteEndCallCount;
     if (sWriteEndCallCount % 500 == 1) {
         ASFW_LOG(Audio,
-                 "WriteEnd[%llu]: frames=%u written=%u txQ=%{public}s zc=%{public}s "
-                 "nonZeroFrames=%llu peak=0x%08x samples=[%08x,%08x,%08x,%08x]",
+                 "WriteEnd[%llu]: frames=%u written=%u txQ=%{public}s zc=%{public}s txFill=%u->%u "
+                 "nonZeroFrames=%llu peak=0x%08x firstNZ=f%u/ch%u sample=0x%08x chMask=0x%08x "
+                 "samples=[%08x,%08x,%08x,%08x]",
                  sWriteEndCallCount,
                  ioBufferFrameSize,
                  framesWritten,
                  (state.txQueueValid && state.txQueueWriter) ? "YES" : "NO",
                  state.zeroCopyEnabled ? "YES" : "NO",
+                 txFillBefore,
+                 txFillAfter,
                  sWriteEndNonZeroFrames,
                  static_cast<uint32_t>(sWriteEndPeakSample),
+                 scan.firstFrame,
+                 scan.firstChannel,
+                 static_cast<uint32_t>(scan.firstSample),
+                 scan.channelMask,
                  static_cast<uint32_t>(pcmDataFirst[0]),
-                 static_cast<uint32_t>(state.channelCount > 1 ? pcmDataFirst[1] : 0),
-                 static_cast<uint32_t>(state.channelCount > 0 ? pcmDataFirst[state.channelCount] : 0),
-                 static_cast<uint32_t>(state.channelCount > 1 ? pcmDataFirst[state.channelCount + 1] : 0));
+                 static_cast<uint32_t>(ch > 1 ? pcmDataFirst[1] : 0),
+                 static_cast<uint32_t>(ch > 0 ? pcmDataFirst[ch] : 0),
+                 static_cast<uint32_t>(ch > 1 ? pcmDataFirst[ch + 1] : 0));
+        LogFirstPcmFrameChannels(pcmDataFirst, ch);
     }
 
     return kIOReturnSuccess;

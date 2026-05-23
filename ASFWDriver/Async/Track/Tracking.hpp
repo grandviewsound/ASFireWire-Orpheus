@@ -105,11 +105,12 @@ public:
 
         ::IOLockLock(lock_);
 
-        // If no transactions are in flight but the bitmap isn't empty, reset it
-        // to avoid stale bits pinning allocation (observed stuck tLabel).
-        if (txnMgr_->Count() == 0 && labelAllocator_->IsLabelInUse(0 /*ignored, uses bitmap*/)) {
-            ASFW_LOG(Async, "Label bitmap non-empty with zero transactions; resetting allocator");
-            labelAllocator_->Reset();
+        // If no transactions are in flight but the bitmap isn't empty, clear
+        // stale labels without touching the bus generation. Reset() would
+        // zero the generation and poison later async/FCP submits with gen=0.
+        if (txnMgr_->Count() == 0 && labelAllocator_->HasAnyLabelInUse()) {
+            ASFW_LOG(Async, "Label bitmap non-empty with zero transactions; clearing stale labels");
+            labelAllocator_->ClearBitmap();
         }
 
         // Allocate a free label from the bitmap allocator to avoid collisions

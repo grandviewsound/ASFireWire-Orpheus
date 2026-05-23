@@ -34,9 +34,9 @@ public:
     
     /// Constructor
     /// @param submitter Command submitter
-    /// @param subunitAddr Subunit address (usually Audio 0x01 or Music 0x0C)
+    /// @param subunitAddr Encoded subunit address (Audio 0 = 0x08)
     /// @param type Command type (Control, Status)
-    /// @param functionBlockId The ID of the function block (often Plug ID)
+    /// @param functionBlockId The AM824 feature function-block ID Apple uses for volume/mute
     /// @param selector The control selector (e.g., Volume, SampleRate)
     /// @param data Additional control data (e.g., the sample rate value)
     AudioFunctionBlockCommand(IAVCCommandSubmitter& submitter,

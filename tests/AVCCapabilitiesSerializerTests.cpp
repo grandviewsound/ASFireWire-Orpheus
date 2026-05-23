@@ -10,12 +10,14 @@
 #include "UserClient/Handlers/AVCHandler.hpp"
 #include "Shared/SharedDataModels.hpp"
 #include "Protocols/AVC/Music/MusicSubunit.hpp"
+#include "Protocols/AVC/Audio/AudioSubunit.hpp"
 #include <DriverKit/IOUserClient.h>
 #include <DriverKit/OSData.h>
 #include <vector>
 
 using namespace ASFW::UserClient;
 using namespace ASFW::Protocols::AVC::Music;
+using namespace ASFW::Protocols::AVC::Audio;
 using namespace ASFW::Protocols::AVC::StreamFormats;
 using namespace ASFW::Shared;
 
@@ -237,4 +239,31 @@ TEST_F(AVCCapabilitiesSerializerTests, Serialization_CompoundFormat_UsesDefinedB
     auto* blk2 = reinterpret_cast<const SignalBlockWire*>(ptr + offset);
     EXPECT_EQ(blk2->formatCode, static_cast<uint8_t>(StreamFormatCode::kIEC60958_3));
     EXPECT_EQ(blk2->channelCount, 2);
+}
+
+TEST_F(AVCCapabilitiesSerializerTests, AudioSerialization_UsesAppleDiscoveryPlugCounts) {
+    AudioSubunit audio(ASFW::Protocols::AVC::AVCSubunitType::kAudio, 0);
+    const std::vector<uint8_t> descriptor = {0x00, 0x10, 0x80, 0x00};
+    audio.LoadFromDiscovery(11, 6, descriptor);
+
+    kern_return_t ret = AVCHandler::SerializeAudioCapabilities(audio, &args);
+
+    EXPECT_EQ(ret, kIOReturnSuccess);
+    ASSERT_NE(args.structureOutput, nullptr);
+
+    const uint8_t* ptr = static_cast<const uint8_t*>(args.structureOutput->getBytesNoCopy());
+    auto* wire = reinterpret_cast<const AVCMusicCapabilitiesWire*>(ptr);
+
+    EXPECT_EQ(wire->hasAudio, 1);
+    EXPECT_EQ(wire->hasMIDI, 0);
+    EXPECT_EQ(wire->audioInputPorts, 11);
+    EXPECT_EQ(wire->audioOutputPorts, 6);
+    EXPECT_EQ(wire->numPlugs, 17);
+
+    size_t offset = sizeof(AVCMusicCapabilitiesWire);
+    auto* firstPlug = reinterpret_cast<const PlugInfoWire*>(ptr + offset);
+    EXPECT_EQ(firstPlug->plugID, 0);
+    EXPECT_EQ(firstPlug->isInput, 1);
+    EXPECT_EQ(firstPlug->type, 0x00);
+    EXPECT_STREQ(firstPlug->name, "Dest Plug 0");
 }

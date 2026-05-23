@@ -13,6 +13,7 @@ AudioCoordinator::AudioCoordinator(IOService* driver,
                                    Driver::IsochService& isoch,
                                    Driver::HardwareInterface& hardware) noexcept
     : publisher_(driver)
+    , midiPublisher_(driver, &isoch)
     , dice_(publisher_, registry, isoch, hardware)
     , avc_(publisher_, registry, isoch, hardware)
     , deviceManager_(deviceManager)
@@ -69,6 +70,7 @@ void AudioCoordinator::OnDeviceRemoved(Discovery::Guid64 guid) {
     // Ensure isoch transport is stopped (best-effort) and nubs are terminated.
     dice_.OnDeviceRemoved(guid);
     avc_.OnDeviceRemoved(guid);
+    midiPublisher_.TerminateNub(guid, "DeviceRemoved");
 
     if (lock_) {
         IOLockLock(lock_);
@@ -82,6 +84,7 @@ void AudioCoordinator::OnDeviceRemoved(Discovery::Guid64 guid) {
 void AudioCoordinator::OnAVCAudioConfigurationReady(uint64_t guid,
                                                    const Model::ASFWAudioDevice& config) noexcept {
     avc_.OnAudioConfigurationReady(guid, config);
+    (void)midiPublisher_.EnsureNub(guid, config, "AVC");
 }
 
 IAudioBackend* AudioCoordinator::BackendForGuid(uint64_t guid) noexcept {

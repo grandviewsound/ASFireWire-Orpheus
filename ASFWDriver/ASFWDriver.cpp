@@ -27,6 +27,7 @@
 #include <cstring>
 #include <memory>
 #include <new>
+#include <span>
 #include <string>
 
 #include <com.kevinpeters.ASFW.ASFWDriver/ASFWDriver.h>           // generated from .iig
@@ -71,6 +72,60 @@ class ASFWDriverUserClient;
 
 namespace {
 constexpr uint64_t kAsyncWatchdogPeriodUsec = 1000; // 1 ms tick (hybrid: interrupt + timer backup)
+
+constexpr uint16_t kCSRRegisterSpaceHi = 0xFFFF;
+// Used only for the LocalPCRName logging helper; the address→register mapping
+// and values now live in CMPClient's LocalPcrRegisterFile (gaps 3.3/3.4).
+constexpr uint32_t kLocalOMPR = ASFW::CMP::PCRRegisters::kOMPR;
+constexpr uint32_t kLocalOPCRBase = ASFW::CMP::PCRRegisters::kOPCRBase;
+constexpr uint32_t kLocalIMPR = ASFW::CMP::PCRRegisters::kIMPR;
+
+uint64_t ExtractReadQuadletOffset(std::span<const uint8_t> header) {
+    if (header.size() < 12) {
+        return 0;
+    }
+
+    uint64_t offsetHigh = (static_cast<uint64_t>(header[5] & 0x0F) << 8) |
+                          static_cast<uint64_t>(header[4]);
+    if (offsetHigh & 0x800) {
+        offsetHigh |= 0xF000;
+    }
+
+    const uint64_t offsetLow = (static_cast<uint64_t>(header[11]) << 24) |
+                               (static_cast<uint64_t>(header[10]) << 16) |
+                               (static_cast<uint64_t>(header[9]) << 8) |
+                               static_cast<uint64_t>(header[8]);
+    return (offsetHigh << 32) | offsetLow;
+}
+
+// Derive a short register name from a CSR addressLo, for logging only.
+const char* LocalPCRName(uint32_t addressLo) {
+    if (addressLo == kLocalOMPR) return "oMPR";
+    if (addressLo == kLocalIMPR) return "iMPR";
+    if (addressLo >= kLocalOPCRBase && addressLo < kLocalIMPR) return "oPCR";
+    return "iPCR";
+}
+
+// Read handler for an incoming peer read of our local PCR space. Delegates to
+// the CMPClient register file (single source of truth for host-as-CMP-target
+// reads + locks; gaps 3.3/3.4).
+bool ResolveLocalPCRRead(ASFW::CMP::CMPClient& cmp,
+                         uint64_t destOffset,
+                         uint32_t& value,
+                         const char*& name) {
+    const uint16_t addressHi = static_cast<uint16_t>((destOffset >> 32) & 0xFFFFu);
+    const uint32_t addressLo = static_cast<uint32_t>(destOffset & 0xFFFFFFFFu);
+    if (addressHi != kCSRRegisterSpaceHi) {
+        return false;
+    }
+    const auto v = cmp.ReadLocalPcr(addressLo);
+    if (!v.has_value()) {
+        return false;
+    }
+    value = *v;
+    name = LocalPCRName(addressLo);
+    return true;
+}
 } // namespace
 
 bool ASFWDriver::init() {
@@ -291,6 +346,39 @@ kern_return_t IMPL(ASFWDriver, Start) {
         ctx.deps.cmpClient = std::make_shared<ASFW::CMP::CMPClient>(ctx.controller->Bus());
         ctx.controller->SetCMPClient(ctx.deps.cmpClient);
         ASFW_LOG(Controller, "✅ CMPClient initialized");
+    }
+
+    if (ctx.deps.cmpClient && ctx.deps.asyncSubsystem) {
+        if (auto* router = ctx.deps.asyncSubsystem->GetPacketRouter()) {
+            router->RegisterRequestHandler(
+                0x4, // tCode for Read Quadlet Request
+                [router, cmp = ctx.deps.cmpClient.get()](const ASFW::Async::ARPacketView& packet) {
+                    if (!router || !cmp) {
+                        return ASFW::Async::ResponseCode::NoResponse;
+                    }
+
+                    const uint64_t destOffset = ExtractReadQuadletOffset(packet.header);
+                    uint32_t value = 0;
+                    const char* name = nullptr;
+                    if (!ResolveLocalPCRRead(*cmp, destOffset, value, name)) {
+                        return ASFW::Async::ResponseCode::NoResponse;
+                    }
+
+                    ASFW_LOG(CMP,
+                             "LocalPCRResponder: READ %{public}s offset=0x%012llx -> 0x%08x "
+                             "(src=0x%04x tLabel=%u)",
+                             name,
+                             destOffset,
+                             value,
+                             packet.sourceID,
+                             packet.tLabel);
+                    router->SendReadQuadletResponse(packet,
+                                                    ASFW::Async::ResponseCode::Complete,
+                                                    value);
+                    return ASFW::Async::ResponseCode::NoResponse;
+                });
+            ASFW_LOG(Controller, "✅ Local PCR CSR responder wired to PacketRouter (tCode 0x4)");
+        }
     }
 
     if (ctx.audioCoordinator) {

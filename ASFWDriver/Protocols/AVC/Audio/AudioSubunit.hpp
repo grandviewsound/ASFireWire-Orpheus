@@ -9,6 +9,7 @@
 
 #include "../Subunit.hpp"
 #include "../AVCStreamFormatCommand.hpp"
+#include <string>
 #include <vector>
 #include <optional>
 
@@ -18,6 +19,13 @@ namespace ASFW::Protocols::AVC::Audio {
 struct AudioPlugInfo {
     uint8_t plugNumber{0};
     bool isInput{false};
+    std::string name;
+    std::vector<uint16_t> channelMusicPlugIDs;
+    std::vector<uint8_t> channelMap;
+    std::vector<std::string> channelNames;
+    std::vector<uint8_t> channelsPerStream;
+    uint8_t audioStreamCount{0};
+    uint8_t midiStreamCount{0};
     std::optional<StreamFormat> currentFormat;
     std::vector<StreamFormat> supportedFormats;
 };
@@ -37,21 +45,33 @@ public:
     uint8_t GetNumOutputPlugs() const { return numOutputPlugs_; }
     const std::vector<AudioPlugInfo>& GetInputPlugs() const { return inputPlugs_; }
     const std::vector<AudioPlugInfo>& GetOutputPlugs() const { return outputPlugs_; }
+    const std::optional<std::vector<uint8_t>>& GetStatusDescriptorData() const {
+        return statusDescriptorData_;
+    }
 
     /// Populate from AppleDiscoverySequence results (synchronous path).
-    /// Sets plug counts from Phase 3. Descriptor data stored for future use.
+    /// Sets plug counts from Phase 3. Descriptor data is Audio descriptor 0x00,
+    /// matching AppleFWAudioDevice's type-0x01 AM824AVC::GetSubunitDescriptor path.
     void LoadFromDiscovery(uint8_t destPlugs, uint8_t srcPlugs,
                            const std::vector<uint8_t>& descriptorData);
+
+    /// Apply a raw StreamFormat response captured during Apple-style discovery.
+    /// Apple reads Audio subunit output plugs first, then input plugs, using
+    /// GetExtendedStreamFormat status requests at subunit address 0x08.
+    void ApplyDiscoveryFormatResponse(uint8_t plugId, bool isInput,
+                                      const std::vector<uint8_t>& rawResponse);
 
 private:
     uint8_t numInputPlugs_{0};
     uint8_t numOutputPlugs_{0};
     std::vector<AudioPlugInfo> inputPlugs_;
     std::vector<AudioPlugInfo> outputPlugs_;
+    std::optional<std::vector<uint8_t>> statusDescriptorData_;
     
     void QueryPlugCounts(AVCUnit& unit, std::function<void(bool)> completion);
     void QueryPlugFormats(AVCUnit& unit, size_t plugIndex, bool isInput,
                          std::function<void(bool)> completion);
+    void ParseAppleAudioDescriptor();
 
     /// Set volume for a function block (plug)
     /// @param unit AVCUnit for command submission

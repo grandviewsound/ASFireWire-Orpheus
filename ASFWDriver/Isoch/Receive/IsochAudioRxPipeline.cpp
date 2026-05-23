@@ -12,6 +12,7 @@ void IsochAudioRxPipeline::ConfigureFor48k() noexcept {
 
 void IsochAudioRxPipeline::OnStart() noexcept {
     streamProcessor_.Reset();
+    packetParser_.Reset();
 
     if (externalSyncBridge_) {
         externalSyncBridge_->Reset();
@@ -29,6 +30,12 @@ void IsochAudioRxPipeline::OnStop() noexcept {
         externalSyncBridge_->Reset();
     }
     externalSyncClockState_.Reset();
+}
+
+void IsochAudioRxPipeline::OnByteStream(const uint8_t* bytes, size_t length) noexcept {
+    packetParser_.OnBytes(bytes, length, [this](const uint8_t* pkt, size_t pktLen) {
+        OnPacket(pkt, pktLen);
+    });
 }
 
 void IsochAudioRxPipeline::OnPacket(const uint8_t* payload, size_t length) noexcept {

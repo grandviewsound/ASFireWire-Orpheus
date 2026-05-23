@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #ifdef ASFW_HOST_TEST
 #include "../Testing/HostDriverKitStubs.hpp"
@@ -36,6 +37,7 @@ struct IsochDuplexStartParams {
 
     uint32_t deviceToHostAm824Slots{0};
     uint32_t hostToDeviceAm824Slots{0};
+    std::vector<uint8_t> hostOutputIsochChannelPositions{};
 
     ASFW::Audio::Model::StreamMode streamMode{ASFW::Audio::Model::StreamMode::kNonBlocking};
 
@@ -61,6 +63,15 @@ public:
 
     kern_return_t StopReceive();
 
+    // Mark whether the device is locked to an external clock (Wordclock/SPDIF/
+    // ADAT). Mirrors Apple AppleFWAudioDevice::SetClockSource: external-sync SYT
+    // slaving only engages on a non-internal clock source. When false the
+    // transmit SYT free-runs (Apple externalSync=0). Not affected by the bridge
+    // Reset(), so call order relative to StartReceive does not matter.
+    void SetExternalClockSource(bool external) noexcept {
+        externalSyncBridge_.externalClockSource.store(external, std::memory_order_release);
+    }
+
     kern_return_t StartTransmit(uint8_t channel,
                                 HardwareInterface& hardware,
                                 uint8_t sid,
@@ -71,7 +82,9 @@ public:
                                 uint64_t txQueueBytes,
                                 void* zeroCopyBase,
                                 uint64_t zeroCopyBytes,
-                                uint32_t zeroCopyFrames);
+                                uint32_t zeroCopyFrames,
+                                const uint8_t* outputChannelMap = nullptr,
+                                uint32_t outputChannelMapCount = 0);
 
     kern_return_t StopTransmit();
 
@@ -81,9 +94,13 @@ public:
     kern_return_t StopDuplex(uint64_t guid);
 
     void StopAll();
+    void SyncOutputInputStreams() noexcept;
 
     ASFW::Isoch::IsochReceiveContext* ReceiveContext() const { return isochReceiveContext_.get(); }
     ASFW::Isoch::IsochTransmitContext* TransmitContext() const { return isochTransmitContext_.get(); }
+    uint32_t PushTransmitMidiBytes(const uint8_t* bytes, uint32_t count) noexcept;
+    void SetReceiveMidiSink(void* context,
+                            ASFW::Isoch::StreamProcessor::MidiRxCallback callback) noexcept;
 
     // Reconnect oPCR on the IR channel after a device resume (e.g. BeBoB bus reset recovery).
     // No-op if StartReceive has not been called yet.
@@ -119,6 +136,9 @@ private:
 
     SharedQueueMapping rxQueue_{};
     SharedQueueMapping txQueue_{};
+
+    void* midiRxSinkContext_{nullptr};
+    ASFW::Isoch::StreamProcessor::MidiRxCallback midiRxSinkCallback_{nullptr};
 
     uint64_t activeGuid_{0};
 };

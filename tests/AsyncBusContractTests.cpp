@@ -101,6 +101,38 @@ TEST(AsyncBusContract, Cancel_UnknownHandle_ReturnsFalse_NoCallback) {
     EXPECT_EQ(0u, called.load(std::memory_order_relaxed));
 }
 
+TEST(AsyncBusContract, RegisterTx_ClearsStaleLabelBitmapWithoutResettingGeneration) {
+    DummyCompletionQueue dummyQueue;
+
+    LabelAllocator allocator;
+    allocator.Reset();
+    ASFW::Async::Bus::GenerationTracker generationTracker(allocator);
+    generationTracker.OnSyntheticBusReset(3);
+
+    TransactionManager txnMgr;
+    auto initRes = txnMgr.Initialize();
+    ASSERT_TRUE(initRes) << "TransactionManager::Initialize failed";
+
+    const uint8_t staleLabel = allocator.Allocate();
+    ASSERT_NE(staleLabel, LabelAllocator::kInvalidLabel);
+    ASSERT_TRUE(allocator.HasAnyLabelInUse());
+    ASSERT_EQ(3u, generationTracker.GetCurrentState().generation16);
+
+    Track_Tracking<DummyCompletionQueue> tracking(&allocator, &txnMgr, dummyQueue);
+
+    TxMetadata meta{};
+    meta.generation = generationTracker.GetCurrentState().generation8;
+    meta.destinationNodeID = 0x0001;
+    meta.tCode = 0x0;
+    meta.expectedLength = 0;
+
+    const AsyncHandle handle = tracking.RegisterTx(meta);
+    ASSERT_TRUE(handle) << "RegisterTx returned invalid handle";
+    EXPECT_EQ(3u, generationTracker.GetCurrentState().generation16);
+
+    EXPECT_TRUE(CancelTransactionHandleForTest(txnMgr, allocator, handle));
+}
+
 TEST(AsyncBusContract, GenerationMismatch_AdapterCompletesStaleGeneration_AsyncNotInline) {
     ASFW::Async::AsyncSubsystem async;
     async.GetGenerationTracker().OnSyntheticBusReset(10);

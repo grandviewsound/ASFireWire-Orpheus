@@ -218,6 +218,12 @@ extension ASFWDriverConnector {
             return nil
         }
 
+        // One in-flight FCP transaction at a time. See `ASFWDriverConnector.fcpLock`
+        // for the rationale (Bug B fix — concurrent dispatches race on dext
+        // transaction handles, producing Not Found / Device Busy).
+        fcpLock.lock()
+        defer { fcpLock.unlock() }
+
         let scalarInputs: [UInt64] = [
             guid >> 32,
             guid & 0xFFFFFFFF
@@ -258,25 +264,38 @@ extension ASFWDriverConnector {
 
         while DispatchTime.now().uptimeNanoseconds - start <= timeoutNanos {
             var pollInput: [UInt64] = [requestID]
-            var outSize = 1024
-            var out = Data(count: outSize)
+            var outCapacity = 1024
+            var outSize = outCapacity
+            var out = Data(count: outCapacity)
             let pollInputCount: UInt32 = 1
 
-            let pollKR = out.withUnsafeMutableBytes { outPtr in
-                pollInput.withUnsafeMutableBufferPointer { inputPtr in
-                    IOConnectCallMethod(
-                        connection,
-                        Method.getRawFCPCommandResult.rawValue,
-                        inputPtr.baseAddress, pollInputCount,
-                        nil, 0,
-                        nil, nil,
-                        outPtr.baseAddress?.assumingMemoryBound(to: UInt8.self), &outSize
-                    )
+            func pollOnce() -> kern_return_t {
+                out.withUnsafeMutableBytes { outPtr in
+                    pollInput.withUnsafeMutableBufferPointer { inputPtr in
+                        IOConnectCallMethod(
+                            connection,
+                            Method.getRawFCPCommandResult.rawValue,
+                            inputPtr.baseAddress, pollInputCount,
+                            nil, 0,
+                            nil, nil,
+                            outPtr.baseAddress?.assumingMemoryBound(to: UInt8.self), &outSize
+                        )
+                    }
                 }
             }
 
+            var pollKR = pollOnce()
+            if pollKR == kIOReturnNoSpace {
+                // Kernel reported required size in outSize; grow and retry.
+                outCapacity = outSize
+                out = Data(count: outCapacity)
+                pollKR = pollOnce()
+            }
+
             if pollKR == KERN_SUCCESS {
-                out.count = outSize
+                // Defensive clamp: never trust outSize past the buffer we provided.
+                let written = min(Int(outSize), outCapacity)
+                out.count = written
                 return out
             }
 

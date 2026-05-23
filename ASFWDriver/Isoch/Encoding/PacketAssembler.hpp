@@ -363,10 +363,8 @@ private:
         std::memcpy(packet.data + 4, &cip.q1, 4);
     }
     
-    static constexpr uint32_t encodeMidiPlaceholder(uint32_t midiSlotIndex) noexcept {
-        const uint8_t label = static_cast<uint8_t>(
-            kAM824LabelMIDIConformantBase + (midiSlotIndex & 0x03u));
-        return AM824Encoder::encodeLabelOnly(label);
+    static constexpr uint32_t encodeMidiPlaceholder(uint32_t /*midiSlotIndex*/) noexcept {
+        return AM824Encoder::encodeMidiNoData();
     }
 
     void encodeInterleavedFramesToAm824(const int32_t* pcmInterleaved,

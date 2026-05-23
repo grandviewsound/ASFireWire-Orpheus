@@ -12,6 +12,14 @@ struct ExternalSyncBridge {
     // Shared state between IR producer and IT consumer.
     std::atomic<bool> active{false};
     std::atomic<bool> clockEstablished{false};
+    // Set by the orchestration layer (AVCAudioBackend) from the device's
+    // selected clock source. Mirrors Apple AppleFWAudioDevice::SetClockSource,
+    // which marks externalSync only when the device is locked to a clock that is
+    // NOT its own internal stream (Wordclock/SPDIF/ADAT). When false (internal /
+    // Local / free-run) the transmit SYT must free-run, matching Apple's
+    // externalSync=0 path. NOT cleared by Reset(): it is configuration, not
+    // runtime state, and is set explicitly on every bring-up.
+    std::atomic<bool> externalClockSource{false};
     std::atomic<uint32_t> updateSeq{0};
     std::atomic<uint32_t> lastPackedRx{0};      // [SYT:16][FDF:8][DBS:8]
     std::atomic<uint64_t> lastUpdateHostTicks{0};

@@ -11,6 +11,7 @@
 #include "../Core/ExternalSyncBridge.hpp"
 #include "../Core/ExternalSyncDiscipline48k.hpp"
 #include "../Config/AudioTxProfiles.hpp"
+#include "../../MIDI/MidiTxQueue.hpp"
 #include "../../Shared/TxSharedQueue.hpp"
 #include "../../Logging/Logging.hpp"
 
@@ -35,6 +36,7 @@ public:
         std::atomic<uint64_t> underrunSilencedPackets{0};
         std::atomic<uint64_t> audioInjectCursorResets{0};
         std::atomic<uint64_t> audioInjectMissedPackets{0};
+        std::atomic<uint64_t> midiTxBytesQueued{0};
 
         // Fill level low-water alerts (with hysteresis)
         std::atomic<uint64_t> rbLowEvents{0};
@@ -48,6 +50,13 @@ public:
     [[nodiscard]] uint32_t SharedTxFillLevelFrames() const noexcept;
     [[nodiscard]] uint32_t SharedTxCapacityFrames() const noexcept;
     [[nodiscard]] bool SharedTxQueueValid() const noexcept { return sharedTxQueue_.IsValid(); }
+    void SetOutputChannelMap(const uint8_t* map, uint32_t count) noexcept;
+    [[nodiscard]] bool IsOutputChannelMapActive() const noexcept { return outputChannelMapActive_; }
+    [[nodiscard]] uint8_t OutputChannelSlotForChannel(uint32_t channel) const noexcept {
+        return (outputChannelMapActive_ && channel < outputChannelMapCount_)
+            ? outputChannelMap_[channel]
+            : static_cast<uint8_t>(channel);
+    }
 
     void SetExternalSyncBridge(Core::ExternalSyncBridge* bridge) noexcept;
 
@@ -67,9 +76,12 @@ public:
     [[nodiscard]] uint32_t WireDbs() const noexcept { return assembler_.wireDbs(); }
     [[nodiscard]] uint32_t MidiChannels() const noexcept { return assembler_.midiChannels(); }
     [[nodiscard]] uint64_t DbcDiscontinuityCount() const noexcept { return dbcTracker_.discontinuityCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint32_t PushMidiTxBytes(const uint8_t* bytes, uint32_t count) noexcept;
+    [[nodiscard]] uint32_t MidiTxDroppedBytes() const noexcept { return midiTxQueue_.DroppedBytes(); }
 
     void ResetForStart() noexcept;
     void SetCycleTrackingValid(bool v) noexcept { cycleTrackingValid_ = v; }
+    void SyncOutputInputStreams() noexcept;
 
     // Configure audio packetization from shared queue metadata.
     [[nodiscard]] kern_return_t Configure(uint8_t sid,
@@ -124,6 +136,10 @@ private:
     Encoding::PacketAssembler assembler_{};
     alignas(std::uint32_t) std::array<std::uint8_t, Encoding::kMaxAssembledPacketSize> silentPacketStorage_{};
     Shared::TxSharedQueueSPSC sharedTxQueue_{};
+    ASFW::MIDI::MidiTxQueue<4096> midiTxQueue_{};
+    std::array<uint8_t, Config::kMaxPcmChannels> outputChannelMap_{};
+    uint32_t outputChannelMapCount_{0};
+    bool outputChannelMapActive_{false};
 
     // ZERO-COPY: Direct pointer to CoreAudio output buffer
     void* zeroCopyAudioBase_{nullptr};
@@ -133,12 +149,15 @@ private:
 
     Encoding::StreamMode requestedStreamMode_{Encoding::StreamMode::kNonBlocking};
     Encoding::StreamMode effectiveStreamMode_{Encoding::StreamMode::kNonBlocking};
+    bool midiTxSelfTestQueued_{false};
+    bool midiTxProbeLogged_{false};
 
     // SYT generation + external sync discipline
     Encoding::SYTGenerator sytGenerator_{};
     bool cycleTrackingValid_{false};
     Core::ExternalSyncBridge* externalSyncBridge_{nullptr};
     Core::ExternalSyncDiscipline48k externalSyncDiscipline_{};
+    bool lastDisciplineEnabled_{false};  // for engage/disengage transition logging
 
     // Audio injection cursor (packet index)
     uint32_t audioWriteIndex_{0};

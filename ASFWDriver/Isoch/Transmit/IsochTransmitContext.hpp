@@ -89,6 +89,7 @@ public:
                             uint32_t requestedAm824Slots = 0) noexcept;
     kern_return_t Start() noexcept;
     void Stop() noexcept;
+    void SyncOutputInputStreams() noexcept;
     
     void Poll() noexcept;
     void HandleInterrupt() noexcept;
@@ -100,8 +101,10 @@ public:
 
     void SetSharedTxQueue(void* base, uint64_t bytes) noexcept;
     void SetExternalSyncBridge(Core::ExternalSyncBridge* bridge) noexcept;
+    void SetOutputChannelMap(const uint8_t* map, uint32_t count) noexcept;
     uint32_t SharedTxFillLevelFrames() const noexcept;
     uint32_t SharedTxCapacityFrames() const noexcept;
+    uint32_t PushMidiTxBytes(const uint8_t* bytes, uint32_t count) noexcept;
     
     // ZERO-COPY: Set direct output audio buffer (from ASFWAudioNub)
     // This is the same buffer that CoreAudio writes to via IOUserAudioStream

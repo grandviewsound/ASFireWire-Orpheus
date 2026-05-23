@@ -113,14 +113,71 @@ constexpr uint8_t kPrismOUI1             = 0x11;
 constexpr uint8_t kPrismOUI2             = 0x98;
 constexpr uint32_t kVendorDeviceCmdSize  = 15;
 
-// Device command bytes (no channel parameter)
-constexpr uint8_t kOrpheusCmdSource      = 0xB1;  // Global output source selector
-constexpr uint8_t kOrpheusCmdMeters      = 0xB0;  // Meter display mode
+// Vendor opcode table — confirmed by analysis of Prism Control Panel's
+// Orpheus::Device::{Get,Set,SetSyncAvc} (Apr 26 2026). Opcodes 0xA0-0xBF
+// at music subunit (0x08), VENDOR-DEPENDENT (0x00), Prism OUI 00:11:98.
+// CONTROL writes use ctype=0x00, STATUS reads use ctype=0x01.
+constexpr uint8_t kOrpheusCmdMasterVol     = 0xA0;  // MasterVol::SetValue (s16)
+constexpr uint8_t kOrpheusCmdMasterMute    = 0xA1;  // toggles +0x1b6
+constexpr uint8_t kOrpheusCmdMasterEnabled = 0xA2;  // MasterVol::SetEnabled
+constexpr uint8_t kOrpheusCmdMasterLock    = 0xA3;  // toggles +0x1b7
+constexpr uint8_t kOrpheusCmdMeters        = 0xB0;  // Meter display mode
+constexpr uint8_t kOrpheusCmdSource        = 0xB1;  // Global output source selector
+constexpr uint8_t kOrpheusCmdWordclock     = 0xB2;  // Wordclock config
+constexpr uint8_t kOrpheusCmdADAT          = 0xB3;  // ADAT mode (also STATUS-readable)
+constexpr uint8_t kOrpheusCmdUnknownB4     = 0xB4;  // toggles +0x1b0
+constexpr uint8_t kOrpheusCmdUnknownB6     = 0xB6;  // STATUS single-quadlet read (Get case 10)
+constexpr uint8_t kOrpheusCmdMetersBright  = 0xB7;  // Meters::SetBrightness
+constexpr uint8_t kOrpheusCmdAnalogBulk    = 0xCF;  // Bulk analog state read
+constexpr uint8_t kOrpheusCmdDigitalSync   = 0xD3;  // Digital sync source (CONTROL-only)
+constexpr uint8_t kOrpheusCmdDigitalBulk   = 0xDF;  // Bulk digital state read
+constexpr uint8_t kOrpheusCmdMixOutDefeat  = 0xE0;  // Mix output defeated
+constexpr uint8_t kOrpheusCmdMixOutSolo    = 0xE2;  // Mix output solo mask
+constexpr uint8_t kOrpheusCmdMixOutMute    = 0xE3;  // Mix output mute
+constexpr uint8_t kOrpheusCmdMixOutGain    = 0xE4;  // Mix output gain (s16)
+constexpr uint8_t kOrpheusCmdMixInMute     = 0xE5;  // Mix input mute
+constexpr uint8_t kOrpheusCmdMixInGain     = 0xE6;  // Mix input gain (s16)
+constexpr uint8_t kOrpheusCmdMixInPan      = 0xE7;  // Mix input pan (s8)
+constexpr uint8_t kOrpheusCmdMixInBalance  = 0xE8;  // Mix input balance (s8)
+constexpr uint8_t kOrpheusCmdMixBulk       = 0xEF;  // Bulk mix output read/write (74-byte frame)
+constexpr uint8_t kOrpheusCmdBulkState     = 0xBF;  // Unified bulk state STATUS read/write (Get/Set case 13)
+                                                    // Returns source/wordclock/ADAT/master vol/
+                                                    // mute/lock/meters/headphones in 8 bytes
 
 // Source routing values for kOrpheusCmdSource (0xB1)
 // Working old-laptop XML shows <src>1</src> — FireWire must be selected
 // for DACs to play isochronous audio data.
 constexpr uint8_t kOrpheusSourceFireWire = 0x01;
+
+// ============================================================================
+// AV/C Standard SignalSource (opcode 0x1A) — sync-source read/write at UNIT
+// ============================================================================
+// Mirrors Orpheus::Device::Sync() and SetSyncAvc(int) from the Prism Control
+// Panel. Sync source is read/written as a SignalSource STATUS/CONTROL at UNIT
+// addressing, with destination plug = External-plug-type 0x60, plug ID 0x07
+// (or 0x08 if ADAT input enabled). 8-byte frame:
+//   [01/00][FF][1A][0F][src_hi][src_lo][0x60][0x07-or-0x08]
+// STATUS request uses src=0xFFFF wildcard; response[5] decodes to sync enum.
+constexpr uint8_t kAVCOpcodeSignalSource    = 0x1A;
+constexpr uint8_t kSignalSourceReserved0F   = 0x0F;
+constexpr uint8_t kSignalSourceQueryHi      = 0xFF;  // wildcard for STATUS
+constexpr uint8_t kSignalSourceQueryLo      = 0xFF;
+constexpr uint8_t kSignalSourceDestPlugHi   = 0x60;  // external plug type
+constexpr uint8_t kSignalSourceSyncPlugNoAdat = 0x07;
+constexpr uint8_t kSignalSourceSyncPlugAdat   = 0x08;
+constexpr uint32_t kSignalSourceCommandSize = 8;
+
+// Sync-source enum (decoded from SetSyncAvc switch + Sync response decoder)
+// Confirmed by analysis: Orpheus::Device::SetSyncAvc(int) builds case-by-case
+// SOURCE bytes; Orpheus::Device::Sync() decodes response[5] back to these.
+enum OrpheusSyncSource : std::uint8_t {
+    kOrpheusSyncLocal     = 0,  // Internal master (loopback)
+    kOrpheusSyncFreeRun   = 1,  // No source / free-run
+    kOrpheusSyncWordclock = 2,  // External Wordclock — mutes if cable absent
+    kOrpheusSyncSPDIF     = 3,  // External S/PDIF — mutes if cable absent
+    kOrpheusSyncADAT      = 4,  // External ADAT  — mutes if cable absent (ADAT input must be enabled)
+    kOrpheusSyncSlave     = 5,  // Slave to FW host (PC-DAW mode)
+};
 
 // ============================================================================
 // Orpheus AM824 Compound Cluster Layout (for Extended Stream Format CONTROL)
@@ -129,5 +186,10 @@ constexpr uint8_t kOrpheusSourceFireWire = 0x01;
 // iPCR (dest plug 0, host→device, playback):    6×(2ch MBLA) + 1×(1ch MIDI)
 constexpr uint8_t kOrpheusOutputMBLAPairs = 5;  // 5 stereo pairs = 10 audio ch
 constexpr uint8_t kOrpheusInputMBLAPairs  = 6;  // 6 stereo pairs = 12 audio ch
+constexpr uint8_t kOrpheusAnalogChannelCount = 8;
+constexpr uint8_t kOrpheusMixOutputCount  = 6;  // Line 1/2..7/8, S/PDIF, headphone pairs
+constexpr uint8_t kOrpheusMixInputCount   = 12; // 12 DAW/mixer inputs per output
+constexpr uint32_t kOrpheusMixBulkFrameSize = 74;
+constexpr uint32_t kOrpheusMixBulkOperandLength = kOrpheusMixBulkFrameSize - 3;
 
 } // namespace ASFW::Audio::BeBoB

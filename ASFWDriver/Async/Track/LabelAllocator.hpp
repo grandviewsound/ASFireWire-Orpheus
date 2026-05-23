@@ -19,6 +19,7 @@ public:
     uint8_t Allocate();
     void Free(uint8_t label);
     void ClearBitmap();  // Clear all allocation bits but keep generation as-is
+    bool HasAnyLabelInUse() const;
 
     /**
      * \brief Get next label using simple counter rotation (0-63).

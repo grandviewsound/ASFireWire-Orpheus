@@ -2,8 +2,10 @@
 
 #include "../../../IRM/IRMTypes.hpp"
 #include "../../../Async/Interfaces/IFireWireBusOps.hpp"
+#include "LocalPcrRegisterFile.hpp"
 #include <functional>
 #include <cstdint>
+#include <optional>
 
 namespace ASFW::CMP {
 
@@ -93,6 +95,27 @@ using CMPCallback = std::function<void(CMPStatus status)>;
 
 /// PCR read callback
 using PCRReadCallback = std::function<void(bool success, uint32_t value)>;
+
+// ============================================================================
+// Local Plug State (Apr 26 — replicates AppleFWAudio's UpdateLocalInputPlug /
+// UpdateLocalOutputPlug; AM824AVC tracks the host's own plug state as a CMP
+// listener/talker counterpart to the remote device's PCR.)
+// ============================================================================
+
+/// Local-side PCR state, mirroring what Apple maintains via
+/// AM824AVC::UpdateLocalInputPlug / UpdateLocalOutputPlug.
+///
+/// Per IEC 61883 CMP, when the host establishes a P2P connection both
+/// endpoints must update their respective plug registers:
+///  - Host as TALKER (we transmit, device receives): host's LOCAL oPCR
+///  - Host as LISTENER (device transmits, we receive): host's LOCAL iPCR
+struct LocalPlugState {
+    bool inUse{false};       ///< Has at least one active P2P connection
+    uint8_t p2pCount{0};     ///< Active p2p connections on this plug (Apple retries up to 4-5x)
+    uint8_t channel{0x3F};   ///< Channel selected (0x3F = none)
+    uint8_t speed{2};        ///< Speed code (2 = S400)
+    uint16_t payloadQuadlets{0}; ///< oPCR payload capacity when host is TALKER
+};
 
 // ============================================================================
 // CMPClient - Connection Management Procedures Client
@@ -212,16 +235,76 @@ public:
     /**
      * CMP BREAK on iPCR - disconnect from device's input plug.
      * Decrements p2p connection count via lock-compare-swap.
-     * 
+     *
      * @param plugNum Input plug number (usually 0)
      * @param callback Completion callback
      */
     void DisconnectIPCR(uint8_t plugNum, CMPCallback callback);
-    
+
+    // =========================================================================
+    // Local Plug State — replicates Apple's UpdateLocalInputPlug /
+    // UpdateLocalOutputPlug software bookkeeping.
+    // =========================================================================
+
+    /// Host's local output plug — populated when we ESTABLISH on device's iPCR
+    /// (host transmits, peer would query our oPCR to verify the talker exists).
+    [[nodiscard]] LocalPlugState GetLocalOutputPlug(uint8_t plugNum) const;
+
+    /// Payload advertised through the host's local oPCR for the active TX stream.
+    void SetLocalOutputPayloadQuadlets(uint8_t plugNum, uint16_t payloadQuadlets) noexcept;
+
+    /// Host's local input plug — populated when we ESTABLISH on device's oPCR
+    /// (host receives, peer would query our iPCR to verify the listener exists).
+    [[nodiscard]] LocalPlugState GetLocalInputPlug(uint8_t plugNum) const;
+
+    // =========================================================================
+    // Host-as-CMP-target: local PCR register file (gaps 3.3/3.4).
+    //
+    // The raw lockable backing store a PEER reads/locks when it connects TO this
+    // node. Kept as the single source of truth for incoming PCR transactions:
+    // our own connect bookkeeping (UpdateLocal*Plug) seeds it, the read responder
+    // serves from it, and an incoming compare_swap mutates it. Mirrors Apple's
+    // IOFireWirePCRSpace quadlet array. addressLo is the CSR offset (0xF00009xx).
+    // =========================================================================
+
+    /// Read a host PCR quadlet for an incoming peer read. nullopt if the address
+    /// is outside our PCR range / not a valid plug.
+    [[nodiscard]] std::optional<uint32_t> ReadLocalPcr(uint32_t addressLo) const noexcept;
+
+    /// 1394 compare_swap from an incoming peer lock. Returns the PRIOR value
+    /// (always, when the address maps); stores `desired` iff prior==`expected`.
+    /// nullopt if the address is outside our PCR range / not a valid plug.
+    [[nodiscard]] std::optional<uint32_t> CompareSwapLocalPcr(uint32_t addressLo,
+                                                             uint32_t expected,
+                                                             uint32_t desired,
+                                                             bool* swapped = nullptr) noexcept;
+
 private:
     Async::IFireWireBusOps& busOps_;
     uint8_t deviceNodeId_{0xFF};
     IRM::Generation generation_{0};
+
+    static constexpr uint8_t kMaxLocalPlugs = 31;  // PCR plug numbers 0..30
+    LocalPlugState localOutputPlugs_[kMaxLocalPlugs];
+    LocalPlugState localInputPlugs_[kMaxLocalPlugs];
+
+    // Raw lockable backing store for incoming peer reads/locks (gaps 3.3/3.4),
+    // seeded from LocalPlugState by UpdateLocal*Plug.
+    LocalPcrRegisterFile localPcr_;
+
+    // Serialize a plug's structured state into its raw PCR quadlet (matches the
+    // BuildLocal*PCRValue layout used by the read responder) and store it in the
+    // register file so incoming reads/locks see a consistent value.
+    void SyncLocalPcrRegister(bool outputPlug, uint8_t plugNum) noexcept;
+
+    // Map a CSR addressLo (0xF00009xx) to the register file's (Reg, index).
+    // Returns false if the address is outside our local PCR range.
+    [[nodiscard]] static bool MapAddressToReg(uint32_t addressLo,
+                                              LocalPcrRegisterFile::Reg& reg,
+                                              uint8_t& index) noexcept;
+
+    void UpdateLocalOutputPlug(uint8_t plugNum, uint8_t channel, uint8_t speed, bool establish);
+    void UpdateLocalInputPlug(uint8_t plugNum, uint8_t channel, uint8_t speed, bool establish);
     
     // Internal helpers
     void ReadPCRQuadlet(uint32_t addressLo, PCRReadCallback callback);
@@ -229,15 +312,30 @@ private:
                         CMPCallback callback);
     
     // Connect/disconnect implementation (shared logic).
-    // PerformConnect splits into two compare-swap stages to match Apple's
-    // AM824AVC cmpNewPointToPointConnection×2 trace: stage A programs
-    // channel/speed, stage B bumps the p2p counter.
+    //
+    // Fix 98: PerformConnect is a SINGLE combined compare-swap that matches
+    // Apple's AM824AVC::cmpNewPointToPointConnection byte-for-byte: it
+    // increments the p2p counter AND (only on the first connection, p2p 0→1)
+    // writes the channel/speed, all in ONE swap. The previous two-stage form
+    // (channel with p2p unchanged, then p2p bump) issued a standalone channel
+    // write the Orpheus rejected with hardware_error(5) — Apple never writes a
+    // channel without the simultaneous p2p edge.
+    // (reports/apple_irm_channel_allocation_ida_pass_2026-05-19.md)
+    //
+    // The CAS is retried up to kConnectMaxAttempts with a 1 ms sleep, mirroring
+    // AppleFWAudio's UpdateLocal*Plug 4-5× retry loop and handling two observed
+    // Orpheus failure modes: (a) lockResponse never arrives; (b) lockResponse
+    // is lost/malformed but the register already shows the target — early-accept
+    // on re-read. `attempt` counts retries; `targetP2P` is the final p2p value
+    // we want (-1 on first call = derive from the initial read).
+    static constexpr uint8_t kConnectMaxAttempts = 5;
+    static constexpr uint32_t kConnectRetrySleepMs = 1;
     void PerformConnect(uint32_t pcrAddress, uint8_t plugNum,
                         std::optional<uint8_t> setChannel,
                         std::optional<uint8_t> setSpeed,
-                        CMPCallback callback);
-    void PerformConnectStageB(uint32_t pcrAddress, uint8_t plugNum,
-                              CMPCallback callback);
+                        CMPCallback callback,
+                        uint8_t attempt = 0,
+                        int targetP2P = -1);
     void PerformDisconnect(uint32_t pcrAddress, uint8_t plugNum, CMPCallback callback);
 };
 

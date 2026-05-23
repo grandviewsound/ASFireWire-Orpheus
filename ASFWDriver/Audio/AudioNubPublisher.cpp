@@ -87,13 +87,15 @@ bool AudioNubPublisher::EnsureNub(uint64_t guid,
         } else {
             nubService->SetProperties(properties.get());
             ASFW_LOG(Audio,
-                     "AudioNubPublisher[%{public}s]: ASFWAudioDevice properties set (GUID=%llx rate=%u Hz agg=%u in=%u out=%u)",
+                     "AudioNubPublisher[%{public}s]: ASFWAudioDevice properties set (GUID=%llx rate=%u Hz agg=%u in=%u out=%u midiIn=%u midiOut=%u)",
                      sourceTag ? sourceTag : "unknown",
                      guid,
                      config.currentSampleRate,
                      config.channelCount,
                      config.inputChannelCount,
-                     config.outputChannelCount);
+                     config.outputChannelCount,
+                     config.midiInputPorts,
+                     config.midiOutputPorts);
         }
     }
 

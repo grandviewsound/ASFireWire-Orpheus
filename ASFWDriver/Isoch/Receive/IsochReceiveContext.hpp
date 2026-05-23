@@ -61,7 +61,10 @@ public:
     static std::unique_ptr<IsochReceiveContext> Create(::ASFW::Driver::HardwareInterface* hw,
                                                        std::shared_ptr<::ASFW::Isoch::Memory::IIsochDMAMemory> dmaMemory);
 
-    static constexpr size_t kNumDescriptors = 512;
+    // Apple's MultiIsochReceiver allocates 24 elements (1 desc + 4 KB buffer
+    // each = 96 KB ring) and runs in bufferFill mode. We mirror that exactly.
+    // See apple-vs-ours-gap-inventory.md gap 2.3 + apple-ir-bufferfill-confirmed.md.
+    static constexpr size_t kNumDescriptors = 24;
     static constexpr size_t kMaxPacketSize = 4096;
 
     kern_return_t Configure(uint8_t channel, uint8_t contextIndex);

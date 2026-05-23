@@ -201,6 +201,11 @@ public:
     /// Configure optional response sender for automatic WrResp emission.
     void SetResponseSender(ResponseSender* sender) noexcept { responseSender_ = sender; }
 
+    /// Send a quadlet read response from an AR request handler.
+    void SendReadQuadletResponse(const ARPacketView& request,
+                                 ResponseCode rcode,
+                                 uint32_t quadletData) noexcept;
+
     PacketRouter(const PacketRouter&) = delete;
     PacketRouter& operator=(const PacketRouter&) = delete;
 

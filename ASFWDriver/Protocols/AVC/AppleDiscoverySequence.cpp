@@ -28,6 +28,157 @@ bool AppleDiscoverySequence::IsAccepted(uint8_t ctype) {
     return ctype == 0x09 || ctype == 0x0C;
 }
 
+// ── SignalSource diagnostic ──────────────────────────────────────────────────
+//
+// Sends a SIGNAL SOURCE STATUS query and logs the full response payload at V1
+// so the next hardware capture surfaces what sync source the device currently
+// reports per plug. The `[FCP] FCP TX` line in os_log redacts operand bytes
+// past the first quadlet; this helper re-emits the response through the
+// Discovery channel which is not redacted.
+//
+// analysis evidence: AM824AVC::GetSignalSourceInfo decodes the stable response as:
+//   byte [3] status bits: low nibble=signal status, bit4=feedback, bits7:5=stream status
+//   byte [4] source subunit
+//   byte [5] source plug
+//   bytes[6..7] destination echo
+//
+// On Orpheus the "signal source" field tells us which plug / subunit is
+// currently driving this destination, so for sync-source queries it reveals
+// whether the device is on Local, Wordclock, S/PDIF, ADAT, etc.
+
+AppleDiscoverySequence::RawResult
+AppleDiscoverySequence::QueryAndLogSignalSource(const char* tag,
+                                                uint8_t targetSubunit,
+                                                uint8_t targetPlug) {
+    auto raw = SendRaw({0x01, 0xFF, 0x1A, 0xFF, 0xFF, 0xFE,
+                         targetSubunit, targetPlug});
+
+    if (!raw.ok) {
+        ASFW_LOG_V1(Discovery,
+                    "AppleDiscovery: %{public}s SSI dst=%02x:%02x — no response",
+                    tag, targetSubunit, targetPlug);
+        return raw;
+    }
+
+    const auto& bytes = raw.response.data;
+    const size_t len  = raw.response.length;
+
+    // Compact 12-byte hex dump (typical SSI response is 8-16 bytes).
+    char hex[64] = {0};
+    size_t hexLen = std::min<size_t>(len, 12);
+    for (size_t i = 0; i < hexLen; i++) {
+        snprintf(hex + (i * 3), sizeof(hex) - (i * 3),
+                 (i + 1 == hexLen) ? "%02x" : "%02x ", bytes[i]);
+    }
+
+    uint8_t statusByte = (len >= 4) ? bytes[3] : 0xFF;
+    uint8_t srcSubunit = (len >= 5) ? bytes[4] : 0xFF;
+    uint8_t srcPlug    = (len >= 6) ? bytes[5] : 0xFF;
+    uint8_t echoSubunit = (len >= 7) ? bytes[6] : 0xFF;
+    uint8_t echoPlug = (len >= 8) ? bytes[7] : 0xFF;
+    uint8_t signalStatus = statusByte & 0x0F;
+    uint8_t streamStatus = statusByte >> 5;
+    bool hasFeedback = (statusByte & 0x10) != 0;
+
+    SignalSourceResult parsed{};
+    parsed.valid = raw.responseType == 0x0C && len >= 6;
+    parsed.targetSubunit = targetSubunit;
+    parsed.targetPlug = targetPlug;
+    parsed.sourceSubunit = srcSubunit;
+    parsed.sourcePlug = srcPlug;
+    parsed.signalStatus = signalStatus;
+    parsed.streamStatus = streamStatus;
+    parsed.hasFeedback = hasFeedback;
+    parsed.rawResponse.assign(bytes.begin(), bytes.begin() + len);
+    result_.signalSources.push_back(std::move(parsed));
+
+    ASFW_LOG_V1(Discovery,
+                "AppleDiscovery: %{public}s SSI dst=%02x:%02x → ctype=%02x "
+                "status=0x%02x sig=%u stream=%u fb=%u src=%02x:%02x echo=%02x:%02x [%{public}s]",
+                tag, targetSubunit, targetPlug,
+                raw.responseType,
+                statusByte,
+                signalStatus,
+                streamStatus,
+                hasFeedback ? 1 : 0,
+                srcSubunit,
+                srcPlug,
+                echoSubunit,
+                echoPlug,
+                hex);
+
+    return raw;
+}
+
+AppleDiscoverySequence::RawResult
+AppleDiscoverySequence::QueryAndLogMixerRead(uint8_t subunitAddr,
+                                             uint8_t functionBlockId,
+                                             uint8_t infoType,
+                                             uint8_t channel,
+                                             uint8_t controlSelector,
+                                             uint8_t selectorAttribute,
+                                             uint8_t valueLength) {
+    uint8_t cmd[] = {
+        0x01, subunitAddr, 0xB8, 0x81,
+        functionBlockId, infoType,
+        0x02, channel,
+        controlSelector, selectorAttribute,
+        0xFF, 0xFF
+    };
+    auto raw = SendRaw(cmd, valueLength == 2 ? 12 : 11);
+
+    MixerReadResult parsed{};
+    parsed.functionBlockId = functionBlockId;
+    parsed.infoType = infoType;
+    parsed.channel = channel;
+    parsed.controlSelector = controlSelector;
+    parsed.selectorAttribute = selectorAttribute;
+    parsed.isMute = (controlSelector == 0x01);
+    parsed.isVolume = (controlSelector == 0x02);
+
+    if (raw.ok) {
+        const auto& bytes = raw.response.data;
+        const size_t len = raw.response.length;
+        parsed.rawResponse.assign(bytes.begin(), bytes.begin() + len);
+        parsed.valid = raw.responseType == 0x0C;
+
+        if (parsed.valid && parsed.isMute && len >= 11) {
+            parsed.mute = bytes[10] == 0x70;
+        }
+
+        if (parsed.valid && parsed.isVolume && len >= 12) {
+            uint16_t rawVolume = (static_cast<uint16_t>(bytes[10]) << 8) | bytes[11];
+            parsed.volume = static_cast<int16_t>(rawVolume);
+        }
+    }
+
+    const char* selectorName = parsed.isMute ? "mute" : (parsed.isVolume ? "volume" : "control");
+    if (!raw.ok) {
+        ASFW_LOG_V1(Discovery,
+                    "AppleDiscovery: Phase12 %{public}s fb=%02x info=%02x ch=%02x attr=%02x — no response",
+                    selectorName, functionBlockId, infoType, channel, selectorAttribute);
+    } else if (parsed.isMute) {
+        ASFW_LOG_V1(Discovery,
+                    "AppleDiscovery: Phase12 mute fb=%02x info=%02x ch=%02x ctype=%02x valid=%u value=0x%02x mute=%u",
+                    functionBlockId, infoType, channel, raw.responseType, parsed.valid ? 1 : 0,
+                    raw.response.length >= 11 ? raw.response.data[10] : 0xFF,
+                    parsed.mute ? 1 : 0);
+    } else if (parsed.isVolume) {
+        ASFW_LOG_V1(Discovery,
+                    "AppleDiscovery: Phase12 volume fb=%02x info=%02x ch=%02x attr=%02x ctype=%02x valid=%u volume=%d",
+                    functionBlockId, infoType, channel, selectorAttribute, raw.responseType, parsed.valid ? 1 : 0,
+                    static_cast<int>(parsed.volume));
+    } else {
+        ASFW_LOG_V1(Discovery,
+                    "AppleDiscovery: Phase12 control fb=%02x info=%02x ch=%02x sel=%02x attr=%02x ctype=%02x valid=%u",
+                    functionBlockId, infoType, channel, controlSelector, selectorAttribute,
+                    raw.responseType, parsed.valid ? 1 : 0);
+    }
+
+    result_.mixerReads.push_back(std::move(parsed));
+    return raw;
+}
+
 // ── SendRaw — synchronous FCP bridge ─────────────────────────────────────────
 //
 // Submits a raw FCP frame via the async FCPTransport and polls with IOSleep
@@ -407,7 +558,9 @@ void AppleDiscoverySequence::Phase2_UnitTopology() {
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Phase 3 — Audio subunit enumeration
-// GetPlugInfo + OpenDescriptor(0x80) + OpenDescriptor(0x00) + ReadDescriptor(0x00)
+// AppleFWAudioDevice::InitializeDeviceInfo probes descriptor 0x80 for each
+// subunit table entry, but for AV/C Audio subunit type 0x01 it consumes
+// descriptor 0x00 and wraps those bytes in synthetic root 0x0C0C0000.
 // ═════════════════════════════════════════════════════════════════════════════
 
 void AppleDiscoverySequence::Phase3_AudioSubunit() {
@@ -426,16 +579,25 @@ void AppleDiscoverySequence::Phase3_AudioSubunit() {
                     result_.audioDestPlugs, result_.audioSrcPlugs);
     }
 
-    // OpenDescriptor: status (0x80)
+    // OpenDescriptor: status/probe (0x80). analysis shows GetSubunitDescriptor(..., 0x80)
+    // is attempted before the type-specific descriptor parse.
     // 00 08 08 80 01 ff
-    SendRaw({0x00, sub, 0x08, 0x80, 0x01, 0xFF});
+    auto open80 = SendRaw({0x00, sub, 0x08, 0x80, 0x01, 0xFF});
+    std::vector<uint8_t> audioStatusProbe;
+    if (open80.ok && IsAccepted(open80.responseType)) {
+        ReadDescriptorChunked(sub, 0x80, audioStatusProbe);
+    }
 
-    // OpenDescriptor: identifier (0x00)
+    // OpenDescriptor: identifier (0x00), which Apple stores for Audio type 0x01.
     // 00 08 08 00 01 ff
-    SendRaw({0x00, sub, 0x08, 0x00, 0x01, 0xFF});
+    auto open00 = SendRaw({0x00, sub, 0x08, 0x00, 0x01, 0xFF});
 
-    // ReadDescriptor from identifier (0x00) — Apple reads 2 chunks
-    ReadDescriptorChunked(sub, 0x00, result_.audioDescriptorData);
+    // ReadDescriptor from identifier (0x00). analysis evidence:
+    // AppleFWAudioDevice::InitializeDeviceInfo -> AM824AVC::GetSubunitDescriptor(sub, 0, ...)
+    // for subunit type 1, followed by AVCInfoBlock::init(..., 0x0C0C0000, len).
+    if (open00.ok && IsAccepted(open00.responseType)) {
+        ReadDescriptorChunked(sub, 0x00, result_.audioDescriptorData);
+    }
 
     ASFW_LOG_V2(Discovery,
                 "AppleDiscovery: Phase 3 done — descriptor %zu bytes",
@@ -489,15 +651,12 @@ void AppleDiscoverySequence::Phase5_SignalSourceExternalAndAudio() {
 
     // Iso input plugs (0x00..)
     for (uint8_t p = 0; p < result_.isoInputPlugs; p++) {
-        // 01 ff 1a ff ff fe ff <plug>
-        SendRaw({0x01, 0xFF, 0x1A, 0xFF, 0xFF, 0xFE, 0xFF, p});
+        QueryAndLogSignalSource("P5/iso", 0xFF, p);
     }
 
     // External input plugs (0x80..)
     for (uint8_t p = 0; p < result_.extInputPlugs; p++) {
-        uint8_t plugNum = 0x80 + p;
-        // 01 ff 1a ff ff fe ff <plug>
-        SendRaw({0x01, 0xFF, 0x1A, 0xFF, 0xFF, 0xFE, 0xFF, plugNum});
+        QueryAndLogSignalSource("P5/ext", 0xFF, uint8_t(0x80 + p));
     }
 
     // Audio subunit plugs: 08:00..08:0a (11 plugs for Orpheus)
@@ -505,9 +664,7 @@ void AppleDiscoverySequence::Phase5_SignalSourceExternalAndAudio() {
     if (result_.hasAudioSubunit) {
         uint8_t totalAudioPlugs = result_.audioDestPlugs + result_.audioSrcPlugs;
         for (uint8_t p = 0; p < totalAudioPlugs; p++) {
-            // 01 ff 1a ff ff fe 08 <plug>
-            SendRaw({0x01, 0xFF, 0x1A, 0xFF, 0xFF, 0xFE,
-                      result_.audioSubunitAddr, p});
+            QueryAndLogSignalSource("P5/audio", result_.audioSubunitAddr, p);
         }
     }
 
@@ -577,9 +734,7 @@ void AppleDiscoverySequence::Phase7_SignalSourceMusic() {
     // Derived from musicDestPlugs (input plugs at music subunit)
     uint8_t totalMusicPlugs = result_.musicDestPlugs;
     for (uint8_t p = 0; p < totalMusicPlugs; p++) {
-        // 01 ff 1a ff ff fe 60 <plug>
-        SendRaw({0x01, 0xFF, 0x1A, 0xFF, 0xFF, 0xFE,
-                  result_.musicSubunitAddr, p});
+        QueryAndLogSignalSource("P7/music", result_.musicSubunitAddr, p);
     }
 
     ASFW_LOG_V2(Discovery, "AppleDiscovery: Phase 7 done (%u plugs)", totalMusicPlugs);
@@ -759,9 +914,7 @@ void AppleDiscoverySequence::Phase10_SyncPlugReconnect() {
                 accepted++;
             }
         } else {
-            // SSI: 01 ff 1a ff ff fe ff <plug>
-            SendRaw({0x01, 0xFF, 0x1A, 0xFF, 0xFF, 0xFE,
-                      0xFF, step.targetPlug});
+            QueryAndLogSignalSource("P10/qspr", 0xFF, step.targetPlug);
         }
     }
 
@@ -827,61 +980,51 @@ void AppleDiscoverySequence::Phase12_MixerReads() {
     const uint8_t sub = result_.audioSubunitAddr;  // 0x08
     uint32_t cmdCount = 0;
 
-    // From Apple's capture (phase 12 + 13 combined):
+    // analysis: AM824AVC::GetChannelVolumeInfo/GetChannelMute build:
     //
-    // GetChannelVolumeInfo: 01 08 b8 81 <fn> <fb> 02 00 02 02 ff ff
-    //   fn = function type (01=selector/feature, 02=processing)
-    //   fb = function block ID (10=master, 01..03=individual)
+    // GetChannelVolumeInfo: 01 08 b8 81 <blockID> <infoType> 02 <channel> 02 02 ff ff
+    // GetChannelMute:       01 08 b8 81 <blockID> 10         02 <channel> 01 01 ff
     //
-    // GetChannelMute:       01 08 b8 81 <fn> <fb> 02 00 01 01 ff
+    // infoType 0x10 is current. The extra infoType probes are:
+    // 0x01 = resolution, 0x02 = minimum, 0x03 = maximum.
     //
-    // Apple sends these fn/fb combinations:
-    //   fn=01: fb=10, fb=01, fb=02, fb=03  (feature function blocks)
-    //   fn=02: fb=10, fb=01, fb=02, fb=03  (processing function blocks)
-    //   Mute queries for fn=01 fb=10 and fn=02 fb=10
-
-    // Function type 1 — Feature function blocks
+    // Apple stores output and input function block IDs on AppleFWAudioDevice and
+    // passes that byte as blockID when creating/servicing HAL controls. We probe
+    // candidate block IDs 1 and 2 with channel 0, matching the captured sequence.
     {
-        // Volume: fn=01, fb=10 (master)
-        SendRaw({0x01, sub, 0xB8, 0x81,
-                  0x01, 0x10, 0x02, 0x00, 0x02, 0x02, 0xFF, 0xFF});
+        const uint8_t blockId = 0x01;
+
+        // Current volume and mute for channel 0.
+        QueryAndLogMixerRead(sub, blockId, 0x10, 0x00, 0x02, 0x02, 2);
         cmdCount++;
 
-        // Mute: fn=01, fb=10
-        SendRaw({0x01, sub, 0xB8, 0x81,
-                  0x01, 0x10, 0x02, 0x00, 0x01, 0x01, 0xFF});
+        QueryAndLogMixerRead(sub, blockId, 0x10, 0x00, 0x01, 0x01, 1);
         cmdCount++;
 
-        // Volume: fn=01, fb=01..03
-        for (uint8_t fb = 0x01; fb <= 0x03; fb++) {
-            SendRaw({0x01, sub, 0xB8, 0x81,
-                      0x01, fb, 0x02, 0x00, 0x02, 0x02, 0xFF, 0xFF});
+        // Volume resolution/min/max.
+        for (uint8_t infoType = 0x01; infoType <= 0x03; infoType++) {
+            QueryAndLogMixerRead(sub, blockId, infoType, 0x00, 0x02, 0x02, 2);
             cmdCount++;
         }
     }
 
-    // Function type 2 — Processing function blocks
     {
-        // Volume: fn=02, fb=10 (master)
-        SendRaw({0x01, sub, 0xB8, 0x81,
-                  0x02, 0x10, 0x02, 0x00, 0x02, 0x02, 0xFF, 0xFF});
+        const uint8_t blockId = 0x02;
+
+        QueryAndLogMixerRead(sub, blockId, 0x10, 0x00, 0x02, 0x02, 2);
         cmdCount++;
 
-        // Mute: fn=02, fb=10
-        SendRaw({0x01, sub, 0xB8, 0x81,
-                  0x02, 0x10, 0x02, 0x00, 0x01, 0x01, 0xFF});
+        QueryAndLogMixerRead(sub, blockId, 0x10, 0x00, 0x01, 0x01, 1);
         cmdCount++;
 
-        // Volume: fn=02, fb=01..03
-        for (uint8_t fb = 0x01; fb <= 0x03; fb++) {
-            SendRaw({0x01, sub, 0xB8, 0x81,
-                      0x02, fb, 0x02, 0x00, 0x02, 0x02, 0xFF, 0xFF});
+        for (uint8_t infoType = 0x01; infoType <= 0x03; infoType++) {
+            QueryAndLogMixerRead(sub, blockId, infoType, 0x00, 0x02, 0x02, 2);
             cmdCount++;
         }
     }
 
     // Final SignalSource query: 01 ff 1a ff ff fe 60 07
-    SendRaw({0x01, 0xFF, 0x1A, 0xFF, 0xFF, 0xFE, 0x60, 0x07});
+    QueryAndLogSignalSource("P12/final", 0x60, 0x07);
     cmdCount++;
 
     result_.mixerCommandsSent = cmdCount;

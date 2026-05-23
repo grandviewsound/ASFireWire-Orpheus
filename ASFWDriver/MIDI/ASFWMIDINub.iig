@@ -1,0 +1,77 @@
+//
+// ASFWMIDINub.iig
+// ASFWDriver
+//
+// Lightweight MIDI nub published beside ASFWAudioNub for devices with
+// AM824 MIDI ports.
+//
+
+#ifndef ASFWMIDINub_h
+#define ASFWMIDINub_h
+
+#include <DriverKit/IOService.iig>
+#include <cstdint>
+
+class ASFWDriver;
+struct IOLock;
+
+class ASFWMIDINub: public IOService
+{
+public:
+    virtual bool init() override;
+    virtual void free() override;
+    virtual kern_return_t Start(IOService* provider) override;
+    virtual kern_return_t Stop(IOService* provider) override;
+
+    void SetParentDriver(IOService* parentDriver) LOCALONLY;
+    ASFWDriver* GetParentDriver() const LOCALONLY;
+
+    void SetIsochService(void* isochService) LOCALONLY;
+    void* GetIsochService() const LOCALONLY;
+
+    void SetGuid(uint64_t guid) LOCALONLY;
+    uint64_t GetGuid() const LOCALONLY;
+
+    void SetVendorID(uint32_t vendorId) LOCALONLY;
+    uint32_t GetVendorID() const LOCALONLY;
+
+    void SetModelID(uint32_t modelId) LOCALONLY;
+    uint32_t GetModelID() const LOCALONLY;
+
+    void SetPortCounts(uint32_t inputPorts, uint32_t outputPorts) LOCALONLY;
+    uint32_t GetInputPortCount() const LOCALONLY;
+    uint32_t GetOutputPortCount() const LOCALONLY;
+    void QueueReceivedMIDIBytes(uint32_t packedBytes, uint32_t byteCount) LOCALONLY;
+
+    // RPC method: MIDIDriver calls this across the DriverKit service boundary
+    // to enqueue decoded MIDI 1.0 bytes into the parent isoch TX stream.
+    virtual kern_return_t PushTransmitMIDIBytes(uint32_t packedBytes,
+                                                uint32_t byteCount,
+                                                uint32_t* outQueued);
+
+    // RPC method: MIDIDriver polls decoded AM824 MIDI bytes captured by the
+    // parent isoch RX stream. This mirrors the TX bridge above without sharing
+    // parent-process pointers across the DriverKit service boundary.
+    virtual kern_return_t PopReceivedMIDIBytes(uint32_t* outPackedBytes,
+                                               uint32_t* outByteCount,
+                                               uint32_t* outDroppedCount);
+};
+
+struct ASFWMIDINub_IVars {
+    IOService* parentDriver{nullptr};
+    void* isochService{nullptr};
+    uint64_t guid{0};
+    uint32_t vendorId{0};
+    uint32_t modelId{0};
+    uint32_t inputPorts{0};
+    uint32_t outputPorts{0};
+    IOLock* rxLock{nullptr};
+    uint32_t rxPacked[128]{};
+    uint8_t rxByteCount[128]{};
+    uint32_t rxHead{0};
+    uint32_t rxTail{0};
+    uint32_t rxDropped{0};
+    bool rxSinkAttached{false};
+};
+
+#endif /* ASFWMIDINub_h */

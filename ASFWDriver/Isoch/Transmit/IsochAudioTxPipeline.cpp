@@ -4,14 +4,45 @@
 
 #include "../Encoding/TimingUtils.hpp"
 
+#include <algorithm>
+#include <cstdio>
+
 namespace ASFW::Isoch {
 
 namespace {
 
-inline uint32_t EncodeMidiPlaceholderSlot(uint32_t midiSlotIndex) noexcept {
-    const uint8_t label = static_cast<uint8_t>(
-        Encoding::kAM824LabelMIDIConformantBase + (midiSlotIndex & 0x03u));
-    return Encoding::AM824Encoder::encodeLabelOnly(label);
+inline uint32_t EncodeMidiPlaceholderSlot(uint32_t /*midiSlotIndex*/) noexcept {
+    return Encoding::AM824Encoder::encodeMidiNoData();
+}
+
+void LogFirstAm824FrameSlots(const uint32_t* frameSlots, uint32_t am824Slots) noexcept {
+    if (!frameSlots || am824Slots == 0) {
+        return;
+    }
+
+    char buffer[768];
+    int written = std::snprintf(buffer,
+                                sizeof(buffer),
+                                "DMA-DUMP frame slots=%u",
+                                am824Slots);
+    if (written < 0) {
+        return;
+    }
+
+    size_t offset = static_cast<size_t>(written);
+    for (uint32_t slot = 0; slot < am824Slots && offset < sizeof(buffer); ++slot) {
+        written = std::snprintf(buffer + offset,
+                                sizeof(buffer) - offset,
+                                " s%u=0x%08x",
+                                slot,
+                                frameSlots[slot]);
+        if (written < 0) {
+            return;
+        }
+        offset += static_cast<size_t>(written);
+    }
+
+    ASFW_LOG(Isoch, "%{public}s", buffer);
 }
 
 // Positional arguments mirror PCM input then AM824 output layout.
@@ -20,19 +51,57 @@ inline void EncodePcmFramesWithAm824Placeholders(const int32_t* pcmInterleaved,
                                                  uint32_t frames, // NOLINT(bugprone-easily-swappable-parameters)
                                                  uint32_t pcmChannels,
                                                  uint32_t am824Slots,
+                                                 ASFW::MIDI::MidiTxQueue<4096>* midiQueue,
+                                                 const uint8_t* outputChannelMap,
+                                                 bool outputChannelMapActive,
                                                  uint32_t* outWireQuadlets) noexcept {
     const uint32_t midiSlots = (am824Slots > pcmChannels) ? (am824Slots - pcmChannels) : 0;
     for (uint32_t f = 0; f < frames; ++f) {
         const int32_t* frameIn = pcmInterleaved + (static_cast<size_t>(f) * pcmChannels);
         uint32_t* frameOut = outWireQuadlets + (static_cast<size_t>(f) * am824Slots);
 
-        for (uint32_t ch = 0; ch < pcmChannels; ++ch) {
-            frameOut[ch] = Encoding::AM824Encoder::encode(frameIn[ch]);
+        if (outputChannelMapActive && outputChannelMap) {
+            for (uint32_t slot = 0; slot < pcmChannels; ++slot) {
+                frameOut[slot] = Encoding::AM824Encoder::encode(0);
+            }
+            for (uint32_t ch = 0; ch < pcmChannels; ++ch) {
+                frameOut[outputChannelMap[ch]] = Encoding::AM824Encoder::encode(frameIn[ch]);
+            }
+        } else {
+            for (uint32_t ch = 0; ch < pcmChannels; ++ch) {
+                frameOut[ch] = Encoding::AM824Encoder::encode(frameIn[ch]);
+            }
         }
         for (uint32_t s = 0; s < midiSlots; ++s) {
-            frameOut[pcmChannels + s] = EncodeMidiPlaceholderSlot(s);
+            frameOut[pcmChannels + s] = midiQueue
+                ? midiQueue->PopAM824Quadlet()
+                : EncodeMidiPlaceholderSlot(s);
         }
     }
+}
+
+void LogOutputChannelMap(const uint8_t* map, uint32_t count, bool active) noexcept {
+    if (!active || !map || count == 0) {
+        ASFW_LOG(Isoch, "IT: Apple output channel-position map inactive; using identity slots");
+        return;
+    }
+
+    char buffer[256];
+    int written = std::snprintf(buffer, sizeof(buffer), "IT: Apple output channel-position map active count=%u", count);
+    if (written < 0) {
+        return;
+    }
+
+    size_t offset = static_cast<size_t>(written);
+    for (uint32_t ch = 0; ch < count && offset < sizeof(buffer); ++ch) {
+        written = std::snprintf(buffer + offset, sizeof(buffer) - offset, " ch%u->slot%u", ch, map[ch]);
+        if (written < 0) {
+            return;
+        }
+        offset += static_cast<size_t>(written);
+    }
+
+    ASFW_LOG(Isoch, "%{public}s", buffer);
 }
 
 } // namespace
@@ -65,6 +134,34 @@ uint32_t IsochAudioTxPipeline::SharedTxFillLevelFrames() const noexcept {
 uint32_t IsochAudioTxPipeline::SharedTxCapacityFrames() const noexcept {
     if (!sharedTxQueue_.IsValid()) return 0;
     return sharedTxQueue_.CapacityFrames();
+}
+
+void IsochAudioTxPipeline::SetOutputChannelMap(const uint8_t* map, uint32_t count) noexcept {
+    outputChannelMapActive_ = false;
+    outputChannelMapCount_ = 0;
+    outputChannelMap_.fill(0);
+
+    if (!map || count == 0) {
+        return;
+    }
+
+    outputChannelMapCount_ = std::min<uint32_t>(count, Config::kMaxPcmChannels);
+    for (uint32_t i = 0; i < outputChannelMapCount_; ++i) {
+        outputChannelMap_[i] = map[i];
+    }
+}
+
+uint32_t IsochAudioTxPipeline::PushMidiTxBytes(const uint8_t* bytes, uint32_t count) noexcept {
+    const uint32_t pushed = midiTxQueue_.PushBytes(bytes, count);
+    counters_.midiTxBytesQueued.fetch_add(pushed, std::memory_order_relaxed);
+    if (pushed < count) {
+        ASFW_LOG(Isoch,
+                 "MIDI TX: queue overflow pushed=%u requested=%u droppedTotal=%u",
+                 pushed,
+                 count,
+                 midiTxQueue_.DroppedBytes());
+    }
+    return pushed;
 }
 
 void IsochAudioTxPipeline::SetExternalSyncBridge(Core::ExternalSyncBridge* bridge) noexcept {
@@ -143,6 +240,31 @@ kern_return_t IsochAudioTxPipeline::Configure(uint8_t sid,
 
     assembler_.reconfigureAM824(queueChannels, am824Slots, sid);
 
+    outputChannelMapActive_ = false;
+    if (outputChannelMapCount_ != 0) {
+        bool validMap = outputChannelMapCount_ == queueChannels;
+        bool usedSlots[Config::kMaxPcmChannels] = {};
+        for (uint32_t ch = 0; validMap && ch < outputChannelMapCount_; ++ch) {
+            const uint8_t slot = outputChannelMap_[ch];
+            if (slot >= queueChannels || usedSlots[slot]) {
+                validMap = false;
+                break;
+            }
+            usedSlots[slot] = true;
+        }
+
+        if (validMap) {
+            outputChannelMapActive_ = true;
+        } else {
+            ASFW_LOG(Isoch,
+                     "IT: Apple output channel-position map ignored count=%u queueChannels=%u am824Slots=%u",
+                     outputChannelMapCount_,
+                     queueChannels,
+                     am824Slots);
+        }
+    }
+    LogOutputChannelMap(outputChannelMap_.data(), outputChannelMapCount_, outputChannelMapActive_);
+
     requestedStreamMode_ = (streamModeRaw == 1u)
         ? Encoding::StreamMode::kBlocking
         : Encoding::StreamMode::kNonBlocking;
@@ -161,6 +283,21 @@ kern_return_t IsochAudioTxPipeline::Configure(uint8_t sid,
              "IT: Channel geometry resolved pcm=%u dbs=%u midiSlots=%u framesPerData=%u payloadBytes=%u packetBytes=%u",
              queueChannels, am824Slots, (am824Slots > queueChannels) ? (am824Slots - queueChannels) : 0,
              framesPerDataPacket, payloadBytes, packetBytes);
+    const uint32_t midiSlots = (am824Slots > queueChannels) ? (am824Slots - queueChannels) : 0;
+    if (midiSlots > 0 && ASFW::LogConfig::Shared().IsMIDITxSelfTestEnabled() && !midiTxSelfTestQueued_) {
+        constexpr uint8_t kProbeBytes[] = {
+            0x90, 0x3c, 0x40, // Note On, middle C, medium velocity
+            0x80, 0x3c, 0x00  // Note Off
+        };
+        const uint32_t pushed = PushMidiTxBytes(kProbeBytes, sizeof(kProbeBytes));
+        midiTxSelfTestQueued_ = true;
+        ASFW_LOG(Isoch,
+                 "MIDI TX SELFTEST: queued probe bytes pushed=%u requested=%zu midiSlots=%u droppedTotal=%u",
+                 pushed,
+                 sizeof(kProbeBytes),
+                 midiSlots,
+                 midiTxQueue_.DroppedBytes());
+    }
     ASFW_LOG(Isoch,
              "IT: Cadence resolved mode=%{public}s dbs=%u framesPerData=%u dataBytes=%u noDataBytes=%u cadence=%{public}s",
              effectiveStreamMode_ == Encoding::StreamMode::kBlocking ? "blocking" : "non-blocking",
@@ -209,6 +346,17 @@ void IsochAudioTxPipeline::ResetForStart() noexcept {
     sytGenerator_.initialize(48000.0, assembler_.samplesPerDataPacket());
     sytGenerator_.reset();
     cycleTrackingValid_ = false;
+}
+
+void IsochAudioTxPipeline::SyncOutputInputStreams() noexcept {
+    // analysis evidence: AppleFWAudioDevice::StartAllStreams calls SyncInputStreams
+    // as a distinct post-direction-start step. AM824*Write::SyncOutputInputStreams
+    // resets writer timing against the live device sample counter; our closest
+    // DriverKit analogue is to restart the TX/RX sync discipline once IR exists.
+    externalSyncDiscipline_.Reset();
+    sytGenerator_.reset();
+    counters_.resyncApplied.fetch_add(1, std::memory_order_relaxed);
+    ASFW_LOG(Isoch, "IT: Apple SyncInputStreams equivalent applied (TX/RX sync discipline reset)");
 }
 
 void IsochAudioTxPipeline::PrePrimeFromSharedQueue() noexcept {
@@ -432,6 +580,13 @@ void IsochAudioTxPipeline::MaybeApplyExternalSyncDiscipline(uint16_t txSyt) noex
     uint16_t rxSyt = Core::ExternalSyncBridge::kNoInfoSyt;
 
     if (externalSyncBridge_) {
+        // Apple gates external-sync SYT slaving on the device's clock SOURCE
+        // (AppleFWAudioDevice::SetClockSource: externalSync set only when the
+        // device is locked to a non-internal reference). When the device is on
+        // its internal clock (Local / free-run) the transmit SYT must free-run,
+        // matching Apple's externalSync=0 path — so do not discipline at all.
+        const bool externalClock =
+            externalSyncBridge_->externalClockSource.load(std::memory_order_acquire);
         const bool active = externalSyncBridge_->active.load(std::memory_order_acquire);
         const bool established = externalSyncBridge_->clockEstablished.load(std::memory_order_acquire);
         const uint64_t lastUpdateTicks =
@@ -442,7 +597,7 @@ void IsochAudioTxPipeline::MaybeApplyExternalSyncDiscipline(uint16_t txSyt) noex
             staleThresholdTicks = ASFW::Timing::nanosToHostTicks(100'000'000ULL);
         }
 
-        if (active && established && staleThresholdTicks != 0 && lastUpdateTicks != 0) {
+        if (externalClock && active && established && staleThresholdTicks != 0 && lastUpdateTicks != 0) {
             const uint64_t nowTicks = mach_absolute_time();
             if (nowTicks >= lastUpdateTicks &&
                 (nowTicks - lastUpdateTicks) <= staleThresholdTicks) {
@@ -461,6 +616,12 @@ void IsochAudioTxPipeline::MaybeApplyExternalSyncDiscipline(uint16_t txSyt) noex
     const auto disciplineResult = externalSyncDiscipline_.Update(enabled, txSyt, rxSyt);
     if (enabled && disciplineResult.correctionTicks != 0) {
         sytGenerator_.nudgeOffsetTicks(disciplineResult.correctionTicks);
+    }
+    if (enabled != lastDisciplineEnabled_) {
+        ASFW_LOG(Isoch,
+                 "IT: external-sync SYT discipline %{public}s (gated on device external clock)",
+                 enabled ? "ENGAGED" : "disengaged");
+        lastDisciplineEnabled_ = enabled;
     }
 }
 
@@ -502,6 +663,7 @@ static uint64_t sInjectCallCount = 0;
 static uint64_t sInjectPacketsWritten = 0;
 static uint64_t sInjectNonZeroPackets = 0;
 static int32_t  sInjectPeakSample = 0;
+static bool     sInjectFirstNonZeroLogged = false;
 
 void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescriptorSlab& slab) noexcept {
     constexpr uint32_t numPackets = Tx::Layout::kNumPackets;
@@ -538,6 +700,13 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
     uint32_t diagFramesRead = 0;
     uint32_t dataPacketsThisCall = 0;
     bool hasNonZeroThisCall = false;
+    uint32_t diagFirstNonZeroFrame = 0;
+    uint32_t diagFirstNonZeroChannel = 0;
+    uint32_t diagFirstNonZeroSlot = 0;
+    uint32_t diagFirstNonZeroAM824 = 0;
+    uint32_t diagNonZeroChannelMask = 0;
+    uint32_t diagNonZeroSlotMask = 0;
+    int32_t diagFirstNonZeroSample = 0;
 
     for (uint32_t i = 0; i < toInject; ++i) {
         const uint32_t idx = (audioWriteIndex_ + i) % numPackets;
@@ -608,7 +777,14 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
         uint32_t* quadlets = reinterpret_cast<uint32_t*>(payloadVirt + Encoding::kCIPHeaderSize);
 
         // Encode per data block: audio quadlets then MIDI placeholders.
-        EncodePcmFramesWithAm824Placeholders(samples, framesPerPacket, pcmChannels, am824Slots, quadlets);
+        EncodePcmFramesWithAm824Placeholders(samples,
+                                             framesPerPacket,
+                                             pcmChannels,
+                                             am824Slots,
+                                             &midiTxQueue_,
+                                             outputChannelMap_.data(),
+                                             outputChannelMapActive_,
+                                             quadlets);
 
         // Track diagnostics
         ++dataPacketsThisCall;
@@ -619,10 +795,44 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
             diagAM824_0 = quadlets[0];
             diagAM824_1 = (pcmChannels > 1) ? quadlets[1] : 0;
             diagFramesRead = framesRead;
+            if (!midiTxProbeLogged_ && am824Slots > pcmChannels) {
+                const uint32_t midiQuadlet = quadlets[pcmChannels];
+                const auto decoded = ASFW::MIDI::AM824MidiCodec::DecodeBytes(midiQuadlet);
+                if (decoded.count > 0) {
+                    midiTxProbeLogged_ = true;
+                    ASFW_LOG(Isoch,
+                             "MIDI TX SELFTEST: emitted AM824 midiSlot=%u hostWord=0x%08x bytes=%02x %02x %02x count=%u",
+                             pcmChannels,
+                             midiQuadlet,
+                             decoded.bytes[0],
+                             decoded.bytes[1],
+                             decoded.bytes[2],
+                             decoded.count);
+                }
+            }
         }
         for (uint32_t s = 0; s < framesPerPacket * pcmChannels; ++s) {
             if (samples[s] != 0) {
+                const uint32_t frame = s / pcmChannels;
+                const uint32_t ch = s % pcmChannels;
+                const uint32_t slot = outputChannelMapActive_ ? outputChannelMap_[ch] : ch;
+                if (!hasNonZeroThisCall) {
+                    diagFirstNonZeroFrame = frame;
+                    diagFirstNonZeroChannel = ch;
+                    diagFirstNonZeroSlot = slot;
+                    diagFirstNonZeroSample = samples[s];
+                    if (slot < am824Slots) {
+                        diagFirstNonZeroAM824 =
+                            quadlets[(static_cast<size_t>(frame) * am824Slots) + slot];
+                    }
+                }
                 hasNonZeroThisCall = true;
+                if (ch < 32) {
+                    diagNonZeroChannelMask |= (1u << ch);
+                }
+                if (slot < 32) {
+                    diagNonZeroSlotMask |= (1u << slot);
+                }
                 int32_t abs_s = (samples[s] < 0) ? -samples[s] : samples[s];
                 if (abs_s > sInjectPeakSample) sInjectPeakSample = abs_s;
             }
@@ -639,13 +849,31 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
     std::atomic_thread_fence(std::memory_order_release);
     ASFW::Driver::IoBarrier();
 
+    if (hasNonZeroThisCall && !sInjectFirstNonZeroLogged) {
+        sInjectFirstNonZeroLogged = true;
+        ASFW_LOG(Isoch,
+                 "InjectNearHw FIRST NONZERO: call=%llu frame=%u ch=%u -> slot=%u "
+                 "sample=0x%08x am824=0x%08x chMask=0x%08x slotMask=0x%08x map=%{public}s",
+                 sInjectCallCount,
+                 diagFirstNonZeroFrame,
+                 diagFirstNonZeroChannel,
+                 diagFirstNonZeroSlot,
+                 static_cast<uint32_t>(diagFirstNonZeroSample),
+                 diagFirstNonZeroAM824,
+                 diagNonZeroChannelMask,
+                 diagNonZeroSlotMask,
+                 outputChannelMapActive_ ? "apple" : "identity");
+    }
+
     // Fix #24: Periodic diagnostic log (every ~4000 calls ≈ every 0.5s)
     if (sInjectCallCount % 4000 == 1) {
         const uint32_t rbFill = assembler_.bufferFillLevel();
         const uint32_t txFill = sharedTxQueue_.IsValid() ? sharedTxQueue_.FillLevelFrames() : 0;
         ASFW_LOG(Isoch,
                  "InjectNearHw[%llu]: toInject=%u data=%u framesRead=%u rbFill=%u txFill=%u "
-                 "nonZeroPkts=%llu peak=0x%08x | pcm=[%08x,%08x] am824=[%08x,%08x]",
+                 "nonZeroPkts=%llu peak=0x%08x firstNZ=f%u/ch%u->slot%u sample=0x%08x "
+                 "am824=0x%08x chMask=0x%08x slotMask=0x%08x map=%{public}s | "
+                 "pcm=[%08x,%08x] am824=[%08x,%08x]",
                  sInjectCallCount,
                  toInject,
                  dataPacketsThisCall,
@@ -654,6 +882,14 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
                  txFill,
                  sInjectNonZeroPackets,
                  static_cast<uint32_t>(sInjectPeakSample),
+                 diagFirstNonZeroFrame,
+                 diagFirstNonZeroChannel,
+                 diagFirstNonZeroSlot,
+                 static_cast<uint32_t>(diagFirstNonZeroSample),
+                 diagFirstNonZeroAM824,
+                 diagNonZeroChannelMask,
+                 diagNonZeroSlotMask,
+                 outputChannelMapActive_ ? "apple" : "identity",
                  static_cast<uint32_t>(diagSample0),
                  static_cast<uint32_t>(diagSample1),
                  diagAM824_0,
@@ -682,6 +918,7 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
                      olDesc->control,
                      olReq,
                      q[0], q[1], q[2], q[3]);
+            LogFirstAm824FrameSlots(q + 2, am824Slots);
             break; // one DATA packet is enough
         }
     }

@@ -96,6 +96,26 @@ target_compile_definitions(TLabelMatchingTests
 
 target_include_directories(TLabelMatchingTests PRIVATE ${ASFW_COMMON_INCLUDES})
 
+# Local PCR register file (host-as-CMP-target backing store; gaps 3.3/3.4).
+# Header-only, no DriverKit deps — pure compare_swap logic.
+add_executable(LocalPcrRegisterFileTests
+    "${ASFW_TESTS_DIR}/LocalPcrRegisterFileTests.cpp"
+)
+
+target_link_libraries(LocalPcrRegisterFileTests
+    PRIVATE
+        GTest::gtest_main
+)
+
+target_compile_definitions(LocalPcrRegisterFileTests
+    PRIVATE
+        ASFW_HOST_TEST
+)
+
+target_include_directories(LocalPcrRegisterFileTests PRIVATE ${ASFW_COMMON_INCLUDES})
+
+gtest_discover_tests(LocalPcrRegisterFileTests)
+
 # Completion Callback Pattern Tests - Documents the Apple-style fix
 add_executable(CompletionCallbackPatternTests
     "${ASFW_TESTS_DIR}/CompletionCallbackPatternTests.cpp"
@@ -879,6 +899,7 @@ gtest_discover_tests(AVCUnitPlugInfoCommandTests)
 add_executable(IsochReceiveContextTests
     "${ASFW_TESTS_DIR}/IsochReceiveContextTests.cpp"
     "${ASFW_TESTS_DIR}/IsochRxDmaRingTests.cpp"
+    "${ASFW_TESTS_DIR}/PacketStreamParserTests.cpp"
     "${ASFW_DRIVER_DIR}/Isoch/Receive/IsochReceiveContext.cpp"
     "${ASFW_DRIVER_DIR}/Isoch/Receive/IsochRxDmaRing.cpp"
     "${ASFW_DRIVER_DIR}/Isoch/Receive/IsochAudioRxPipeline.cpp"
@@ -951,6 +972,63 @@ target_compile_definitions(AM824EncoderTests
 target_include_directories(AM824EncoderTests PRIVATE ${ASFW_COMMON_INCLUDES})
 
 gtest_discover_tests(AM824EncoderTests)
+
+# AM824 MIDI conformant data tests
+add_executable(AM824MidiCodecTests
+    "${ASFW_TESTS_DIR}/AM824MidiCodecTests.cpp"
+)
+
+target_link_libraries(AM824MidiCodecTests
+    PRIVATE
+        GTest::gtest_main
+)
+
+target_compile_definitions(AM824MidiCodecTests
+    PRIVATE
+        ASFW_HOST_TEST
+)
+
+target_include_directories(AM824MidiCodecTests PRIVATE ${ASFW_COMMON_INCLUDES})
+
+gtest_discover_tests(AM824MidiCodecTests)
+
+# MIDI DriverKit UMP to MIDI 1.0 byte stream tests
+add_executable(UMPToMidi1Tests
+    "${ASFW_TESTS_DIR}/UMPToMidi1Tests.cpp"
+)
+
+target_link_libraries(UMPToMidi1Tests
+    PRIVATE
+        GTest::gtest_main
+)
+
+target_compile_definitions(UMPToMidi1Tests
+    PRIVATE
+        ASFW_HOST_TEST
+)
+
+target_include_directories(UMPToMidi1Tests PRIVATE ${ASFW_COMMON_INCLUDES})
+
+gtest_discover_tests(UMPToMidi1Tests)
+
+# MIDI 1.0 byte stream to DriverKit UMP tests
+add_executable(Midi1ToUMPTests
+    "${ASFW_TESTS_DIR}/Midi1ToUMPTests.cpp"
+)
+
+target_link_libraries(Midi1ToUMPTests
+    PRIVATE
+        GTest::gtest_main
+)
+
+target_compile_definitions(Midi1ToUMPTests
+    PRIVATE
+        ASFW_HOST_TEST
+)
+
+target_include_directories(Midi1ToUMPTests PRIVATE ${ASFW_COMMON_INCLUDES})
+
+gtest_discover_tests(Midi1ToUMPTests)
 
 # CIP Header Builder Tests
 add_executable(CIPHeaderBuilderTests

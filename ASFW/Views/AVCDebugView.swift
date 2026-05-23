@@ -371,7 +371,7 @@ struct SubunitRow: View {
                 Divider()
                     .padding(.leading, 64)
                 
-                if isMusicSubunit {
+                if hasDetailedCapabilities {
                     SubunitCapabilitiesView(
                         viewModel: viewModel,
                         unit: unit,
@@ -403,6 +403,14 @@ struct SubunitRow: View {
     
     private var isMusicSubunit: Bool {
         return subunit.type == 0x1C || subunit.type == 0x0C
+    }
+
+    private var isAudioSubunit: Bool {
+        return subunit.type == 0x01
+    }
+
+    private var hasDetailedCapabilities: Bool {
+        return isMusicSubunit || isAudioSubunit
     }
     
     private func fetchCapabilities() async {
@@ -541,7 +549,7 @@ struct SubunitCapabilitiesView: View {
             isPresented: $showFileExporter,
             document: BinaryFileDocument(initialData: descriptorData ?? Data()),
             contentType: .data,
-            defaultFilename: "MusicSubunitDescriptor.bin"
+            defaultFilename: subunit.type == 0x01 ? "AudioSubunitDescriptor.bin" : "MusicSubunitDescriptor.bin"
         ) { result in
             if case .failure(let error) = result {
                 print("Failed to save: \(error.localizedDescription)")

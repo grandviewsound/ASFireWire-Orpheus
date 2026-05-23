@@ -91,6 +91,16 @@ final class ASFWDriverConnector: ObservableObject {
     let connectionQueue = DispatchQueue(label: "com.kevinpeters.ASFWDriverConnector.connection")
     let serviceName = "ASFWDriver"
 
+    /// Serializes AV/C FCP submit+poll pairs across concurrent callers. Both
+    /// `OrpheusControlViewModel.refresh*` and `OrpheusControlViewModel.set*`
+    /// fan out via `DispatchQueue.global()`, so a meter poll racing with a
+    /// phantom-power write would let one thread's poll consume the other's
+    /// transaction handle, producing the `getTransactionResult: Not Found` and
+    /// `Device Busy` errors observed in the May 17 hw logs. One in-flight FCP
+    /// transaction at a time eliminates that class of races without forcing
+    /// the rest of the connector to be `actor`-isolated.
+    let fcpLock = NSLock()
+
     var notificationPort: IONotificationPortRef?
     var matchedIterator: io_iterator_t = 0
     var terminatedIterator: io_iterator_t = 0

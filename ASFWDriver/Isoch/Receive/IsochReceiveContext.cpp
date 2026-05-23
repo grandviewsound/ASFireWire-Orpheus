@@ -83,7 +83,14 @@ kern_return_t IsochReceiveContext::Start() {
     hardware_->Write(registers_.CommandPtr, cmdPtr);
 
     hardware_->Write(registers_.ContextControlClear, 0xFFFFFFFFu);
-    const uint32_t ctlValue = ContextControl::kRun | ContextControl::kIsochHeader;
+    // Apple sets bit 31 (bufferFill) for ALL IR contexts, verified via analysis
+    // of AppleFWOHCI_DMAManager::Context::start at sym 0xac68. In bufferFill
+    // mode hardware writes packets contiguously across descriptors and
+    // PacketStreamParser splits the byte stream. See
+    // apple-ir-bufferfill-confirmed.md.
+    const uint32_t ctlValue = ContextControl::kRun |
+                              ContextControl::kBufferFill |
+                              ContextControl::kIsochHeader;
     hardware_->Write(registers_.ContextControlSet, ctlValue);
 
     const uint32_t contextMask = 1u << contextIndex_;
@@ -149,21 +156,40 @@ uint32_t IsochReceiveContext::Poll() {
 
     const uint64_t start = mach_absolute_time();
 
-    const uint32_t processed = rxRing_.DrainCompleted(*dmaMemory_, [this](const Rx::IsochRxDmaRing::CompletedPacket& pkt) {
-        if (pkt.payload) {
-            audio_.OnPacket(pkt.payload, pkt.actualLength);
+    // bufferFill drain: pull each descriptor's fresh bytes, feed the parser,
+    // and once a descriptor is exhausted, splice it onto the tail and pulse
+    // WAKE so hardware picks up the chain extension. Mirrors Apple's
+    // MultiIsochReceiver::processReceivedPackets +
+    // MultiIsochReceiver::checkForElementsToRelink.
+    uint32_t recycled = 0;
+    while (true) {
+        auto span = rxRing_.DequeueDescriptorBytes(*dmaMemory_);
+        if (!span.has_value()) {
+            break;
         }
-
-        if (callback_) {
-            const auto span = std::span<const uint8_t>(pkt.payload, pkt.actualLength);
-            callback_(span, static_cast<uint32_t>(pkt.xferStatus), 0);
+        if (span->bytes != nullptr && span->length > 0) {
+            audio_.OnByteStream(span->bytes, span->length);
+            if (callback_) {
+                const auto cbSpan = std::span<const uint8_t>(span->bytes, span->length);
+                callback_(cbSpan, 0, 0);
+            }
         }
-    });
+        if (span->exhausted) {
+            const auto kr = rxRing_.Recycle(span->descriptorIndex, *dmaMemory_);
+            if (kr == kIOReturnSuccess) {
+                ++recycled;
+            }
+        }
+    }
 
-    audio_.OnPollEnd(*hardware_, processed, start);
+    if (recycled > 0) {
+        hardware_->Write(registers_.ContextControlSet, ContextControl::kWake);
+    }
+
+    audio_.OnPollEnd(*hardware_, recycled, start);
 
     rxLock_.clear(std::memory_order_release);
-    return processed;
+    return recycled;
 }
 
 void IsochReceiveContext::SetSharedRxQueue(void* base, uint64_t bytes) {

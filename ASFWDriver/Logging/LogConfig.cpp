@@ -47,6 +47,8 @@ LogConfig::LogConfig()
     enableHexDumps_.store(false);       // Default: No hex dumps
     isochTxVerifierEnabled_.store(false); // Default: disabled (dev-only, expensive)
     audioAutoStartEnabled_.store(true); // Default: enabled
+    midiTxSelfTestEnabled_.store(true); // Default: one-shot MIDI probe for bring-up
+    midiRxSelfTestEnabled_.store(true); // Default: one-shot CoreMIDI source probe for bring-up
     logStatistics_.store(true);         // Default: Show statistics
     initialized_.store(false);
 }
@@ -87,19 +89,23 @@ void LogConfig::Initialize(IOService* service) {
     enableHexDumps_.store(ReadBoolProperty(service, "ASFWEnableHexDumps", false));
     isochTxVerifierEnabled_.store(ReadBoolProperty(service, "ASFWEnableIsochTxVerifier", false));
     audioAutoStartEnabled_.store(ReadBoolProperty(service, "ASFWAutoStartAudioStreams", true));
+    midiTxSelfTestEnabled_.store(ReadBoolProperty(service, "ASFWEnableMIDITxSelfTest", true));
+    midiRxSelfTestEnabled_.store(ReadBoolProperty(service, "ASFWEnableMIDIRxSelfTest", true));
     logStatistics_.store(ReadBoolProperty(service, "ASFWLogStatistics", true));
 
     initialized_.store(true);
 
     // Log configuration (always visible at INFO level)
     ASFW_LOG_INFO(Controller,
-                  "LogConfig initialized: Async=%u Controller=%u Hardware=%u Discovery=%u ConfigROM=%u UserClient=%u Music=%u FCP=%u CMP=%u IRM=%u AVC=%u Isoch=%u HexDumps=%d TxVerify=%d AutoStart=%d Stats=%d",
+                  "LogConfig initialized: Async=%u Controller=%u Hardware=%u Discovery=%u ConfigROM=%u UserClient=%u Music=%u FCP=%u CMP=%u IRM=%u AVC=%u Isoch=%u HexDumps=%d TxVerify=%d AutoStart=%d MIDITxSelfTest=%d MIDIRxSelfTest=%d Stats=%d",
                   asyncVerbosity_.load(), controllerVerbosity_.load(), hardwareVerbosity_.load(),
                   discoveryVerbosity_.load(), configROMVerbosity_.load(), userClientVerbosity_.load(),
                   musicSubunitVerbosity_.load(), fcpVerbosity_.load(), cmpVerbosity_.load(), irmVerbosity_.load(), avcVerbosity_.load(),
                   isochVerbosity_.load(),
                   enableHexDumps_.load(), isochTxVerifierEnabled_.load(),
                   audioAutoStartEnabled_.load(),
+                  midiTxSelfTestEnabled_.load(),
+                  midiRxSelfTestEnabled_.load(),
                   logStatistics_.load());
 }
 
@@ -169,6 +175,14 @@ bool LogConfig::IsIsochTxVerifierEnabled() const {
 
 bool LogConfig::IsAudioAutoStartEnabled() const {
     return audioAutoStartEnabled_.load(std::memory_order_relaxed);
+}
+
+bool LogConfig::IsMIDITxSelfTestEnabled() const {
+    return midiTxSelfTestEnabled_.load(std::memory_order_relaxed);
+}
+
+bool LogConfig::IsMIDIRxSelfTestEnabled() const {
+    return midiRxSelfTestEnabled_.load(std::memory_order_relaxed);
 }
 
 // ============================================================================

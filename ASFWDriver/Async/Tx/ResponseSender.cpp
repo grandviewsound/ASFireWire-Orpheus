@@ -103,4 +103,74 @@ void ResponseSender::SendWriteResponse(const ARPacketView& request, ResponseCode
                 tLabel, srcID, destID, static_cast<unsigned>(rcode));
 }
 
+void ResponseSender::SendReadQuadletResponse(const ARPacketView& request,
+                                             ResponseCode rcode,
+                                             uint32_t quadletData) noexcept {
+    // Per IEEE 1394, broadcast requests (destID=0xFFFF) do not get responses.
+    if (request.destID == 0xFFFF) {
+        ASFW_LOG_V3(Async, "ResponseSender: skip RdQuadResp for broadcast destID=0xFFFF");
+        return;
+    }
+
+    if (request.tCode != 0x4) {
+        ASFW_LOG_V3(Async,
+                    "ResponseSender: skip RdQuadResp for non-read-quad tCode=0x%x",
+                    request.tCode);
+        return;
+    }
+
+    auto* atRspCtx = ctxMgr_.GetAtResponseContext();
+    if (!atRspCtx) {
+        ASFW_LOG_ERROR(Async, "ResponseSender: ATResponseContext unavailable, cannot send RdQuadResp");
+        return;
+    }
+
+    const uint16_t destID = request.sourceID;
+    const uint8_t  tLabel = static_cast<uint8_t>(request.tLabel & 0x3F);
+
+    // OHCI AT response format, matching SendWriteResponse above. For a quadlet
+    // read response, q2 carries the returned data quadlet.
+    uint32_t header[3]{};
+    constexpr uint8_t kSrcBusID = 0;
+    constexpr uint8_t kSpeedS400 = 0x02;
+    constexpr uint8_t kRetryX = 1;
+    constexpr uint8_t kTCodeReadQuadletResponse = 0x6;
+    constexpr uint8_t kPriority = 0;
+
+    header[0] = (static_cast<uint32_t>(kSrcBusID & 0x01) << 23) |
+                (static_cast<uint32_t>(kSpeedS400 & 0x07) << 16) |
+                (static_cast<uint32_t>(tLabel) << 10) |
+                (static_cast<uint32_t>(kRetryX) << 8) |
+                (static_cast<uint32_t>(kTCodeReadQuadletResponse) << 4) |
+                (static_cast<uint32_t>(kPriority) & 0xF);
+    header[1] = (static_cast<uint32_t>(destID) << 16) |
+                (static_cast<uint32_t>(static_cast<uint8_t>(rcode)) << 12);
+    header[2] = quadletData;
+
+    auto chain = builder_.BuildTransactionChain(
+        header,
+        sizeof(header),
+        /*payloadDeviceAddress*/ 0,
+        /*payloadSize*/ 0,
+        /*needsFlush*/ false);
+    if (chain.Empty()) {
+        ASFW_LOG_ERROR(Async, "ResponseSender: failed to build RdQuadResp descriptor chain");
+        return;
+    }
+
+    const auto submitRes = submitter_.submit_tx_chain(atRspCtx, std::move(chain));
+    if (submitRes.kr != kIOReturnSuccess) {
+        ASFW_LOG_ERROR(Async, "ResponseSender: submit_tx_chain failed for RdQuadResp (kr=0x%x)",
+                       submitRes.kr);
+        return;
+    }
+
+    ASFW_LOG_V2(Async,
+                "ResponseSender: RdQuadResp queued (tLabel=%u dst=0x%04x rcode=0x%x data=0x%08x)",
+                tLabel,
+                destID,
+                static_cast<unsigned>(rcode),
+                quadletData);
+}
+
 } // namespace ASFW::Async

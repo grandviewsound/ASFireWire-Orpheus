@@ -1,0 +1,74 @@
+//
+// ASFWMIDIDriver.iig
+// ASFWDriver
+//
+// MIDIDriverKit service that matches ASFWMIDINub and publishes the CoreMIDI
+// object tree for FireWire AM824 MIDI ports.
+//
+
+#ifndef ASFWMIDIDriver_h
+#define ASFWMIDIDriver_h
+
+#include <DriverKit/OSSharedPtr.h>
+#include <MIDIDriverKit/IOUserMIDIDriver.iig>
+#include <MIDIDriverKit/IOUserMIDIDevice.iig>
+#include <MIDIDriverKit/IOUserMIDIEntity.iig>
+#include <MIDIDriverKit/IOUserMIDISource.iig>
+#include <MIDIDriverKit/IOUserMIDIDestination.iig>
+#include <DriverKit/IOTimerDispatchSource.iig>
+
+class ASFWMIDINub;
+
+class ASFWMIDIDriver: public IOUserMIDIDriver
+{
+public:
+    virtual bool init() override;
+    virtual void free() override;
+
+    virtual kern_return_t Start(IOService* provider) override;
+    virtual kern_return_t Stop(IOService* provider) override;
+
+    virtual kern_return_t NewUserClient(uint32_t type,
+                                        IOUserClient** userClient) override;
+
+    virtual kern_return_t StartIO(OSArray* deviceList) override LOCALONLY;
+    virtual kern_return_t StopIO() override LOCALONLY;
+
+    virtual void MidiRxPollTimerFired(OSAction* action, uint64_t time)
+        TYPE(IOTimerDispatchSource::TimerOccurred);
+};
+
+struct ASFWMIDIDriver_IVars {
+    uint64_t guid{0};
+    uint32_t vendorId{0};
+    uint32_t modelId{0};
+    uint32_t inputPorts{0};
+    uint32_t outputPorts{0};
+    uint64_t txWordsReceived{0};
+    uint64_t txBytesDecoded{0};
+    uint64_t txBytesQueued{0};
+    uint64_t txUnsupportedWords{0};
+    uint64_t rxBytesReceived{0};
+    uint64_t rxWordsSent{0};
+    uint64_t rxUnsupportedMessages{0};
+    uint64_t rxSendFailures{0};
+    bool rxSelfTestSent{false};
+    bool rxPollActive{false};
+    uint64_t rxBridgePolls{0};
+    uint64_t rxBridgeEmptyPolls{0};
+    uint64_t rxBridgeDropped{0};
+    void* isochService{nullptr};
+    ASFWMIDINub* midiNubProvider{nullptr};
+    char deviceName[128]{};
+    char sourceName[64]{};
+    char destinationName[64]{};
+
+    OSSharedPtr<IOUserMIDIDevice> device;
+    OSSharedPtr<IOUserMIDIEntity> entity;
+    OSSharedPtr<IOUserMIDISource> source;
+    OSSharedPtr<IOUserMIDIDestination> destination;
+    OSSharedPtr<IOTimerDispatchSource> rxPollTimer;
+    OSSharedPtr<OSAction> rxPollAction;
+};
+
+#endif /* ASFWMIDIDriver_h */

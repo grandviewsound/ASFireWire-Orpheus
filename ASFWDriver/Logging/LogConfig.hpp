@@ -27,6 +27,8 @@ namespace ASFW {
  * - ASFWEnableHexDumps (boolean): Force enable/disable packet dumps
  * - ASFWLogStatistics (boolean): Enable aggregate statistics logging
  * - ASFWEnableIsochTxVerifier (boolean): Enable dev-only IT TX verifier (expensive)
+ * - ASFWEnableMIDITxSelfTest (boolean): Inject one synthetic MIDI note pair into TX AM824 slots
+ * - ASFWEnableMIDIRxSelfTest (boolean): Send one synthetic MIDI note pair through IOUserMIDISource
  * - ASFWAutoStartAudioStreams (boolean): Enable/disable CoreAudio-driven stream auto-start
  *
  * Thread-safe singleton with runtime update support via user client.
@@ -125,6 +127,16 @@ public:
      * @brief Check if CoreAudio-driven auto-start is enabled
      */
     bool IsAudioAutoStartEnabled() const;
+
+    /**
+     * @brief Check if one-shot MIDI TX self-test injection is enabled
+     */
+    bool IsMIDITxSelfTestEnabled() const;
+
+    /**
+     * @brief Check if one-shot MIDI RX/CoreMIDI source self-test is enabled
+     */
+    bool IsMIDIRxSelfTestEnabled() const;
 
     // ========================================================================
     // Runtime Setters (thread-safe, for user client control)
@@ -241,6 +253,8 @@ private:
     std::atomic<bool> enableHexDumps_;
     std::atomic<bool> isochTxVerifierEnabled_;
     std::atomic<bool> audioAutoStartEnabled_;
+    std::atomic<bool> midiTxSelfTestEnabled_;
+    std::atomic<bool> midiRxSelfTestEnabled_;
     std::atomic<bool> logStatistics_;
     std::atomic<bool> initialized_;
 };

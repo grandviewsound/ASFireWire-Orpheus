@@ -38,6 +38,32 @@ public:
         std::vector<uint8_t> rawResponse;
     };
 
+    struct SignalSourceResult {
+        bool valid = false;
+        uint8_t targetSubunit = 0xFF;
+        uint8_t targetPlug = 0xFF;
+        uint8_t sourceSubunit = 0xFF;
+        uint8_t sourcePlug = 0xFF;
+        uint8_t signalStatus = 0xFF;
+        uint8_t streamStatus = 0xFF;
+        bool hasFeedback = false;
+        std::vector<uint8_t> rawResponse;
+    };
+
+    struct MixerReadResult {
+        bool valid = false;
+        uint8_t functionBlockId = 0xFF;
+        uint8_t infoType = 0xFF;
+        uint8_t channel = 0xFF;
+        uint8_t controlSelector = 0xFF;
+        uint8_t selectorAttribute = 0xFF;
+        bool isMute = false;
+        bool isVolume = false;
+        bool mute = false;
+        int16_t volume = -1;
+        std::vector<uint8_t> rawResponse;
+    };
+
     struct Result {
         bool success = false;
 
@@ -75,6 +101,9 @@ public:
         uint32_t formatListCommandsSent = 0;
         std::vector<PlugFormatResult> unitIsochFormats;
 
+        // SIGNAL SOURCE reads from phases 5, 7, 10, and 12.
+        std::vector<SignalSourceResult> signalSources;
+
         // Phase 10 — QuerySyncPlugReconnect
         uint8_t syncPlugsAccepted = 0;
         uint8_t syncPlugsTotal    = 0;
@@ -84,6 +113,7 @@ public:
 
         // Phase 12 — mixer reads (raw responses kept for future use)
         uint32_t mixerCommandsSent = 0;
+        std::vector<MixerReadResult> mixerReads;
     };
 
     // ── Public API ───────────────────────────────────────────────────────
@@ -137,6 +167,28 @@ private:
     // ── Response helpers ─────────────────────────────────────────────────
 
     static bool IsAccepted(uint8_t ctype);
+
+    /// Send a SIGNAL SOURCE STATUS query (`01 ff 1a ff ff fe <subunit> <plug>`)
+    /// and log the full response bytes plus a parsed interpretation. Used by
+    /// Phase 5/7/10/12 to surface what sync source the device reports for each
+    /// plug — the OS-log redaction strips operand bytes from `[FCP] FCP TX`
+    /// lines, so we re-emit the bytes through the unfiltered Discovery
+    /// channel here. Tag is a short label like "P5/ext" / "P5/audio".
+    RawResult QueryAndLogSignalSource(const char* tag,
+                                      uint8_t targetSubunit,
+                                      uint8_t targetPlug);
+
+    /// Send one Apple Phase-12 AUDIO FUNCTION BLOCK read and keep the parsed
+    /// result. analysis evidence:
+    ///   AM824AVC::GetChannelMute reads response[10] == 0x70 when ctype == 0x0c.
+    ///   AM824AVC::GetChannelVolumeInfo reads big-endian response[10..11] when ctype == 0x0c.
+    RawResult QueryAndLogMixerRead(uint8_t subunitAddr,
+                                   uint8_t functionBlockId,
+                                   uint8_t infoType,
+                                   uint8_t channel,
+                                   uint8_t controlSelector,
+                                   uint8_t selectorAttribute,
+                                   uint8_t valueLength);
 };
 
 } // namespace ASFW::Protocols::AVC

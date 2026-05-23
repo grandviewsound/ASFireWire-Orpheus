@@ -72,6 +72,32 @@ public:
         std::vector<uint8_t> rawResponse;
     };
 
+    struct AppleDiscoverySignalSourceRecord {
+        bool valid{false};
+        uint8_t targetSubunit{0xFF};
+        uint8_t targetPlug{0xFF};
+        uint8_t sourceSubunit{0xFF};
+        uint8_t sourcePlug{0xFF};
+        uint8_t signalStatus{0xFF};
+        uint8_t streamStatus{0xFF};
+        bool hasFeedback{false};
+        std::vector<uint8_t> rawResponse;
+    };
+
+    struct AppleDiscoveryMixerReadRecord {
+        bool valid{false};
+        uint8_t functionBlockId{0xFF};
+        uint8_t infoType{0xFF};
+        uint8_t channel{0xFF};
+        uint8_t controlSelector{0xFF};
+        uint8_t selectorAttribute{0xFF};
+        bool isMute{false};
+        bool isVolume{false};
+        bool mute{false};
+        int16_t volume{-1};
+        std::vector<uint8_t> rawResponse;
+    };
+
     AVCUnit(std::shared_ptr<Discovery::FWDevice> device,
             std::shared_ptr<Discovery::FWUnit> unit,
             Protocols::Ports::FireWireBusOps& busOps,
@@ -113,6 +139,14 @@ public:
 
     const std::vector<AppleDiscoveryFormatRecord>& GetAppleDiscoveryUnitIsochFormats() const {
         return appleDiscoveryUnitIsochFormats_;
+    }
+
+    const std::vector<AppleDiscoverySignalSourceRecord>& GetAppleDiscoverySignalSources() const {
+        return appleDiscoverySignalSources_;
+    }
+
+    const std::vector<AppleDiscoveryMixerReadRecord>& GetAppleDiscoveryMixerReads() const {
+        return appleDiscoveryMixerReads_;
     }
 
     void OnBusReset(uint32_t newGeneration);
@@ -159,6 +193,8 @@ private:
     UnitPlugCounts plugCounts_;
     UnitDescriptorInfo descriptorInfo_;
     std::vector<AppleDiscoveryFormatRecord> appleDiscoveryUnitIsochFormats_;
+    std::vector<AppleDiscoverySignalSourceRecord> appleDiscoverySignalSources_;
+    std::vector<AppleDiscoveryMixerReadRecord> appleDiscoveryMixerReads_;
 
     bool initialized_{false};
 };

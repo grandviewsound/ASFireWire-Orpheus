@@ -7,6 +7,7 @@
 
 #include <DriverKit/IOReturn.h>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace ASFW::Protocols::AVC {
@@ -25,6 +26,16 @@ struct AudioStreamRuntimeCaps {
     uint32_t hostToDeviceAm824Slots{0}; // DICE RX stream slots (playback wire format)
 
     uint32_t sampleRateHz{0};
+};
+
+struct AudioStartOrderHint {
+    bool inputBeforeOutput{false};
+    const char* reason{"protocol-default"};
+    // True when the device is locked to an EXTERNAL clock reference
+    // (Wordclock/SPDIF/ADAT) rather than its own internal clock. Drives the
+    // transmit SYT discipline (Apple's externalSync regime); distinct from the
+    // start-order hint even though BeBoB derives both from the same predicate.
+    bool externalClock{false};
 };
 
 /// Interface for device-specific protocol handlers
@@ -77,6 +88,13 @@ public:
         const std::vector<uint8_t>& capture48kRawFormatBlock) {
         (void)playback48kRawFormatBlock;
         (void)capture48kRawFormatBlock;
+    }
+
+    /// Optional protocol-specific Apple StartAllStreams ordering hint.
+    /// Implementations may query live clock/source state when Apple uses that
+    /// state to decide whether input streams must start before output streams.
+    virtual std::optional<AudioStartOrderHint> GetAppleStartOrderHint() {
+        return std::nullopt;
     }
 
     /// Returns true once StartDuplex48k() has completed successfully at least once.

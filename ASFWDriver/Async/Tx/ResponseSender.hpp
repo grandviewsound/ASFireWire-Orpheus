@@ -26,6 +26,12 @@ public:
     /// Skips transmission for broadcast requests (destID=0xFFFF).
     void SendWriteResponse(const ARPacketView& request, ResponseCode rcode) noexcept;
 
+    /// Build and transmit a quadlet read response for the given request packet.
+    /// Skips transmission for broadcast requests (destID=0xFFFF).
+    void SendReadQuadletResponse(const ARPacketView& request,
+                                 ResponseCode rcode,
+                                 uint32_t quadletData) noexcept;
+
 private:
     DescriptorBuilder& builder_;
     Tx::Submitter& submitter_;

@@ -368,15 +368,14 @@ void IsochTxVerifier::RunWork() noexcept {
                 if (q == 0) {
                     sawAllZero = true;
                 }
-                uint8_t expectedLabel = Encoding::kAM824LabelMBLA;
-                if (!isPcmSlot) {
-                    const uint32_t midiSlotIndex = slotInFrame - pcmSlots;
-                    expectedLabel = static_cast<uint8_t>(
-                        Encoding::kAM824LabelMIDIConformantBase + (midiSlotIndex & 0x03u));
-                }
-                if (!ASFW::Isoch::TxVerify::HasValidAM824Label(q, expectedLabel)) {
+                const uint8_t actualLabel = ASFW::Isoch::TxVerify::AM824LabelByte(q);
+                const bool hasValidLabel = isPcmSlot
+                    ? (actualLabel == Encoding::kAM824LabelMBLA)
+                    : (actualLabel >= Encoding::kAM824LabelMIDIConformantBase &&
+                       actualLabel <= static_cast<uint8_t>(Encoding::kAM824LabelMIDIConformantBase + 3u));
+                if (!hasValidLabel) {
                     if (!sawInvalidLabel) {
-                        badLabel = ASFW::Isoch::TxVerify::AM824LabelByte(q);
+                        badLabel = actualLabel;
                         badWord = q;
                     }
                     sawInvalidLabel = true;

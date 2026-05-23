@@ -4,6 +4,7 @@
 #pragma once
 
 #include "StreamProcessor.hpp"
+#include "PacketStreamParser.hpp"
 #include "../Core/ExternalSyncBridge.hpp"
 #include "../Encoding/TimingUtils.hpp"
 
@@ -27,6 +28,13 @@ public:
 
     void OnPacket(const uint8_t* payload, size_t length) noexcept;
 
+    // Path B (fix 78): IR runs in OHCI bufferFill mode where packets land
+    // contiguously in the descriptor chain. This entry point feeds the
+    // PacketStreamParser, which splits the byte stream into individual
+    // packets and dispatches each via OnPacket(). Caller (IsochReceiveContext)
+    // hands one descriptor's worth of fresh bytes per call.
+    void OnByteStream(const uint8_t* bytes, size_t length) noexcept;
+
     void OnPollEnd(Driver::HardwareInterface& hw,
                    uint32_t packetsProcessed,
                    uint64_t pollStartMachTicks) noexcept;
@@ -40,6 +48,7 @@ private:
     static constexpr uint64_t kExternalSyncStaleNanos = 100'000'000ULL; // 100ms
 
     StreamProcessor streamProcessor_{};
+    PacketStreamParser packetParser_{};
     Shared::TxSharedQueueSPSC rxSharedQueue_{};
 
     Core::ExternalSyncBridge* externalSyncBridge_{nullptr};

@@ -45,6 +45,31 @@ TEST(ExternalSyncBridge, ClearsEstablishedOnStaleUpdate) {
     EXPECT_FALSE(bridge.clockEstablished.load(std::memory_order_acquire));
 }
 
+TEST(ExternalSyncBridge, ExternalClockSourceDefaultsFalseAndSurvivesReset) {
+    ExternalSyncBridge bridge;
+
+    // Defaults to internal clock (Apple externalSync=0 → transmit SYT free-runs).
+    EXPECT_FALSE(bridge.externalClockSource.load(std::memory_order_acquire));
+
+    // Orchestration marks an external clock source (Wordclock/SPDIF/ADAT).
+    bridge.externalClockSource.store(true, std::memory_order_release);
+    EXPECT_TRUE(bridge.externalClockSource.load(std::memory_order_acquire));
+
+    // Runtime sync state is wiped on (re)start, but the clock-source CONFIG must
+    // persist so SetExternalClockSource is order-independent vs StartReceive's
+    // internal Reset(). Verify Reset() clears runtime fields but not config.
+    bridge.active.store(true, std::memory_order_release);
+    bridge.clockEstablished.store(true, std::memory_order_release);
+    bridge.lastUpdateHostTicks.store(42, std::memory_order_release);
+    bridge.Reset();
+
+    EXPECT_FALSE(bridge.active.load(std::memory_order_acquire));
+    EXPECT_FALSE(bridge.clockEstablished.load(std::memory_order_acquire));
+    EXPECT_EQ(bridge.lastUpdateHostTicks.load(std::memory_order_acquire), 0u);
+    EXPECT_TRUE(bridge.externalClockSource.load(std::memory_order_acquire))
+        << "externalClockSource is configuration, not runtime state; Reset() must not clear it";
+}
+
 TEST(ExternalSyncBridge, TransitionRequiresCallerToFlipEstablishedFlag) {
     ExternalSyncBridge bridge;
     ExternalSyncClockState state;
