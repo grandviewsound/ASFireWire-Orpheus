@@ -306,6 +306,51 @@ void BusResetCoordinator::EvaluateRootDelegation(const TopologySnapshot& topolog
     delegateAttemptActive_ = false;
 }
 
+// Mirror Apple's IOFireWireController::finishedBusScan(): after every bus scan the
+// local node asserts cycle-master ownership iff it is the bus root (the root is the
+// cycle master per IEEE 1394). Apple gates setCycleMaster(true) strictly on
+// localNode==root and clears it otherwise. We previously never wrote
+// LinkControl.cycleMaster at all, so when the Mac was root NO node generated
+// cycle-start packets and isochronous streams had no bus time base — a candidate
+// cause of the device ignoring an otherwise byte-correct stream.
+//
+// The OHCI itself gates cycle-start *generation* on the PHY root signal reflected in
+// NodeID.root (bit 30); cycleMaster=1 generates cycle starts only when root and
+// otherwise syncs to received ones. So the authoritative input for the decision is
+// the live NodeID register, cross-checked against the Self-ID-derived topology.
+// Per OHCI §5.10 the bit must be 0 while IntEvent.cycleTooLong is latched.
+void BusResetCoordinator::ApplyCycleMaster(const TopologySnapshot& topology) {
+    if (hardware_ == nullptr) {
+        return;
+    }
+
+    const uint32_t nodeId = hardware_->Read(Register32::kNodeID);
+    const bool nodeIdValid = (nodeId & NodeIDBits::kIDValid) != 0U;
+    const bool hwRoot = nodeIdValid && ((nodeId & NodeIDBits::kRoot) != 0U);
+
+    const uint8_t localNode = topology.localNodeId.value_or(0xFF);
+    const uint8_t rootNode = topology.rootNodeId.value_or(0xFF);
+    const bool topoRoot = (localNode != 0xFF) && (localNode == rootNode);
+
+    const uint32_t intEvent = hardware_->Read(Register32::kIntEvent);
+    const bool cycleTooLong = (intEvent & IntEventBits::kCycleTooLong) != 0U;
+
+    const bool assertCycleMaster = hwRoot && !cycleTooLong;
+    if (assertCycleMaster) {
+        hardware_->SetLinkControlBits(LinkControlBits::kCycleMaster);
+    } else {
+        hardware_->ClearLinkControlBits(LinkControlBits::kCycleMaster);
+    }
+
+    // The main line exposes both hwRoot and topoRoot every scan, so a NodeID-vs-Self-ID
+    // root disagreement (should never happen) is visible without a dedicated branch.
+    ASFW_LOG(BusReset,
+             "Bus role: local=%u root=%u hwRoot=%d topoRoot=%d cycleTooLong=%d -> "
+             "cycleMaster=%{public}s",
+             localNode, rootNode, hwRoot, topoRoot, cycleTooLong,
+             assertCycleMaster ? "SET" : "CLEARED");
+}
+
 void BusResetCoordinator::RequestSoftwareReset(ResetRequest request) {
     if (request.kind == ResetRequestKind::Delegation && delegateSuppressed_) {
         return;

@@ -206,6 +206,13 @@ public:
                                  ResponseCode rcode,
                                  uint32_t quadletData) noexcept;
 
+    /// Send a lock (compareSwap) response from an AR request handler. Carries the
+    /// prior quadlet (tCode 0xB) for an incoming lock to a space we own.
+    void SendLockResponse(const ARPacketView& request,
+                          ResponseCode rcode,
+                          uint16_t extendedTCode,
+                          uint32_t oldValue) noexcept;
+
     PacketRouter(const PacketRouter&) = delete;
     PacketRouter& operator=(const PacketRouter&) = delete;
 

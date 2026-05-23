@@ -226,6 +226,7 @@ class BusResetCoordinator {
     void LogMetrics();
     void SendGlobalResumeIfNeeded();
     void EvaluateRootDelegation(const TopologySnapshot& topo);
+    void ApplyCycleMaster(const TopologySnapshot& topo);
     void RequestSoftwareReset(ResetRequest request);
     [[nodiscard]] ResetRequest MergeResetRequests(const ResetRequest& current,
                                                   const ResetRequest& incoming) const;

@@ -191,6 +191,18 @@ struct IntMaskBits {
     static constexpr uint32_t kMasterIntEnable = 1u << 31; // Master interrupt enable (OHCI §5.7)
 };
 
+// NodeID register bits (OHCI §5.11, register kNodeID = 0x0E8).
+struct NodeIDBits {
+    /// \brief iDValid: nodeNumber/busNumber fields are valid (set after Self-ID).
+    static constexpr uint32_t kIDValid = 1u << 31;
+    /// \brief root: this node is the bus root. The root is the cycle master per
+    ///        IEEE 1394, and the OHCI gates cycle-start generation on this signal
+    ///        (LinkControl.cycleMaster only generates cycle starts when root).
+    static constexpr uint32_t kRoot = 1u << 30;
+    /// \brief Physical node number field [5:0].
+    static constexpr uint32_t kNodeNumberMask = 0x3Fu;
+};
+
 // Policy: Baseline interrupt mask for normal operation.
 // Includes all critical events we want delivered during steady-state operation.
 // Per OHCI §5.7: IntMask enables delivery of IntEvent sources to the system interrupt line.

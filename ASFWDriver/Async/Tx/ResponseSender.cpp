@@ -3,10 +3,13 @@
 #include "../Engine/ContextManager.hpp"
 #include "../Contexts/ATResponseContext.hpp"
 #include "../Tx/DescriptorBuilder.hpp"
+#include "../Tx/PayloadContext.hpp"
 #include "../Tx/Submitter.hpp"
 #include "../../Bus/GenerationTracker.hpp"
 #include "../../Logging/Logging.hpp"
+#include <DriverKit/IOMemoryDescriptor.h>
 #include <DriverKit/IOReturn.h>
+#include <array>
 #include <utility>
 
 namespace ASFW::Async {
@@ -14,11 +17,13 @@ namespace ASFW::Async {
 ResponseSender::ResponseSender(DescriptorBuilder& builder,
                                Tx::Submitter& submitter,
                                Engine::ContextManager& ctxMgr,
-                               Bus::GenerationTracker& generationTracker) noexcept
+                               Bus::GenerationTracker& generationTracker,
+                               Driver::HardwareInterface& hw) noexcept
     : builder_(builder)
     , submitter_(submitter)
     , ctxMgr_(ctxMgr)
-    , generationTracker_(generationTracker) {}
+    , generationTracker_(generationTracker)
+    , hw_(hw) {}
 
 void ResponseSender::SendWriteResponse(const ARPacketView& request, ResponseCode rcode) noexcept {
     // Per IEEE 1394, broadcast requests (destID=0xFFFF) do not get responses.
@@ -171,6 +176,106 @@ void ResponseSender::SendReadQuadletResponse(const ARPacketView& request,
                 destID,
                 static_cast<unsigned>(rcode),
                 quadletData);
+}
+
+void ResponseSender::SendLockResponse(const ARPacketView& request,
+                                      ResponseCode rcode,
+                                      uint16_t extendedTCode,
+                                      uint32_t oldValue) noexcept {
+    // Per IEEE 1394, broadcast requests (destID=0xFFFF) do not get responses.
+    if (request.destID == 0xFFFF) {
+        ASFW_LOG_V3(Async, "ResponseSender: skip LockResp for broadcast destID=0xFFFF");
+        return;
+    }
+
+    if (request.tCode != 0x9) {
+        ASFW_LOG_V3(Async, "ResponseSender: skip LockResp for non-lock tCode=0x%x", request.tCode);
+        return;
+    }
+
+    auto* atRspCtx = ctxMgr_.GetAtResponseContext();
+    if (atRspCtx == nullptr) {
+        ASFW_LOG_ERROR(Async, "ResponseSender: ATResponseContext unavailable, cannot send LockResp");
+        return;
+    }
+
+    const uint16_t destID = request.sourceID;
+    const uint8_t  tLabel = static_cast<uint8_t>(request.tLabel & 0x3F);
+
+    // The lock response carries the prior quadlet as a 4-byte data block. The OHCI
+    // transmits payload bytes verbatim (it byte-swaps headers, not payload), so the
+    // old value must be pre-arranged in big-endian wire order — mirroring the operand
+    // packing in CMPClient::CompareSwapPCR.
+    const std::array<uint8_t, 4> oldBE{
+        static_cast<uint8_t>((oldValue >> 24) & 0xFFU),
+        static_cast<uint8_t>((oldValue >> 16) & 0xFFU),
+        static_cast<uint8_t>((oldValue >> 8) & 0xFFU),
+        static_cast<uint8_t>(oldValue & 0xFFU),
+    };
+
+    constexpr uint64_t kResponsePayloadDirection = kIOMemoryDirectionInOut; // host writes, controller reads
+    auto payload = PayloadContext::Create(hw_, oldBE.data(), oldBE.size(), kResponsePayloadDirection);
+    if (!payload) {
+        ASFW_LOG_ERROR(Async, "ResponseSender: failed to allocate LockResp payload buffer");
+        return;
+    }
+    const uint64_t payloadDeviceAddress = payload->DeviceAddress();
+    if (payloadDeviceAddress == 0) {
+        ASFW_LOG_ERROR(Async, "ResponseSender: LockResp payload has no device address");
+        return;
+    }
+
+    // OHCI AT lock-response header (4 quadlets), per Linux ohci.c at_context_queue_packet:
+    //   h0: srcBusID | speed | tLabel | retry | tCode(0xB) | priority
+    //   h1: destID<<16 | rCode<<12
+    //   h2: reserved (responses carry no offset)
+    //   h3: dataLength<<16 | extended_tCode (lock is a block packet)
+    uint32_t header[4]{};
+    constexpr uint8_t kSrcBusID = 0;
+    constexpr uint8_t kSpeedS400 = 0x02;
+    constexpr uint8_t kRetryX = 1;
+    constexpr uint8_t kTCodeLockResponse = 0xB;
+    constexpr uint8_t kPriority = 0;
+    constexpr uint16_t kLockRespDataLength = 4;
+
+    header[0] = (static_cast<uint32_t>(kSrcBusID & 0x01) << 23) |
+                (static_cast<uint32_t>(kSpeedS400 & 0x07) << 16) |
+                (static_cast<uint32_t>(tLabel) << 10) |
+                (static_cast<uint32_t>(kRetryX) << 8) |
+                (static_cast<uint32_t>(kTCodeLockResponse) << 4) |
+                (static_cast<uint32_t>(kPriority) & 0xF);
+    header[1] = (static_cast<uint32_t>(destID) << 16) |
+                (static_cast<uint32_t>(static_cast<uint8_t>(rcode)) << 12);
+    header[2] = 0;
+    header[3] = (static_cast<uint32_t>(kLockRespDataLength) << 16) |
+                static_cast<uint32_t>(extendedTCode);
+
+    auto chain = builder_.BuildTransactionChain(
+        header,
+        sizeof(header),
+        payloadDeviceAddress,
+        kLockRespDataLength,
+        /*needsFlush*/ true);
+    if (chain.Empty()) {
+        ASFW_LOG_ERROR(Async, "ResponseSender: failed to build LockResp descriptor chain");
+        return;
+    }
+
+    const auto submitRes = submitter_.submit_tx_chain(atRspCtx, std::move(chain));
+    if (submitRes.kr != kIOReturnSuccess) {
+        ASFW_LOG_ERROR(Async, "ResponseSender: submit_tx_chain failed for LockResp (kr=0x%x)",
+                       submitRes.kr);
+        return;
+    }
+
+    // Retain the payload buffer past TX completion via ring reuse (see header).
+    // IntoShared transfers ownership to a shared_ptr<void> with a type-correct deleter.
+    lockRespPayloads_[lockRespPayloadIdx_] = PayloadContext::IntoShared(std::move(payload));
+    lockRespPayloadIdx_ = (lockRespPayloadIdx_ + 1) % kLockResponsePayloadSlots;
+
+    ASFW_LOG_V2(Async,
+                "ResponseSender: LockResp queued (tLabel=%u dst=0x%04x rcode=0x%x extTcode=0x%x old=0x%08x)",
+                tLabel, destID, static_cast<unsigned>(rcode), extendedTCode, oldValue);
 }
 
 } // namespace ASFW::Async

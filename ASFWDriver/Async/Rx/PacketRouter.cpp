@@ -135,6 +135,17 @@ void PacketRouter::SendReadQuadletResponse(const ARPacketView& request,
     responseSender_->SendReadQuadletResponse(request, rcode, quadletData);
 }
 
+void PacketRouter::SendLockResponse(const ARPacketView& request,
+                                    ResponseCode rcode,
+                                    uint16_t extendedTCode,
+                                    uint32_t oldValue) noexcept {
+    if (!responseSender_) {
+        ASFW_LOG_ERROR(Async, "PacketRouter: response sender unavailable for lock response");
+        return;
+    }
+    responseSender_->SendLockResponse(request, rcode, extendedTCode, oldValue);
+}
+
 uint8_t PacketRouter::ExtractTCode(std::span<const uint8_t> header) noexcept {
     // Phase 2.2: Bounds-checked access via std::span
     if (header.size() < 1) return 0;

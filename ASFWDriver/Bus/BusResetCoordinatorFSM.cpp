@@ -140,6 +140,12 @@ BusResetCoordinator::StepResult BusResetCoordinator::StepRestoringConfigROM() {
                 }
             }
         }
+
+        // Apple finishedBusScan parity: assert/clear LinkControl.cycleMaster for the
+        // current generation's root. Re-evaluated every scan; if a delegation reset is
+        // pending the next generation re-applies with the new root, so this is
+        // self-correcting and reflects live NodeID.root each time.
+        ApplyCycleMaster(*cycle_.acceptedTopology);
     }
 
     TransitionTo(State::ClearingBusReset, "Config ROM restored");

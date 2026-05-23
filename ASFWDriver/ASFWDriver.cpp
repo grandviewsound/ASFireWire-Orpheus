@@ -378,6 +378,85 @@ kern_return_t IMPL(ASFWDriver, Start) {
                     return ASFW::Async::ResponseCode::NoResponse;
                 });
             ASFW_LOG(Controller, "✅ Local PCR CSR responder wired to PacketRouter (tCode 0x4)");
+
+            // Apple parity (gap 3.3): the host PCR space is an IOFWPseudoAddressSpace
+            // that answers READ + WRITE + LOCK. CMP connections lock the talker plug
+            // via compareSwap (tCode 0x9). We now back that: compareSwap our local PCR
+            // register file and return the prior quadlet in a tCode 0xB lock response.
+            // Also serves as the inbound device-transaction diagnostic (logs every lock,
+            // including the raw operand bytes, so the wire byte order is verifiable).
+            router->RegisterRequestHandler(
+                0x9, // tCode for Lock Request
+                [router, cmp = ctx.deps.cmpClient.get()](const ASFW::Async::ARPacketView& packet) {
+                    if (!router || !cmp) {
+                        return ASFW::Async::ResponseCode::NoResponse;
+                    }
+                    // OHCI AR lock request: 16-byte header + 8-byte operand
+                    // (compare quadlet + swap quadlet); extended_tCode in header q3 low.
+                    if (packet.header.size() < 16 || packet.payload.size() < 8) {
+                        return ASFW::Async::ResponseCode::NoResponse;
+                    }
+
+                    const uint64_t destOffset = ASFW::Async::ExtractDestOffset(packet.header);
+                    const uint16_t addressHi = static_cast<uint16_t>((destOffset >> 32) & 0xFFFFu);
+                    const uint32_t addressLo = static_cast<uint32_t>(destOffset & 0xFFFFFFFFu);
+                    if (addressHi != kCSRRegisterSpaceHi) {
+                        return ASFW::Async::ResponseCode::NoResponse; // not our CSR space
+                    }
+
+                    // header q3 (bytes 12-15) is byteswapped to LE in AR memory; its low
+                    // 16 bits are extended_tCode (0x2 = compare_swap).
+                    const uint16_t extTcode = static_cast<uint16_t>(
+                        (static_cast<uint16_t>(packet.header[13]) << 8) | packet.header[12]);
+
+                    // Operands are wire big-endian (mirrors CMPClient::CompareSwapPCR).
+                    const auto beLoad = [](const uint8_t* p) -> uint32_t {
+                        return (static_cast<uint32_t>(p[0]) << 24) |
+                               (static_cast<uint32_t>(p[1]) << 16) |
+                               (static_cast<uint32_t>(p[2]) << 8) |
+                               static_cast<uint32_t>(p[3]);
+                    };
+                    const uint32_t expected = beLoad(packet.payload.data());
+                    const uint32_t desired = beLoad(packet.payload.data() + 4);
+
+                    if (extTcode != 0x2) { // only compare_swap is used by CMP
+                        ASFW_LOG(CMP,
+                                 "LocalPCRResponder: LOCK unsupported extTcode=0x%x addr=0x%08x "
+                                 "src=0x%04x -> TypeError",
+                                 extTcode, addressLo, packet.sourceID);
+                        router->SendLockResponse(packet, ASFW::Async::ResponseCode::TypeError,
+                                                 extTcode, 0);
+                        return ASFW::Async::ResponseCode::NoResponse;
+                    }
+
+                    bool swapped = false;
+                    const auto oldOpt =
+                        cmp->CompareSwapLocalPcr(addressLo, expected, desired, &swapped);
+                    if (!oldOpt.has_value()) {
+                        ASFW_LOG(CMP,
+                                 "LocalPCRResponder: LOCK addr=0x%08x not a backed PCR -> AddressError",
+                                 addressLo);
+                        router->SendLockResponse(packet, ASFW::Async::ResponseCode::AddressError,
+                                                 extTcode, 0);
+                        return ASFW::Async::ResponseCode::NoResponse;
+                    }
+
+                    const uint32_t oldValue = *oldOpt;
+                    ASFW_LOG(CMP,
+                             "LocalPCRResponder: LOCK %{public}s addr=0x%08x cmp=0x%08x swap=0x%08x "
+                             "old=0x%08x swapped=%d src=0x%04x tLabel=%u "
+                             "rawpld=%02x%02x%02x%02x:%02x%02x%02x%02x",
+                             LocalPCRName(addressLo), addressLo, expected, desired, oldValue,
+                             swapped, packet.sourceID, packet.tLabel, packet.payload[0],
+                             packet.payload[1], packet.payload[2], packet.payload[3],
+                             packet.payload[4], packet.payload[5], packet.payload[6],
+                             packet.payload[7]);
+                    router->SendLockResponse(packet, ASFW::Async::ResponseCode::Complete, extTcode,
+                                             oldValue);
+                    return ASFW::Async::ResponseCode::NoResponse;
+                });
+            ASFW_LOG(Controller,
+                     "✅ Local PCR CSR lock responder wired to PacketRouter (tCode 0x9)");
         }
     }
 

@@ -400,7 +400,8 @@ kern_return_t AsyncSubsystem::ProvisionAsyncDataPath(const char*& failureStage) 
                                            *generationTracker_, *packetRouter_);
 
     responseSender_ = std::make_unique<ResponseSender>(*descriptorBuilderResponse_, *submitter_,
-                                                       *contextManager_, *generationTracker_);
+                                                       *contextManager_, *generationTracker_,
+                                                       *hardware_);
     packetRouter_->SetResponseSender(responseSender_.get());
 
     ASFW_LOG(Async, "✓ ContextManager provisioned");
