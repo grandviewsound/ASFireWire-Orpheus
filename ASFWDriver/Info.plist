@@ -88,7 +88,7 @@
 			<key>ASFWEnableHexDumps</key>
 			<false/>
 			<key>ASFWEnableIsochTxVerifier</key>
-			<true/>
+			<false/>
 			<key>ASFWEnableMIDITxSelfTest</key>
 			<true/>
 			<key>ASFWEnableMIDIRxSelfTest</key>
