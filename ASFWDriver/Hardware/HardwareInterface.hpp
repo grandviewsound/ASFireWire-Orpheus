@@ -62,6 +62,14 @@ class HardwareInterface {
 
     void IntMaskClear(uint32_t bits);
 
+    /// Enable/disable a channel in the IR multi-channel receive mask
+    /// (OHCI IsochReceiveChannelMask regs 0x70/0x78). Faithful to Apple's
+    /// AppleFWOHCI_MultiIsochReceiver::addIsochChannel: ch 0–31 → LoSet/Clear
+    /// (0x78/0x7C), ch 32–63 → HiSet/Clear (0x70/0x74). Only meaningful for an
+    /// IR context running in multiChanMode (ContextControl bit28).
+    void AddIsochReceiveChannel(uint8_t channel) noexcept;
+    void RemoveIsochReceiveChannel(uint8_t channel) noexcept;
+
     void SetContender(bool enable);
 
     void InitializePhyReg4Cache();
@@ -71,6 +79,13 @@ class HardwareInterface {
     [[nodiscard]] std::optional<uint8_t> ReadPhyRegister(uint8_t address);
     [[nodiscard]] bool WritePhyRegister(uint8_t address, uint8_t value);
     [[nodiscard]] bool UpdatePhyRegister(uint8_t address, uint8_t clearBits, uint8_t setBits);
+
+    /// Apply the Agere/LSI (FW643-family) PHY init errata that Apple's
+    /// AppleFWOHCI::initLink performs for PCI 0x11C1:0x5901/0x5903 (paged PHY
+    /// writes reg7=0xEA, reg8=0x13, reg9=0x94, then reg7=0xE7 and reg0xB &= 0x7F).
+    /// No-op unless the Agere/LSI quirk was detected. Returns false if a PHY
+    /// access failed (matches Apple's bail-on-error behavior).
+    bool ApplyAgereLsiPhyErrata();
 
     struct DMABuffer {
         OSSharedPtr<IOBufferMemoryDescriptor> descriptor;

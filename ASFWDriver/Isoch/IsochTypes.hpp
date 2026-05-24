@@ -46,6 +46,7 @@ namespace ContextControl {
     // IR Specific (OHCI §10.2.2):
     constexpr uint32_t kIsochHeader         = (1 << 30); // isochHeader (preserve isochronous headers in buffer)
     constexpr uint32_t kBufferFill          = (1 << 31); // bufferFill mode
+    constexpr uint32_t kMultiChanMode       = (1 << 28); // IR multi-channel receive (Apple MultiIsochReceiver type 3)
 
     // Mask of all writable bits (for safe clearing)
     constexpr uint32_t kWritableBits        = kRun | kWake | kCycleMatchEnable;

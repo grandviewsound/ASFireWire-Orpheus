@@ -387,9 +387,20 @@ void LogIsochChannelPositionMap(const char* label, const std::vector<uint8_t>& m
 constexpr uint32_t kAVCSpecID = 0x00A02D;
 constexpr uint32_t kDuetPrefetchTimeoutMs = 1200;
 
-/// Post-reset stabilization delay for devices that need time before accepting
-/// AV/C commands (e.g., Prism Sound Orpheus — hardware initialization window).
-constexpr uint32_t kOrpheusInitDelayMs = 5000;
+/// Post-reset stabilization delay before AV/C discovery (Prism Sound Orpheus).
+///
+/// History: was 5000 ms — a band-aid added when early AV/C commands appeared to
+/// fail. That symptom was almost certainly the AR-WAKE drop bug (fixes 64–67)
+/// silently dropping the device's FCP responses, NOT the device being un-ready:
+/// Apple attaches the same Orpheus in ~1.3 s with NO blanket wait, and the
+/// device answers in 1–2 ms once responses aren't dropped. With AR-WAKE fixed,
+/// this delay is the dominant remaining attach-time cost (~5 s of ~13 s).
+///
+/// Reduced to 1000 ms (keeps a small settle margin vs Apple's zero). PENDING HW
+/// CONFIRMATION: if a cold attach regresses (early discovery FCP timeouts /
+/// CMD-A verification timeout), raise this back toward 2000–5000 ms — the test
+/// data reveals the device's real settle requirement.
+constexpr uint32_t kOrpheusInitDelayMs = 1000;
 constexpr uint32_t kClassIdPhantomPower = static_cast<uint32_t>('phan');
 constexpr uint32_t kClassIdPhaseInvert = static_cast<uint32_t>('phsi');
 constexpr uint32_t kScopeInput = static_cast<uint32_t>('inpt');

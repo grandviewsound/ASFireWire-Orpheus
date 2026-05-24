@@ -481,6 +481,12 @@ kern_return_t ControllerCore::InitialiseHardware(IOService* provider) {
 
     phyConfigOk_ = phyConfigOk;
 
+    // Step 5a2: Apply chip-specific PHY init errata before link enable.
+    // Faithful to AppleFWOHCI::initLink, which performs a paged PHY-write
+    // sequence for the Agere/LSI FW643-family (PCI 0x11C1:0x5901/0x5903) right
+    // here in the bring-up. No-op on other controllers. Non-fatal on failure.
+    (void)hw.ApplyAgereLsiPhyErrata();
+
     // Step 5b: Finalize PHY-Link enhancement configuration (OHCI §5.7.2 + §5.7.3)
     // Per OHCI §5.7.2: "Software should clear programPhyEnable once the PHY and Link
     // have been programmed consistently." and §5.7.3: "PHY-Link enhancements shall be programmed

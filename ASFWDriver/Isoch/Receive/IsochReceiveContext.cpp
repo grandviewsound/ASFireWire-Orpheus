@@ -72,8 +72,16 @@ kern_return_t IsochReceiveContext::Start() {
         return kIOReturnNotReady;
     }
 
-    const uint32_t contextMatch = 0xF0000000 | (channel_ & 0x3F);
-    hardware_->Write(registers_.ContextMatch, contextMatch);
+    // Channel selection. Default = single-channel ContextMatch (Apple mode 2,
+    // the proven path). Multichannel mode (opt-in) ignores ContextMatch and
+    // selects channels via the IR channel-mask regs instead.
+    uint32_t contextMatch = 0;
+    if (multiChannel_) {
+        hardware_->AddIsochReceiveChannel(channel_);
+    } else {
+        contextMatch = 0xF0000000 | (channel_ & 0x3F);
+        hardware_->Write(registers_.ContextMatch, contextMatch);
+    }
 
     const uint32_t cmdPtr = rxRing_.InitialCommandPtrWord();
     if (cmdPtr == 0) {
@@ -88,9 +96,12 @@ kern_return_t IsochReceiveContext::Start() {
     // mode hardware writes packets contiguously across descriptors and
     // PacketStreamParser splits the byte stream. See
     // apple-ir-bufferfill-confirmed.md.
+    // multiChanMode (bit28) = Apple's MultiIsochReceiver context type 3
+    // (Context::start @0xac68). Only in multichannel mode; bufferFill required.
     const uint32_t ctlValue = ContextControl::kRun |
                               ContextControl::kBufferFill |
-                              ContextControl::kIsochHeader;
+                              ContextControl::kIsochHeader |
+                              (multiChannel_ ? ContextControl::kMultiChanMode : 0u);
     hardware_->Write(registers_.ContextControlSet, ctlValue);
 
     const uint32_t contextMask = 1u << contextIndex_;
@@ -132,6 +143,10 @@ void IsochReceiveContext::Stop() {
     }
 
     hardware_->Write(registers_.ContextControlClear, ContextControl::kRun);
+
+    if (multiChannel_) {
+        hardware_->RemoveIsochReceiveChannel(channel_);
+    }
 
     const uint32_t contextMask = 1u << contextIndex_;
     hardware_->Write(ASFW::Driver::Register32::kIsoRecvIntMaskClear, contextMask);

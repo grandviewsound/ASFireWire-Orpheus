@@ -74,6 +74,15 @@ public:
 
     void SetCallback(IsochReceiveCallback callback);
 
+    /// Opt-in: run this IR context in OHCI multi-channel mode (ContextControl
+    /// bit28 + IR channel-mask regs) instead of single-channel ContextMatch.
+    /// Default OFF — single-channel ContextMatch is Apple's mode 2 and the
+    /// proven path. Multichannel is for receiving >1 isoch channel in one
+    /// context (universal-remake; see multichannel-receive-impl-plan). The
+    /// channel→sink demux (step 3) is NOT yet built, so today this is only
+    /// validated to receive the single configured channel in multichannel mode.
+    void SetMultiChannelMode(bool enable) noexcept { multiChannel_ = enable; }
+
     StreamProcessor& GetStreamProcessor() { return audio_.StreamProcessorRef(); }
 
     void SetSharedRxQueue(void* base, uint64_t bytes);
@@ -92,6 +101,7 @@ private:
     Registers registers_{};
     uint8_t contextIndex_{0xFF};
     uint8_t channel_{0xFF};
+    bool multiChannel_{false};
 
     ::ASFW::Driver::HardwareInterface* hardware_{nullptr};
     std::shared_ptr<::ASFW::Isoch::Memory::IIsochDMAMemory> dmaMemory_{nullptr};

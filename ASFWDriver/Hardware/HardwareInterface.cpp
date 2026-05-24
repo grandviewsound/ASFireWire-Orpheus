@@ -74,9 +74,12 @@ kern_return_t HardwareInterface::Attach(IOService* owner, IOService* provider) {
     pci->ConfigurationRead16(kIOPCIConfigurationOffsetVendorID, &vendorId);
     pci->ConfigurationRead16(kIOPCIConfigurationOffsetDeviceID, &deviceId);
 
-    quirk_agere_lsi_ = (vendorId == 0x11c1 && (deviceId == 0x5901 || deviceId == 0x5900));
+    // Apple's initLink applies the PHY errata to 0x5901/0x5903; 0x5900 is the
+    // same FW643-family silicon and shares the AT-retry behavior, so we keep it.
+    quirk_agere_lsi_ =
+        (vendorId == 0x11c1 && (deviceId == 0x5901 || deviceId == 0x5903 || deviceId == 0x5900));
     if (quirk_agere_lsi_) {
-        ASFW_LOG(Hardware, "⚠️  Agere/LSI chipset detected");
+        ASFW_LOG(Hardware, "⚠️  Agere/LSI chipset detected (device=0x%04x)", deviceId);
     }
 
     uint16_t command = 0;
@@ -492,6 +495,49 @@ bool HardwareInterface::UpdatePhyRegister(uint8_t address, uint8_t clearBits, ui
     return WritePhyRegisterUnlocked(address, newValue);
 }
 
+bool HardwareInterface::ApplyAgereLsiPhyErrata() {
+    if (!quirk_agere_lsi_) {
+        return true;  // not an Agere/LSI part — nothing to do
+    }
+
+    // Faithful to AppleFWOHCI::initLink (x86_64 @0x3bab / 0x4033): a paged PHY
+    // write sequence the FW643-family silicon requires. reg7 is the PHY
+    // page/port-select; 0xEA/0xE7 select the pages holding regs 8/9 and 0xB.
+    // Apple bails (non-fatal) on any PHY access failure, so we do the same.
+    struct PhyWrite { uint8_t reg; uint8_t val; };
+    static constexpr PhyWrite kErrataPage1[] = {
+        {7, 0xEA}, {8, 0x13}, {9, 0x94},
+    };
+
+    for (const auto& w : kErrataPage1) {
+        if (!WritePhyRegister(w.reg, w.val)) {
+            ASFW_LOG(Hardware, "Agere PHY errata: write reg%u=0x%02x failed (bailing, non-fatal)",
+                     w.reg, w.val);
+            return false;
+        }
+    }
+
+    // Second page: select via reg7=0xE7, then mask the high bit of reg 0xB.
+    if (!WritePhyRegister(7, 0xE7)) {
+        ASFW_LOG(Hardware, "Agere PHY errata: write reg7=0xE7 failed (bailing, non-fatal)");
+        return false;
+    }
+    const auto regB = ReadPhyRegister(0x0B);
+    if (!regB.has_value()) {
+        ASFW_LOG(Hardware, "Agere PHY errata: read reg0xB failed (bailing, non-fatal)");
+        return false;
+    }
+    const uint8_t maskedB = static_cast<uint8_t>(regB.value() & 0x7F);
+    if (!WritePhyRegister(0x0B, maskedB)) {
+        ASFW_LOG(Hardware, "Agere PHY errata: write reg0xB=0x%02x failed (bailing, non-fatal)",
+                 maskedB);
+        return false;
+    }
+
+    ASFW_LOG(Hardware, "✅ Agere/LSI PHY errata applied (reg7/8/9 + reg0xB&0x7F)");
+    return true;
+}
+
 bool HardwareInterface::ReadIntEvent(uint32_t& value) {
     if (!device_) {
         return false;
@@ -521,6 +567,30 @@ void HardwareInterface::IntMaskClear(uint32_t bits) {
         return;
     }
     device_->MemoryWrite32(barIndex_, static_cast<uint64_t>(Register32::kIntMaskClear), bits);
+    FlushPostedWrites();
+}
+
+void HardwareInterface::AddIsochReceiveChannel(uint8_t channel) noexcept {
+    if (!device_ || channel > 63) {
+        return;
+    }
+    // ch 0–31 → Lo mask (0x078), ch 32–63 → Hi mask (0x070). Set registers:
+    // writing a 1-bit sets that channel. (Apple addIsochChannel @0x19b82.)
+    const Register32 reg = (channel < 32) ? Register32::kIRMultiChanMaskLoSet
+                                          : Register32::kIRMultiChanMaskHiSet;
+    const uint32_t bit = 1u << (channel & 0x1F);
+    device_->MemoryWrite32(barIndex_, static_cast<uint64_t>(reg), bit);
+    FlushPostedWrites();
+}
+
+void HardwareInterface::RemoveIsochReceiveChannel(uint8_t channel) noexcept {
+    if (!device_ || channel > 63) {
+        return;
+    }
+    const Register32 reg = (channel < 32) ? Register32::kIRMultiChanMaskLoClear
+                                          : Register32::kIRMultiChanMaskHiClear;
+    const uint32_t bit = 1u << (channel & 0x1F);
+    device_->MemoryWrite32(barIndex_, static_cast<uint64_t>(reg), bit);
     FlushPostedWrites();
 }
 
