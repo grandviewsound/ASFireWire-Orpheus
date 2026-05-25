@@ -90,7 +90,7 @@
 			<key>ASFWEnableIsochTxVerifier</key>
 			<false/>
 			<key>ASFWSytNoInfoDiagnostic</key>
-			<true/>
+			<false/>
 			<key>ASFWEnableMIDITxSelfTest</key>
 			<true/>
 			<key>ASFWEnableMIDIRxSelfTest</key>

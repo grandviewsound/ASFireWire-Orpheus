@@ -8,6 +8,7 @@
 #include "../../Protocols/Audio/IDeviceProtocol.hpp"
 #include "../../Protocols/AVC/AVCDefs.hpp"
 #include "../../Protocols/AVC/IAVCDiscovery.hpp"
+#include "../../IRM/IRMTypes.hpp"   // CalculateBandwidthUnits / BandwidthUnitsRequest
 
 #include <DriverKit/IOLib.h>
 #include <DriverKit/IOBufferMemoryDescriptor.h>
@@ -137,6 +138,69 @@ bool AVCAudioBackend::WaitForIRM(std::atomic<bool>& done,
         IOSleep(kPollMs);
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// IRM isochronous bandwidth for the host-talker IT (host→device) channel.
+// Apple's working driver reserves BANDWIDTH_AVAILABLE (0xF0000220) in addition to
+// claiming the channel; ours historically claimed only the channel. A talker must
+// reserve bus bandwidth for the channel it transmits on — faithful + correct for the
+// universal remake. Best-effort: failure here NEVER blocks streaming (the device
+// ingests regardless of host bandwidth bookkeeping), so we log and continue.
+// ---------------------------------------------------------------------------
+void AVCAudioBackend::AllocateItBandwidth(uint16_t payloadQuadlets,
+                                          uint8_t itChannel) noexcept {
+    if (irmClient_ == nullptr || payloadQuadlets == 0 || activeItBandwidthUnits_ != 0) {
+        return;
+    }
+    // Worst case = one max-size data packet every isochronous cycle (8000 Hz).
+    // payloadQuadlets already = AM824 data blocks + 2 CIP quadlets (the on-wire payload).
+    // TODO(universality): derive speedMbps from the negotiated connection speed rather
+    // than hard-coding S400 (current Orpheus connection speed; see kConnectionSpeed).
+    const uint32_t pktBytes   = static_cast<uint32_t>(payloadQuadlets) * 4U;
+    const uint32_t bitsPerSec = pktBytes * 8U * 8000U;
+    const uint32_t bwUnits = ASFW::IRM::CalculateBandwidthUnits(
+        {bitsPerSec, /*speedMbps S400*/ 400U, /*overheadPercent*/ 10U});
+    if (bwUnits == 0) {
+        return;
+    }
+
+    std::atomic<bool> done{false};
+    std::atomic<ASFW::IRM::AllocationStatus> status{ASFW::IRM::AllocationStatus::Failed};
+    irmClient_->AllocateBandwidth(bwUnits,
+        [&done, &status](ASFW::IRM::AllocationStatus s) {
+            status.store(s, std::memory_order_release);
+            done.store(true, std::memory_order_release);
+        });
+    if (WaitForIRM(done, status, 250)) {
+        activeItBandwidthUnits_ = bwUnits;
+        ASFW_LOG(Audio,
+                 "AVCAudioBackend: IRM allocated %u bandwidth units for IT channel %u "
+                 "(payload=%u quadlets, S400)",
+                 bwUnits, itChannel, payloadQuadlets);
+    } else {
+        ASFW_LOG(Audio,
+                 "AVCAudioBackend: IRM bandwidth alloc (%u units) for IT channel %u did not "
+                 "complete — continuing without it (non-fatal)",
+                 bwUnits, itChannel);
+    }
+}
+
+void AVCAudioBackend::ReleaseItBandwidth() noexcept {
+    if (irmClient_ == nullptr || activeItBandwidthUnits_ == 0) {
+        return;
+    }
+    const uint32_t units = activeItBandwidthUnits_;
+    std::atomic<bool> done{false};
+    std::atomic<ASFW::IRM::AllocationStatus> status{ASFW::IRM::AllocationStatus::Failed};
+    irmClient_->ReleaseBandwidth(units,
+        [&done, &status](ASFW::IRM::AllocationStatus s) {
+            status.store(s, std::memory_order_release);
+            done.store(true, std::memory_order_release);
+        });
+    (void)WaitForIRM(done, status, 250);
+    activeItBandwidthUnits_ = 0;
+    ASFW_LOG(Audio, "AVCAudioBackend: IRM released %u IT-channel bandwidth units", units);
 }
 
 // ---------------------------------------------------------------------------
@@ -573,6 +637,7 @@ IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
             cmpClient_->DisconnectOPCR(0, [](ASFW::CMP::CMPStatus) {});
             opcrConnected = false;
         }
+        ReleaseItBandwidth();
         releaseChannel(itChannel);
         releaseChannel(irChannel);
         itChannel = kInvalidIsochChannel;
@@ -767,6 +832,9 @@ IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
             }
             if (payloadQuadlets != 0) {
                 cmpClient_->SetLocalOutputPayloadQuadlets(0, payloadQuadlets);
+                // Apple parity: reserve isoch bus bandwidth for our talker (IT) channel,
+                // not just the channel itself. Best-effort, non-fatal (see AllocateItBandwidth).
+                AllocateItBandwidth(payloadQuadlets, itChannel);
             }
         }
         preparePlaybackPath();
@@ -980,6 +1048,7 @@ void AVCAudioBackend::TearDownPipeline(uint64_t guid) noexcept {
             (void)WaitForIRM(done, status, 250);
         };
 
+        ReleaseItBandwidth();
         releaseChannel(itChannel);
         releaseChannel(irChannel);
     }

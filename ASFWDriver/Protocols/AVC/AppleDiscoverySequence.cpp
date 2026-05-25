@@ -267,7 +267,10 @@ AppleDiscoverySequence::SendRaw(std::initializer_list<uint8_t> bytes) {
 void AppleDiscoverySequence::ReadDescriptorChunked(uint8_t subunitAddr,
                                                     uint8_t descriptorId,
                                                     std::vector<uint8_t>& outData) {
-    static constexpr uint16_t kChunkSize       = 0x84;  // Apple's chunk size (132 bytes)
+    // Orpheus's observed per-response max (132 B). We no longer cap the requested
+    // data_length to this (we ask for the remaining count, like Apple — see below); kept
+    // for documentation / as a sanity reference for the device's response size.
+    [[maybe_unused]] static constexpr uint16_t kChunkSize = 0x84;
     static constexpr uint32_t kMaxChunks       = 64;    // safety cap (64 * 132 ≈ 8 KiB)
     static constexpr uint16_t kMaxDescriptorLen = 8192; // sanity ceiling
     static constexpr uint16_t kSafetyMargin    = 64;    // for devices that under-report length
@@ -347,17 +350,24 @@ void AppleDiscoverySequence::ReadDescriptorChunked(uint8_t subunitAddr,
         uint32_t remainingToTarget = (outData.size() < targetBytes)
                                    ? (targetBytes - static_cast<uint32_t>(outData.size()))
                                    : 0;
-        uint16_t readLen = static_cast<uint16_t>(std::min<uint32_t>(remainingToTarget, kChunkSize));
-        if (readLen == 0) { break; }
+        if (remainingToTarget == 0) { break; }
 
-        uint16_t offset = static_cast<uint16_t>(outData.size());
+        // Apple-faithful data_length: the working old-Mac driver puts the *remaining*
+        // byte count in the READ DESCRIPTOR data_length field (it decreases as the read
+        // advances) — NOT a fixed per-chunk size. Confirmed by the 2026-05-25 old-Mac
+        // capture (reports/golden_capture_analysis_2026-05-25.md): len 0x0913→0x088f→…
+        // while the read address steps by 0x84. The device still returns at most its own
+        // max (0x84 for Orpheus) per response, so chunking is unchanged; this only matches
+        // Apple on the wire and is friendlier to devices whose max response is larger.
+        uint16_t wireLen = static_cast<uint16_t>(std::min<uint32_t>(remainingToTarget, 0xFFFFU));
+        uint16_t offset  = static_cast<uint16_t>(outData.size());
 
         // Wire: [00 <subunit> 09 <descId> ff ff <lenHi> <lenLo> <offHi> <offLo>]
         uint8_t cmd[] = {
             0x00, subunitAddr, 0x09, descriptorId,
             0xFF, 0xFF,
-            static_cast<uint8_t>((readLen >> 8) & 0xFF),
-            static_cast<uint8_t>(readLen & 0xFF),
+            static_cast<uint8_t>((wireLen >> 8) & 0xFF),
+            static_cast<uint8_t>(wireLen & 0xFF),
             static_cast<uint8_t>((offset >> 8) & 0xFF),
             static_cast<uint8_t>(offset & 0xFF)
         };

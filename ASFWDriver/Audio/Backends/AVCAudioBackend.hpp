@@ -58,6 +58,13 @@ private:
                                   std::atomic<ASFW::IRM::AllocationStatus>& status,
                                   uint32_t timeoutMs) noexcept;
 
+    // IRM isochronous bandwidth alloc/release for the host-talker IT channel.
+    // Apple reserves BANDWIDTH_AVAILABLE alongside the channel; we mirror that. Both are
+    // best-effort + synchronous (WaitForIRM): a failure NEVER blocks streaming. Allocate
+    // records activeItBandwidthUnits_; Release frees exactly that and zeroes it.
+    void AllocateItBandwidth(uint16_t payloadQuadlets, uint8_t itChannel) noexcept;
+    void ReleaseItBandwidth() noexcept;
+
     // Attach-time pipeline bring-up / detach-time teardown.
     //
     // Apr 13 2026: The full isoch pipeline (IRM + CMP + IT + IR + ExtFmt)
@@ -92,6 +99,10 @@ private:
     // releases the same ones. 0xFF means "not allocated".
     uint8_t activeIrChannel_{0xFF};
     uint8_t activeItChannel_{0xFF};
+    // IRM isochronous bandwidth allocated for the host-talker IT channel (host→device).
+    // Apple allocates bandwidth (BANDWIDTH_AVAILABLE) alongside the channel; we mirror that.
+    // Tracked so teardown releases exactly what was allocated. 0 = none allocated.
+    uint32_t activeItBandwidthUnits_{0};
 };
 
 } // namespace ASFW::Audio
