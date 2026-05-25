@@ -59,8 +59,15 @@ private:
     /// 24.576 MHz ticks per 125 us bus cycle
     static constexpr uint32_t kTicksPerCycle = 3072;
 
-    /// OHCI DMA pipeline latency (~479 us, Linux TRANSFER_DELAY constant)
-    static constexpr uint32_t kTransferDelayTicks = 0x2E00;  // 11776 ticks
+    /// Transfer delay (presentation offset ahead of transmit).
+    /// Was 0x2E00 (Linux TRANSFER_DELAY) → sub-cycle offset 0xA00. The Apple
+    /// golden sniffer capture (research/captures/.../passive_sniffer_run.txt)
+    /// shows Apple's SYT sub-cycle offset based at ~0x4CF, so 3 whole cycles +
+    /// 0x4CF = 0x28CF matches Apple's base. NOTE: this only fixes the BASE
+    /// offset — it does NOT reproduce Apple's per-packet drift (Apple derives
+    /// SYT from HOST time via CalculateNewTimeStamp, tracking host-audio vs
+    /// FW-bus clock; ours is nominal). See may24-golden-diff-syt-offset-drift.
+    static constexpr uint32_t kTransferDelayTicks = 0x28CF;  // 3 cycles + 0x4CF (Apple golden base)
 
     /// Ticks per audio sample at 48 kHz: 24576000 / 48000 = 512
     static constexpr uint32_t kTicksPerSample48k = 512;
