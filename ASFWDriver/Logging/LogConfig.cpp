@@ -88,6 +88,9 @@ void LogConfig::Initialize(IOService* service) {
     isochVerbosity_.store(ReadUInt8Property(service, "ASFWIsochVerbosity", 1));
     enableHexDumps_.store(ReadBoolProperty(service, "ASFWEnableHexDumps", false));
     isochTxVerifierEnabled_.store(ReadBoolProperty(service, "ASFWEnableIsochTxVerifier", false));
+    // Diagnostic: emit no-info SYT (0xFFFF) on data packets, to test whether the
+    // device requires/validates our transmit SYT (silence investigation). Default off.
+    sytNoInfoDiagnostic_.store(ReadBoolProperty(service, "ASFWSytNoInfoDiagnostic", false));
     audioAutoStartEnabled_.store(ReadBoolProperty(service, "ASFWAutoStartAudioStreams", true));
     midiTxSelfTestEnabled_.store(ReadBoolProperty(service, "ASFWEnableMIDITxSelfTest", true));
     midiRxSelfTestEnabled_.store(ReadBoolProperty(service, "ASFWEnableMIDIRxSelfTest", true));
@@ -171,6 +174,10 @@ bool LogConfig::IsStatisticsEnabled() const {
 
 bool LogConfig::IsIsochTxVerifierEnabled() const {
     return isochTxVerifierEnabled_.load(std::memory_order_relaxed);
+}
+
+bool LogConfig::IsSytNoInfoDiagnostic() const {
+    return sytNoInfoDiagnostic_.load(std::memory_order_relaxed);
 }
 
 bool LogConfig::IsAudioAutoStartEnabled() const {

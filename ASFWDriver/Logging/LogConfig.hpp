@@ -124,6 +124,11 @@ public:
     bool IsIsochTxVerifierEnabled() const;
 
     /**
+     * @brief Diagnostic: emit no-info SYT (0xFFFF) on data packets (silence test)
+     */
+    bool IsSytNoInfoDiagnostic() const;
+
+    /**
      * @brief Check if CoreAudio-driven auto-start is enabled
      */
     bool IsAudioAutoStartEnabled() const;
@@ -252,6 +257,7 @@ private:
     std::atomic<uint8_t> isochVerbosity_;
     std::atomic<bool> enableHexDumps_;
     std::atomic<bool> isochTxVerifierEnabled_;
+    std::atomic<bool> sytNoInfoDiagnostic_;
     std::atomic<bool> audioAutoStartEnabled_;
     std::atomic<bool> midiTxSelfTestEnabled_;
     std::atomic<bool> midiRxSelfTestEnabled_;

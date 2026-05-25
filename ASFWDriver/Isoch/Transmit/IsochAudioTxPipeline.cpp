@@ -570,6 +570,13 @@ uint16_t IsochAudioTxPipeline::ComputeDataSyt(uint32_t transmitCycle) noexcept {
         return Encoding::SYTGenerator::kNoInfo;
     }
 
+    // Diagnostic (ASFWSytNoInfoDiagnostic): emit no-info SYT on data packets to
+    // test whether the device requires/validates our transmit SYT. Data blocks +
+    // DBC still flow (assembled separately); only the SYT field is suppressed.
+    if (ASFW::LogConfig::Shared().IsSytNoInfoDiagnostic()) {
+        return Encoding::SYTGenerator::kNoInfo;
+    }
+
     const uint16_t txSyt = sytGenerator_.computeDataSYT(transmitCycle, assembler_.samplesPerDataPacket());
     MaybeApplyExternalSyncDiscipline(txSyt);
     return txSyt;
