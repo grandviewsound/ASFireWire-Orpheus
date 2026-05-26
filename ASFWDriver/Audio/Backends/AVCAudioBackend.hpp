@@ -95,6 +95,14 @@ private:
     // as an idempotent no-op once the pipeline is live from the attach path.
     uint64_t pipelineGuid_{0};
 
+    // Non-zero while a BringUpPipeline call is in flight for this GUID (set at
+    // entry, cleared on exit by BringUpInProgressMarker). Protected by lock_.
+    // Lets a CoreAudio HAL StartStreaming that races the attach-time bring-up
+    // no-op instead of starting a second, channel-colliding bring-up. Distinct
+    // from pipelineGuid_ so the "live + valid channels" invariant the teardown
+    // relies on stays intact (activeIr/ItChannel_ are only valid once live).
+    uint64_t bringUpInProgressGuid_{0};
+
     // Isoch channels IRM granted at BringUpPipeline time. TearDownPipeline
     // releases the same ones. 0xFF means "not allocated".
     uint8_t activeIrChannel_{0xFF};

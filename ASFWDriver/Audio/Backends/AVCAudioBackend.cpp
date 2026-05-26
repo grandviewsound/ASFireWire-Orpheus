@@ -51,6 +51,41 @@ bool WaitForFormatVerification(IDeviceProtocol& protocol, uint32_t timeoutMs) no
     return protocol.IsFormatDone();
 }
 
+// RAII marker that publishes "a BringUpPipeline is in flight for this GUID" for
+// the lifetime of one bring-up call, then clears it on every exit path. The
+// marker lets a CoreAudio HAL StartStreaming that arrives mid-bring-up no-op
+// instead of launching a second, racing BringUpPipeline (which double-connected
+// CMP plugs onto colliding isoch channels). Apple brings the pipeline up exactly
+// once, synchronously, inside initHardware before the engine is exposed to the
+// HAL — so its StartIO equivalent never participates in bring-up. Our attach is
+// asynchronous, so we reproduce that invariant with this marker instead.
+class BringUpInProgressMarker {
+public:
+    BringUpInProgressMarker(IOLock* lock, uint64_t& slot, uint64_t guid) noexcept
+        : lock_(lock), slot_(slot) {
+        if (lock_ != nullptr) {
+            IOLockLock(lock_);
+            slot_ = guid;
+            IOLockUnlock(lock_);
+        }
+    }
+    ~BringUpInProgressMarker() noexcept {
+        if (lock_ != nullptr) {
+            IOLockLock(lock_);
+            slot_ = 0;
+            IOLockUnlock(lock_);
+        }
+    }
+    BringUpInProgressMarker(const BringUpInProgressMarker&) = delete;
+    BringUpInProgressMarker& operator=(const BringUpInProgressMarker&) = delete;
+    BringUpInProgressMarker(BringUpInProgressMarker&&) = delete;
+    BringUpInProgressMarker& operator=(BringUpInProgressMarker&&) = delete;
+
+private:
+    IOLock* lock_;
+    uint64_t& slot_;
+};
+
 } // namespace
 
 AVCAudioBackend::AVCAudioBackend(AudioNubPublisher& publisher,
@@ -216,9 +251,11 @@ IOReturn AVCAudioBackend::StartStreaming(uint64_t guid) noexcept {
     if (guid == 0) return kIOReturnBadArgument;
 
     uint64_t liveGuid = 0;
+    uint64_t inProgressGuid = 0;
     if (lock_) {
         IOLockLock(lock_);
         liveGuid = pipelineGuid_;
+        inProgressGuid = bringUpInProgressGuid_;
         IOLockUnlock(lock_);
     }
 
@@ -230,12 +267,27 @@ IOReturn AVCAudioBackend::StartStreaming(uint64_t guid) noexcept {
         return kIOReturnSuccess;
     }
 
-    // Fallback: attach-time bring-up never ran (or a different GUID is
-    // live). Happens if OnAudioConfigurationReady fired before dependencies
-    // were wired up. Bring it up now so playback still works.
+    // The attach-time bring-up is still running (CoreAudio opened the engine
+    // during BringUpPipeline's settle window). No-op and let it finish: Apple's
+    // HAL StartIO equivalent never participates in bring-up, and re-running it
+    // here is what double-connected the CMP plugs onto colliding isoch channels.
+    if (inProgressGuid == guid) {
+        ASFW_LOG(Audio,
+                 "AVCAudioBackend: StartStreaming no-op, attach-time bring-up "
+                 "already in flight GUID=0x%016llx",
+                 guid);
+        return kIOReturnSuccess;
+    }
+
+    // Genuine recovery path: pipeline is neither live nor being brought up, so
+    // the attach-time bring-up failed or never ran (e.g. OnAudioConfigurationReady
+    // fired before dependencies were wired up). Bring it up now so playback still
+    // works. This is a deviation from Apple's synchronous initHardware bring-up,
+    // kept only as a safety net for our asynchronous attach.
     ASFW_LOG_WARNING(Audio,
-                     "AVCAudioBackend: StartStreaming fallback — pipeline not live "
-                     "for GUID=0x%016llx (live=0x%016llx), bringing up now",
+                     "AVCAudioBackend: StartStreaming fallback — pipeline neither "
+                     "live nor in flight for GUID=0x%016llx (live=0x%016llx), "
+                     "bringing up now",
                      guid,
                      liveGuid);
     return BringUpPipeline(guid);
@@ -278,6 +330,13 @@ IOReturn AVCAudioBackend::StopStreaming(uint64_t guid) noexcept {
 
 IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
     if (guid == 0) return kIOReturnBadArgument;
+
+    // Publish "bring-up in flight" for the whole of this call so a CoreAudio HAL
+    // StartStreaming that arrives during the attach-time settle window no-ops
+    // rather than launching a second, channel-colliding BringUpPipeline. Cleared
+    // on every exit path; on success pipelineGuid_ (set below) takes over as the
+    // liveness marker, so StartStreaming keeps no-opping after this returns.
+    BringUpInProgressMarker inProgress(lock_, bringUpInProgressGuid_, guid);
 
     uint64_t entryLiveGuid = 0;
     if (lock_) {
