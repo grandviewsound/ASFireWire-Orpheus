@@ -97,6 +97,8 @@
 			<true/>
 			<key>ASFWHardwareVerbosity</key>
 			<integer>1</integer>
+			<key>ASFWIsochVerbosity</key>
+			<integer>3</integer>
 			<key>ASFWAutoStartAudioStreams</key>
 			<true/>
 			<key>ASFWLogStatistics</key>
