@@ -300,7 +300,26 @@ void CMPClient::PerformConnect(uint32_t pcrAddress, uint8_t plugNum,
             return;
         }
 
-        if (!PCRBits::IsOnline(current)) {
+        // Gap 2.8 (reports/apple_irm_channel_allocation_ida_pass_2026-05-19.md):
+        // a successful read of all-ones is a failed/uninitialized-plug read —
+        // 0xFFFFFFFF can never be a valid PCR (it implies p2p=63 and every
+        // reserved bit set). Apple resets it to 0 and PROCEEDS with the connect
+        // rather than bailing, so the p2p 0→1 edge initializes the plug. Match
+        // that: collapse to 0 here so the guards below see a clean zero (online=0,
+        // p2p=0 → target 1) and the connection establishes instead of failing the
+        // target>3 / not-online checks on garbage. (Genuine no-response is the
+        // !success bail above; a real 0x00000000 still falls through to the
+        // not-online bail — the analysis pass only flags the all-ones case.)
+        const bool garbageRead = (current == 0xFFFFFFFFU);
+        if (garbageRead) {
+            ASFW_LOG(CMP,
+                     "CMPClient: PCR 0x%08X read 0xFFFFFFFF (uninitialized/garbage) — "
+                     "resetting to 0 and proceeding (Apple parity, gap 2.8)",
+                     pcrAddress);
+            current = 0;
+        }
+
+        if (!garbageRead && !PCRBits::IsOnline(current)) {
             ASFW_LOG(CMP, "CMPClient: Connect failed - plug %u not online (PCR=0x%08X)",
                      plugNum, current);
             callback(CMPStatus::Failed);

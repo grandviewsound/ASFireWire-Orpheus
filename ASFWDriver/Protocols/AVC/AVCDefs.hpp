@@ -205,10 +205,19 @@ constexpr size_t kAVCOperandMaxLength = kAVCFrameMaxSize - kAVCFrameMinSize;
 // FCP Timeouts
 //==============================================================================
 
-/// Initial FCP timeout (milliseconds). Apple's AV/C spec allows 100 ms, but
-/// Orpheus takes >2 s on some commands after session-idle gaps (observed
-/// ~2022 ms on pre-CMP ExtStreamFormat CONTROL). Budget 6 s for slow targets.
-constexpr uint32_t kFCPTimeoutInitial = 6000;
+/// Initial (pre-INTERIM) FCP timeout (milliseconds). The AV/C model is a SHORT
+/// initial timeout: a target that needs longer than this MUST send an INTERIM
+/// (0x0F) response, which we detect and extend to kFCPTimeoutAfterInterim. Apple
+/// uses ~1 s here for exactly this reason and relies on INTERIM for slow targets;
+/// matching that is the universal-correct, Apple-faithful behavior.
+///
+/// The old 6000 ms budget was a workaround for apparent ~2 s latencies that were
+/// actually the AR-WAKE response-drop bug (responses dropped and re-read), not
+/// genuine device latency — fixes 64–67 cured that, and fix63-apple-log-crosscheck
+/// confirmed Orpheus answers FCP in 1–2 ms with bytes identical to Apple. Two of
+/// these 6 s stalls dominated attach time (~16 s). 1 s gives ~500x margin over
+/// real latency while letting conformant slow targets fall back to INTERIM.
+constexpr uint32_t kFCPTimeoutInitial = 1000;
 
 /// FCP timeout after interim response (milliseconds)
 constexpr uint32_t kFCPTimeoutAfterInterim = 10000;
