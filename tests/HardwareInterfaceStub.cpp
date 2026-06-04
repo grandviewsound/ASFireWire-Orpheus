@@ -153,6 +153,27 @@ void HardwareInterface::ClearIsoRecvEvents(uint32_t mask) {
     });
 }
 
+// Multichannel-receive channel-mask programming. Mirrors the real impl at the
+// register level via the stub's Write seam (records into test state) so tests
+// can assert on the Lo/Hi channel masks if needed.
+void HardwareInterface::AddIsochReceiveChannel(uint8_t channel) noexcept {
+    if (channel > 63) {
+        return;
+    }
+    const Register32 reg = (channel < 32) ? Register32::kIRMultiChanMaskLoSet
+                                          : Register32::kIRMultiChanMaskHiSet;
+    Write(reg, 1u << (channel & 0x1F));
+}
+
+void HardwareInterface::RemoveIsochReceiveChannel(uint8_t channel) noexcept {
+    if (channel > 63) {
+        return;
+    }
+    const Register32 reg = (channel < 32) ? Register32::kIRMultiChanMaskLoClear
+                                          : Register32::kIRMultiChanMaskHiClear;
+    Write(reg, 1u << (channel & 0x1F));
+}
+
 bool HardwareInterface::SendPhyConfig(std::optional<uint8_t> gapCount,
                                       std::optional<uint8_t> forceRootPhyId,
                                       std::string_view) {

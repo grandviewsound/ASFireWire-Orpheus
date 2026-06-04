@@ -42,6 +42,11 @@ class StatusPublisher {
     void BindListener(::ASFWDriverUserClient* client);
     void UnbindListener(::ASFWDriverUserClient* client);
 
+    // Gap 3.5 — deliver a local-PCR change to the bound listener (host-as-CMP-target
+    // plug-change notify; Apple IOFireWireAVCTargetSpace::pcrModified relay). Reuses
+    // the same bound-client lifecycle as status notifications.
+    void NotifyPcrChange(uint32_t plugType, uint8_t plugNum, uint32_t newValue);
+
     kern_return_t CopySharedMemory(uint64_t* options, IOMemoryDescriptor** memory) const;
 
     void SetLastAsyncCompletion(uint64_t machTime);

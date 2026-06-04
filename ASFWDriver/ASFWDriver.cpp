@@ -457,6 +457,27 @@ kern_return_t IMPL(ASFWDriver, Start) {
                 });
             ASFW_LOG(Controller,
                      "✅ Local PCR CSR lock responder wired to PacketRouter (tCode 0x9)");
+
+            // Gap 3.5 — local-PCR change notify (Apple
+            // IOFireWireAVCTargetSpace::pcrModified parity). A successful inbound
+            // peer lock (e.g. a device CMP-connecting to one of our plugs) now
+            // surfaces the (plugType, plugNum, newValue) change. For now we log it
+            // (proves the path on HW and gives observability when a peer ever drives
+            // a connection to us); a DriverKit user-client async relay to a user-space
+            // CMP client is the remaining, consumer-gated layer on top of this seam.
+            if (auto* cmp = ctx.deps.cmpClient.get()) {
+                cmp->SetPcrChangeListener(
+                    [this](ASFW::CMP::LocalPcrRegisterFile::Reg plugType,
+                           uint8_t plugNum, uint32_t newValue) {
+                        ASFW_LOG(CMP,
+                                 "LocalPCRNotify: plugType=%u plugNum=%u newValue=0x%08x "
+                                 "(peer wrote our PCR)",
+                                 static_cast<unsigned>(plugType), plugNum, newValue);
+                        // Gap 3.5 — relay to a registered user-space CMP client.
+                        DeliverPcrChange(static_cast<uint32_t>(plugType), plugNum, newValue);
+                    });
+                ASFW_LOG(Controller, "✅ Local PCR change-notify (gap 3.5) listener wired");
+            }
         }
     }
 
@@ -819,6 +840,26 @@ void ASFWDriver::UnregisterStatusListener(const OSObject* client) {
     }
 
     ivars->context->statusPublisher.UnbindListener(clientObj);
+}
+
+void ASFWDriver::RegisterPcrChangeListener(const OSObject* client) {
+    // Gap 3.5 — bind the client into the shared StatusPublisher listener slot so
+    // DeliverPcrChange (below) can reach it. No status Publish here (PCR-only).
+    auto* clientObj = OSDynamicCast(ASFWDriverUserClient, const_cast<OSObject*>(client));
+    if (!clientObj || !ivars || !ivars->context) {
+        return;
+    }
+    ivars->context->statusPublisher.BindListener(clientObj);
+}
+
+void ASFWDriver::DeliverPcrChange(uint32_t plugType, uint8_t plugNum, uint32_t newValue) {
+    // Internal entry point invoked by the CMPClient change-listener when an
+    // inbound peer lock writes one of our local PCRs. Forwards to the bound
+    // user-space listener via the StatusPublisher conduit.
+    if (!ivars || !ivars->context || ivars->context->stopping.load()) {
+        return;
+    }
+    ivars->context->statusPublisher.NotifyPcrChange(plugType, plugNum, newValue);
 }
 
 kern_return_t ASFWDriver::CopySharedStatusMemory(uint64_t* options,

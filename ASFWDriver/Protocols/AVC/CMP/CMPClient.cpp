@@ -582,7 +582,20 @@ std::optional<uint32_t> CMPClient::CompareSwapLocalPcr(uint32_t addressLo,
         }
         return std::nullopt;
     }
-    return localPcr_.CompareSwap(reg, index, expected, desired, swapped);
+
+    bool didSwap = false;
+    const auto old = localPcr_.CompareSwap(reg, index, expected, desired, &didSwap);
+    if (swapped != nullptr) {
+        *swapped = didSwap;
+    }
+
+    // Gap 3.5 — notify on a successful inbound write (Apple updatePlug →
+    // IOFireWireAVCTargetSpace::pcrModified). Fires only when the compare matched
+    // and `desired` was stored; the stored/new value is `desired`.
+    if (didSwap && pcrChangeListener_) {
+        pcrChangeListener_(reg, index, desired);
+    }
+    return old;
 }
 
 LocalPlugState CMPClient::GetLocalOutputPlug(uint8_t plugNum) const {

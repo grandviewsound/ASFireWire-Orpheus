@@ -145,6 +145,7 @@ bool LogConfig::IsAudioAutoStartEnabled() const { return true; }
 bool LogConfig::IsMIDITxSelfTestEnabled() const { return false; }
 bool LogConfig::IsMIDIRxSelfTestEnabled() const { return false; }
 bool LogConfig::IsStatisticsEnabled() const { return false; }
+bool LogConfig::IsSytNoInfoDiagnostic() const { return false; }
 
 void LogConfig::SetAsyncVerbosity(uint8_t) { /* no-op stub */ }
 void LogConfig::SetControllerVerbosity(uint8_t) { /* no-op stub */ }

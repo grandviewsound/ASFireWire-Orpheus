@@ -56,6 +56,11 @@ public:
 
     void RegisterStatusListener(const OSObject* client) LOCALONLY;
     void UnregisterStatusListener(const OSObject* client) LOCALONLY;
+
+    // Gap 3.5 — bind a user client for local-PCR change notifications, and the
+    // internal entry point the CMPClient change-listener calls on a peer lock.
+    void RegisterPcrChangeListener(const OSObject* client) LOCALONLY;
+    void DeliverPcrChange(uint32_t plugType, uint8_t plugNum, uint32_t newValue) LOCALONLY;
     kern_return_t CopySharedStatusMemory(uint64_t* options,
                                          IOMemoryDescriptor** memory) const LOCALONLY;
 

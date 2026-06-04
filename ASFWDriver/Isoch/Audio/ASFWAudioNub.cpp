@@ -29,9 +29,11 @@
 
 #include <algorithm>
 
-// TX queue capacity: Config::kTxQueueCapacityFrames frames = ~85ms @ 48kHz.
+// TX/RX shared-queue capacity is sized at allocation via
+// Config::QueueCapacityFramesForRate(rate) so the ~85ms jitter headroom holds
+// across rate families (4096 @ ≤48k base, 8192 @ 96k, 16384 @ 192k) — Apple
+// SetSampleRate parity. Unknown rate falls back to the base (kTx/RxQueueCapacityFrames).
 // ZERO-COPY: Output audio buffer size matches Config::kAudioIoPeriodFrames.
-// RX queue capacity: Config::kRxQueueCapacityFrames frames = ~85ms @ 48kHz (matches AudioRingBuffer).
 
 static ASFWDriver* GetParentASFWDriver(const ASFWAudioNub_IVars* iv)
 {
@@ -88,7 +90,8 @@ static uint32_t FallbackOutputChannels(const ASFWAudioNub_IVars* iv) {
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 static bool TryResolveRuntimeAudioChannels(ASFWAudioNub_IVars* iv,
                                            uint32_t& outInputChannels, // NOLINT(bugprone-easily-swappable-parameters)
-                                           uint32_t& outOutputChannels)
+                                           uint32_t& outOutputChannels,
+                                           uint32_t* outSampleRateHz = nullptr)
 {
     if (!iv) {
         return false;
@@ -102,6 +105,10 @@ static bool TryResolveRuntimeAudioChannels(ASFWAudioNub_IVars* iv,
     ASFW::Audio::AudioStreamRuntimeCaps caps{};
     if (!binding.protocol->GetRuntimeAudioStreamCaps(caps)) {
         return false;
+    }
+
+    if (outSampleRateHz != nullptr) {
+        *outSampleRateHz = caps.sampleRateHz;
     }
 
     if (caps.hostInputPcmChannels > ASFW::Isoch::Config::kMaxPcmChannels ||
@@ -181,7 +188,8 @@ static kern_return_t CreateTxQueue(ASFWAudioNub_IVars* iv)
 
     uint32_t inputChUnused = 0;
     uint32_t txChannels = FallbackOutputChannels(iv);
-    (void)TryResolveRuntimeAudioChannels(iv, inputChUnused, txChannels);
+    uint32_t sampleRateHz = 0;
+    (void)TryResolveRuntimeAudioChannels(iv, inputChUnused, txChannels, &sampleRateHz);
 
     if (txChannels == 0 || txChannels > ASFW::Isoch::Config::kMaxPcmChannels) {
         ASFW_LOG(Audio, "ASFWAudioNub: CreateTxQueue: invalid outputChannelCount=%u",
@@ -189,8 +197,16 @@ static kern_return_t CreateTxQueue(ASFWAudioNub_IVars* iv)
         return kIOReturnNotReady;
     }
 
+    // Scale the shared-queue depth with the device's negotiated sample-rate
+    // family so the time-domain jitter headroom stays ~constant across rates
+    // (Apple SetSampleRate parity). Unknown rate (caps unavailable) falls back
+    // to the base depth — identical to the prior fixed behavior, no regression.
+    const uint32_t capacityFrames = (sampleRateHz != 0)
+        ? ASFW::Isoch::Config::QueueCapacityFramesForRate(sampleRateHz)
+        : ASFW::Isoch::Config::kTxQueueCapacityFrames;
+
     const uint64_t bytes = ASFW::Shared::TxSharedQueueSPSC::RequiredBytes(
-        ASFW::Isoch::Config::kTxQueueCapacityFrames,
+        capacityFrames,
         txChannels);
 
     // Allocate IOBufferMemoryDescriptor
@@ -232,7 +248,7 @@ static kern_return_t CreateTxQueue(ASFWAudioNub_IVars* iv)
     // Initialize SPSC queue in shared memory
     auto* base = reinterpret_cast<void*>(map->GetAddress());
     if (const bool initOk = ASFW::Shared::TxSharedQueueSPSC::InitializeInPlace(
-            base, bytes, ASFW::Isoch::Config::kTxQueueCapacityFrames, txChannels);
+            base, bytes, capacityFrames, txChannels);
         !initOk) {
         ASFW_LOG(Audio, "ASFWAudioNub: TxSharedQueue initialization failed");
         map->release();
@@ -244,8 +260,8 @@ static kern_return_t CreateTxQueue(ASFWAudioNub_IVars* iv)
     iv->txQueueMap = map;    // retained
     iv->txQueueBytes = bytes;
 
-    ASFW_LOG(Audio, "ASFWAudioNub: TX queue created: %llu bytes, %u frames capacity, ch=%u base=%p",
-             bytes, ASFW::Isoch::Config::kTxQueueCapacityFrames, txChannels, base);
+    ASFW_LOG(Audio, "ASFWAudioNub: TX queue created: %llu bytes, %u frames capacity (rate=%uHz), ch=%u base=%p",
+             bytes, capacityFrames, sampleRateHz, txChannels, base);
 
     return kIOReturnSuccess;
 }
@@ -262,7 +278,8 @@ static kern_return_t CreateRxQueue(ASFWAudioNub_IVars* iv)
 
     uint32_t rxChannels = FallbackInputChannels(iv);
     uint32_t outputChUnused = 0;
-    (void)TryResolveRuntimeAudioChannels(iv, rxChannels, outputChUnused);
+    uint32_t sampleRateHz = 0;
+    (void)TryResolveRuntimeAudioChannels(iv, rxChannels, outputChUnused, &sampleRateHz);
 
     if (rxChannels == 0 || rxChannels > ASFW::Isoch::Config::kMaxPcmChannels) {
         ASFW_LOG(Audio, "ASFWAudioNub: CreateRxQueue: invalid inputChannelCount=%u",
@@ -270,8 +287,14 @@ static kern_return_t CreateRxQueue(ASFWAudioNub_IVars* iv)
         return kIOReturnNotReady;
     }
 
+    // Scale the shared-queue depth with the negotiated sample-rate family
+    // (see CreateTxQueue). Unknown rate → base depth (no regression).
+    const uint32_t capacityFrames = (sampleRateHz != 0)
+        ? ASFW::Isoch::Config::QueueCapacityFramesForRate(sampleRateHz)
+        : ASFW::Isoch::Config::kRxQueueCapacityFrames;
+
     const uint64_t bytes = ASFW::Shared::TxSharedQueueSPSC::RequiredBytes(
-        ASFW::Isoch::Config::kRxQueueCapacityFrames,
+        capacityFrames,
         rxChannels);
 
     // Allocate IOBufferMemoryDescriptor
@@ -313,7 +336,7 @@ static kern_return_t CreateRxQueue(ASFWAudioNub_IVars* iv)
     // Initialize SPSC queue in shared memory
     auto* base = reinterpret_cast<void*>(map->GetAddress());
     if (const bool initOk = ASFW::Shared::TxSharedQueueSPSC::InitializeInPlace(
-            base, bytes, ASFW::Isoch::Config::kRxQueueCapacityFrames, rxChannels);
+            base, bytes, capacityFrames, rxChannels);
         !initOk) {
         ASFW_LOG(Audio, "ASFWAudioNub: RX shared queue initialization failed");
         map->release();
@@ -325,8 +348,8 @@ static kern_return_t CreateRxQueue(ASFWAudioNub_IVars* iv)
     iv->rxQueueMap = map;    // retained
     iv->rxQueueBytes = bytes;
 
-    ASFW_LOG(Audio, "ASFWAudioNub: RX queue created: %llu bytes, %u frames capacity, ch=%u base=%p",
-             bytes, ASFW::Isoch::Config::kRxQueueCapacityFrames, rxChannels, base);
+    ASFW_LOG(Audio, "ASFWAudioNub: RX queue created: %llu bytes, %u frames capacity (rate=%uHz), ch=%u base=%p",
+             bytes, capacityFrames, sampleRateHz, rxChannels, base);
 
     return kIOReturnSuccess;
 }

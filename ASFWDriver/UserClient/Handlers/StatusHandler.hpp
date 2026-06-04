@@ -38,6 +38,10 @@ public:
     kern_return_t RegisterStatusListener(IOUserClientMethodArguments* args,
                                          ASFWDriverUserClient* userClient);
 
+    // Method 34: Register for host-as-CMP-target local-PCR change notifications (gap 3.5)
+    kern_return_t RegisterPcrChangeListener(IOUserClientMethodArguments* args,
+                                            ASFWDriverUserClient* userClient);
+
     // Method 11: Copy controller snapshot via ASFWDriver
     kern_return_t CopyStatusSnapshot(IOUserClientMethodArguments* args);
 

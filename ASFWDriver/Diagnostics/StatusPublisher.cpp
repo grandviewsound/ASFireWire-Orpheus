@@ -156,6 +156,18 @@ void StatusPublisher::UnbindListener(::ASFWDriverUserClient* client) {
     }
 }
 
+void StatusPublisher::NotifyPcrChange(uint32_t plugType, uint8_t plugNum, uint32_t newValue) {
+    if (!statusListener_) {
+        return;
+    }
+    if (auto* client = OSDynamicCast(ASFWDriverUserClient, statusListener_.get())) {
+        // Pack plugType (high byte) + plugNum (low byte) into one async argument.
+        const uint64_t packedPlug =
+            (static_cast<uint64_t>(plugType & 0xFFu) << 8) | static_cast<uint64_t>(plugNum);
+        client->NotifyPcrChange(packedPlug, static_cast<uint64_t>(newValue));
+    }
+}
+
 kern_return_t StatusPublisher::CopySharedMemory(uint64_t* options,
                                                 IOMemoryDescriptor** memory) const {
     if (!memory) {

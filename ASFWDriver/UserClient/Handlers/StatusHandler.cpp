@@ -202,6 +202,38 @@ kern_return_t StatusHandler::RegisterStatusListener(IOUserClientMethodArguments*
     return kIOReturnSuccess;
 }
 
+kern_return_t StatusHandler::RegisterPcrChangeListener(IOUserClientMethodArguments* args,
+                                                       ASFWDriverUserClient* userClient) {
+    if (!args || !args->completion) {
+        return kIOReturnBadArgument;
+    }
+
+    if (!userClient || !userClient->ivars || !userClient->ivars->driver) {
+        return kIOReturnNotReady;
+    }
+
+    if (!userClient->ivars->actionLock) {
+        return kIOReturnNotReady;
+    }
+
+    IOLockLock(userClient->ivars->actionLock);
+    if (userClient->ivars->pcrChangeAction) {
+        userClient->ivars->pcrChangeAction->release();
+        userClient->ivars->pcrChangeAction = nullptr;
+    }
+
+    args->completion->retain();
+    userClient->ivars->pcrChangeAction = args->completion;
+    userClient->ivars->pcrChangeRegistered = true;
+    userClient->ivars->stopping = false;
+    IOLockUnlock(userClient->ivars->actionLock);
+
+    // Bind this client so StatusPublisher::NotifyPcrChange can reach it (shared
+    // single-listener slot with the status channel; same client object).
+    userClient->ivars->driver->RegisterPcrChangeListener(userClient);
+    return kIOReturnSuccess;
+}
+
 kern_return_t StatusHandler::CopyStatusSnapshot(IOUserClientMethodArguments* args) {
     if (!args) {
         return kIOReturnBadArgument;

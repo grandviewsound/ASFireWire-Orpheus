@@ -65,6 +65,7 @@ enum {
     // Isoch Stream Control
     kMethodStartIsochReceive = 32,
     kMethodStopIsochReceive = 33,
+    kMethodRegisterPcrChangeListener = 46,  // gap 3.5 local-PCR change notify
 
     // Isoch Metrics
     kMethodGetIsochRxMetrics = 34,
@@ -89,6 +90,8 @@ bool ASFWDriverUserClient::init() {
     ivars->statusAction = nullptr;
     ivars->transactionListenerRegistered = false;
     ivars->transactionAction = nullptr;
+    ivars->pcrChangeRegistered = false;
+    ivars->pcrChangeAction = nullptr;
     ivars->actionLock = IOLockAlloc();
     if (!ivars->actionLock) {
         IOSafeDeleteNULL(ivars, ASFWDriverUserClient_IVars, 1);
@@ -126,6 +129,10 @@ void ASFWDriverUserClient::free() {
             if (ivars->transactionAction) {
                 ivars->transactionAction->release();
                 ivars->transactionAction = nullptr;
+            }
+            if (ivars->pcrChangeAction) {
+                ivars->pcrChangeAction->release();
+                ivars->pcrChangeAction = nullptr;
             }
             IOLockUnlock(ivars->actionLock);
             IOLockFree(ivars->actionLock);
@@ -256,6 +263,9 @@ kern_return_t ASFWDriverUserClient::ExternalMethod(uint64_t selector,
 
     case kMethodRegisterStatusListener:
         return runtimeState->Status().RegisterStatusListener(arguments, this);
+
+    case kMethodRegisterPcrChangeListener:
+        return runtimeState->Status().RegisterPcrChangeListener(arguments, this);
 
     case kMethodCopyStatusSnapshot:
         return runtimeState->Status().CopyStatusSnapshot(arguments);
@@ -565,6 +575,30 @@ void ASFWDriverUserClient::NotifyTransactionComplete(uint16_t handle, uint32_t s
     IOUserClientAsyncArgumentsArray data{};
     data[0] = handle;
     data[1] = status;
+    AsyncCompletion(action, kIOReturnSuccess, data, 2);
+    action->release();
+}
+
+void ASFWDriverUserClient::NotifyPcrChange(uint64_t packedPlug, uint64_t newValue) {
+    if (!ivars || !ivars->actionLock) {
+        return;
+    }
+
+    OSAction* action = nullptr;
+    IOLockLock(ivars->actionLock);
+    if (!ivars->stopping && ivars->pcrChangeRegistered && ivars->pcrChangeAction) {
+        action = ivars->pcrChangeAction;
+        action->retain();
+    }
+    IOLockUnlock(ivars->actionLock);
+
+    if (!action) {
+        return;
+    }
+
+    IOUserClientAsyncArgumentsArray data{};
+    data[0] = packedPlug;
+    data[1] = newValue;
     AsyncCompletion(action, kIOReturnSuccess, data, 2);
     action->release();
 }

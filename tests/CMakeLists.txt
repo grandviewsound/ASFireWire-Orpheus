@@ -632,27 +632,6 @@ target_compile_definitions(ResponseSenderHeaderFormatTests
 target_include_directories(ResponseSenderHeaderFormatTests PRIVATE ${ASFW_COMMON_INCLUDES})
 
 
-# Extended Stream Format Command Tests - TDD Phase 1
-add_executable(ExtendedStreamFormatCommandTests
-    "${ASFW_TESTS_DIR}/ExtendedStreamFormatCommandTests.cpp"
-    "${ASFW_DRIVER_DIR}/Protocols/AVC/ExtendedStreamFormatCommand.cpp"
-    "${ASFW_TESTS_DIR}/LoggingStubs.cpp"
-)
-
-target_link_libraries(ExtendedStreamFormatCommandTests
-    PRIVATE
-        GTest::gtest_main
-        GTest::gmock
-)
-
-target_compile_definitions(ExtendedStreamFormatCommandTests
-    PRIVATE
-        ASFW_HOST_TEST
-)
-
-target_include_directories(ExtendedStreamFormatCommandTests PRIVATE ${ASFW_COMMON_INCLUDES})
-
-
 # AVC Stream Format Command Tests - Format offset bug fix verification
 # Uses real Apogee Duet response data from FWA/discovery.txt
 add_executable(AVCStreamFormatCommandTests
@@ -949,6 +928,27 @@ target_compile_definitions(IsochDMAMemoryManagerTests
 target_include_directories(IsochDMAMemoryManagerTests PRIVATE ${ASFW_COMMON_INCLUDES})
 
 gtest_discover_tests(IsochDMAMemoryManagerTests)
+
+# CMP local-PCR change-notify (gap 3.5, host-as-CMP-target)
+add_executable(CMPLocalPcrNotifyTests
+    "${ASFW_TESTS_DIR}/CMPLocalPcrNotifyTests.cpp"
+    "${ASFW_DRIVER_DIR}/Protocols/AVC/CMP/CMPClient.cpp"
+    "${ASFW_TESTS_DIR}/LoggingStubs.cpp"
+)
+
+target_link_libraries(CMPLocalPcrNotifyTests
+    PRIVATE
+        GTest::gtest_main
+)
+
+target_compile_definitions(CMPLocalPcrNotifyTests
+    PRIVATE
+        ASFW_HOST_TEST
+)
+
+target_include_directories(CMPLocalPcrNotifyTests PRIVATE ${ASFW_COMMON_INCLUDES})
+
+gtest_discover_tests(CMPLocalPcrNotifyTests)
 
 # =============================================================================
 # Phase 1.5: AM824/AMDTP Encoding Tests

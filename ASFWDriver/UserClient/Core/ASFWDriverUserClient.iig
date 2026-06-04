@@ -66,6 +66,10 @@ public:
         // Isocho Stream Control
         kMethodStartIsochReceive       = 32,
         kMethodStopIsochReceive        = 33,
+
+        // Host-as-CMP-target local-PCR change notify (gap 3.5)
+        // (selectors 34-45 are defined in the .cpp-local enum; 46 is the next free)
+        kMethodRegisterPcrChangeListener = 46,
     };
 
     kern_return_t
@@ -132,6 +136,11 @@ public:
     void NotifyTransactionComplete(uint16_t handle,
                                    uint32_t status) LOCALONLY;
 
+    // Gap 3.5 — deliver a host-as-CMP-target local-PCR change to the registered
+    // user-space listener. packedPlug = (plugType << 8) | plugNum.
+    void NotifyPcrChange(uint64_t packedPlug,
+                         uint64_t newValue) LOCALONLY;
+
     // Note: GetDiscoveredDevices (selector 16) is handled purely through ExternalMethod
     // It returns wire format device data via structureOutput (like GetSelfIDCapture, GetTopologySnapshot)
 };
@@ -142,6 +151,8 @@ struct ASFWDriverUserClient_IVars {
     bool statusRegistered;
     OSAction* transactionAction;
     bool transactionListenerRegistered;
+    OSAction* pcrChangeAction;          // gap 3.5 local-PCR change listener
+    bool pcrChangeRegistered;
     void* runtimeState;  // ASFW::UserClient::UserClientRuntimeState* (opaque bridge)
     IOLock* actionLock;
     bool stopping;

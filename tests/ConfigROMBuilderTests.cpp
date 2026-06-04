@@ -261,12 +261,16 @@ TEST_P(ConfigROMReferenceCrcTests, ReferenceDataHasValidCrcs) {
 
     std::vector<uint32_t> words;
     std::string errorMessage;
-    ASSERT_TRUE(ASFW::Tests::LoadHexArrayFromRepoFile("FirWireDriver/firewire/device-attribute-test.c",
-                                                      testCase.arrayName,
-                                                      words,
-                                                      &errorMessage))
-        << errorMessage;
-    ASSERT_FALSE(words.empty());
+    // The Linux device-attribute-test.c reference source is external developer
+    // data not committed to this repo; skip when absent (fresh checkout), matching
+    // the AsyncPacketSerDesLinuxCompat convention, rather than hard-failing.
+    if (!ASFW::Tests::LoadHexArrayFromRepoFile("FirWireDriver/firewire/device-attribute-test.c",
+                                               testCase.arrayName,
+                                               words,
+                                               &errorMessage)
+        || words.empty()) {
+        GTEST_SKIP() << "Linux device-attribute reference fixture not present: " << errorMessage;
+    }
 
     std::span<const uint32_t> span(words.data(), words.size());
 

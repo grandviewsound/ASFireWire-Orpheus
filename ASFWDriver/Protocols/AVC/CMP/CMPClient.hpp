@@ -279,6 +279,19 @@ public:
                                                              uint32_t desired,
                                                              bool* swapped = nullptr) noexcept;
 
+    /// Gap 3.5 — local-PCR change notify (Apple
+    /// `IOFireWireAVCTargetSpace::pcrModified(plugType, plugNum, newValue)` parity).
+    /// Invoked when an inbound peer lock successfully writes one of our local PCRs
+    /// (e.g. a device CMP-connecting to our plug bumps p2p / sets the channel).
+    /// `plugType`/`plugNum`/`newValue` mirror Apple's relay arguments. The DriverKit
+    /// equivalent of Apple's AVCProtocolUserClient relay (async delivery to a
+    /// user-space CMP client) layers on top of this seam; not yet wired.
+    using PcrChangeListener =
+        std::function<void(LocalPcrRegisterFile::Reg plugType, uint8_t plugNum, uint32_t newValue)>;
+    void SetPcrChangeListener(PcrChangeListener listener) noexcept {
+        pcrChangeListener_ = std::move(listener);
+    }
+
 private:
     Async::IFireWireBusOps& busOps_;
     uint8_t deviceNodeId_{0xFF};
@@ -291,6 +304,9 @@ private:
     // Raw lockable backing store for incoming peer reads/locks (gaps 3.3/3.4),
     // seeded from LocalPlugState by UpdateLocal*Plug.
     LocalPcrRegisterFile localPcr_;
+
+    // Gap 3.5 change-notify sink (optional; no-op until a listener is registered).
+    PcrChangeListener pcrChangeListener_{};
 
     // Serialize a plug's structured state into its raw PCR quadlet (matches the
     // BuildLocal*PCRValue layout used by the read responder) and store it in the
