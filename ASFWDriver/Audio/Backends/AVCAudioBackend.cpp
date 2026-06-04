@@ -38,25 +38,6 @@ inline uint8_t ReadLocalSid(Driver::HardwareInterface& hw) noexcept {
     return static_cast<uint8_t>(hw.ReadNodeID() & 0x3Fu);
 }
 
-// Bring-up timing instrumentation (2026-06-02): the static host audit validated
-// every byte/structure axis vs Apple + FFADO; the one remaining unknown is the
-// RUNTIME latency of the connect→isoch window (dext per-transaction overhead) and
-// whether the device's BridgeCo matcher soft-rejects a slow/jittery start. This
-// helper converts mach_absolute_time() deltas to microseconds so BringUpPipeline
-// can emit per-step latencies for a next-HW comparison against the old Mac.
-// Temporary diagnostic — remove once the timing thread is resolved.
-inline uint64_t MachTicksToMicros(uint64_t ticks) noexcept {
-    static mach_timebase_info_data_t tb{0, 0};
-    if (tb.denom == 0) {
-        if (mach_timebase_info(&tb) != KERN_SUCCESS || tb.denom == 0) {
-            return 0;
-        }
-    }
-    // ticks * (numer/denom) = nanoseconds; /1000 = microseconds. Use 128-bit-safe
-    // ordering: nanos fit in u64 for any realistic bring-up window.
-    return (ticks * tb.numer) / (tb.denom * 1000ULL);
-}
-
 bool WaitForFormatVerification(IDeviceProtocol& protocol, uint32_t timeoutMs) noexcept {
     for (uint32_t waited = 0; waited < timeoutMs; waited += kFormatVerificationPollMs) {
         if (protocol.IsFormatDone()) {
@@ -698,12 +679,6 @@ IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
     bool receiveStarted = false;
     bool transmitStarted = false;
 
-    // Bring-up timing instrumentation (temporary, 2026-06-02): capture monotonic
-    // timestamps at each connect→isoch milestone so the next HW run can compare
-    // the connect→first-isoch latency + per-step deltas against the old Mac.
-    const uint64_t tWindowStart = mach_absolute_time();
-    uint64_t tOpcrDone = 0, tRxDone = 0, tIpcrDone = 0, tTxDone = 0;
-
     auto cleanupPartialBringup = [&]() {
         if (transmitStarted) {
             (void)isoch_.StopTransmit();
@@ -745,7 +720,6 @@ IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
             return kIOReturnError;
         }
         opcrConnected = true;
-        tOpcrDone = mach_absolute_time();
         return kIOReturnSuccess;
     };
 
@@ -762,7 +736,6 @@ IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
             return krRx;
         }
         receiveStarted = true;
-        tRxDone = mach_absolute_time();
         return kIOReturnSuccess;
     };
 
@@ -798,7 +771,6 @@ IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
             return kIOReturnError;
         }
         ipcrConnected = true;
-        tIpcrDone = mach_absolute_time();
         return kIOReturnSuccess;
     };
 
@@ -844,7 +816,6 @@ IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
             return krTx;
         }
         transmitStarted = true;
-        tTxDone = mach_absolute_time();
         return kIOReturnSuccess;
     };
 
@@ -999,32 +970,6 @@ IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
         return orderKr;
     }
 
-    // Bring-up timing summary (temporary diagnostic, 2026-06-02). All deltas are
-    // µs from window start (= post channel-alloc). "connect→isoch" = OPCR connect
-    // to IT-DMA-live, the window the device's BridgeCo matcher may be timing. The
-    // "ABLE" / "BAEL" order tags reflect startInputBeforeOutput. Compare these vs
-    // the old Mac (Apple) on the next HW run; large/jittery values support the
-    // dext-latency soft-reject hypothesis. Grep key: "BRINGUP TIMING".
-    {
-        const uint64_t usOpcr = tOpcrDone ? MachTicksToMicros(tOpcrDone - tWindowStart) : 0;
-        const uint64_t usRx   = tRxDone   ? MachTicksToMicros(tRxDone   - tWindowStart) : 0;
-        const uint64_t usIpcr = tIpcrDone ? MachTicksToMicros(tIpcrDone - tWindowStart) : 0;
-        const uint64_t usTx   = tTxDone   ? MachTicksToMicros(tTxDone   - tWindowStart) : 0;
-        // connect→isoch window: earliest connect (OPCR or IPCR) to IT-DMA-live.
-        const uint64_t firstConnect = (tOpcrDone && tIpcrDone)
-                                          ? (tOpcrDone < tIpcrDone ? tOpcrDone : tIpcrDone)
-                                          : (tOpcrDone ? tOpcrDone : tIpcrDone);
-        const uint64_t usConnectToIsoch =
-            (firstConnect && tTxDone && tTxDone > firstConnect)
-                ? MachTicksToMicros(tTxDone - firstConnect)
-                : 0;
-        ASFW_LOG(Audio,
-                 "AVCAudioBackend: BRINGUP TIMING GUID=0x%016llx order=%{public}s "
-                 "opcr=%lluus rx=%lluus ipcr=%lluus tx=%lluus connect2isoch=%lluus",
-                 guid,
-                 config.startInputBeforeOutput ? "input-then-output" : "output-then-input",
-                 usOpcr, usRx, usIpcr, usTx, usConnectToIsoch);
-    }
 
     // AppleFWAudioDevice::StartAllStreams calls SyncInputStreams as part of the
     // attach start sequence. Keep the hook after both directions are live so the
