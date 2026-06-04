@@ -21,6 +21,10 @@ final class OrpheusControlViewModel: ObservableObject {
     @Published var toneError: String?
     @Published var toneDeviceName: String?
 
+    /// Panel-wide FP Meters Input/Output setting (mirrors the panel's global combo /
+    /// DeviceManager::FpMeters). Persisted to OrpheusGlobals.xml; loaded in init.
+    @Published var globalFpMeters: OrpheusFpMeterGlobal = .output
+
     private let connector: ASFWDriverConnector
     private var cancellables = Set<AnyCancellable>()
     private var lastMeterLogTime: Date?
@@ -28,6 +32,7 @@ final class OrpheusControlViewModel: ObservableObject {
 
     init(connector: ASFWDriverConnector) {
         self.connector = connector
+        loadGlobalFpMeters()
 
         connector.$isConnected
             .receive(on: DispatchQueue.main)
@@ -87,6 +92,7 @@ final class OrpheusControlViewModel: ObservableObject {
             }
 
             let diagnostics = self.connector.refreshOrpheusDiagnostics(guid: guid)
+            self.runBlockReadSelfTest(guid: guid)
 
             DispatchQueue.main.async {
                 self.isLoading = false
@@ -123,6 +129,34 @@ final class OrpheusControlViewModel: ObservableObject {
                 self.logDiagnosticsSnapshot(diagnostics, reason: "refresh")
             }
         }
+    }
+
+    /// One-shot transport check: read a known-nonzero address (Config ROM bus-info
+    /// block) through the SAME async block-read path the meter read uses, alongside
+    /// the meter block. If Config ROM returns real bytes but the meter block is
+    /// all-zero, the block-read transport is fine and the meter problem is device-side;
+    /// if Config ROM ALSO comes back zero, the block-read path itself is broken.
+    /// Value-independent — no reliance on any remembered/changeable value.
+    private func runBlockReadSelfTest(guid: UInt64) {
+        func dump(_ data: Data?) -> String {
+            guard let data else { return "nil (read failed)" }
+            let nonZero = data.reduce(0) { $0 + ($1 != 0 ? 1 : 0) }
+            let hex = data.prefix(20).map { String(format: "%02x", $0) }.joined()
+            return "len=\(data.count) nonZero=\(nonZero) bytes[0..19]=\(hex)"
+        }
+
+        // Config ROM bus-info block @ 0xFFFF:F0000400 — static, always nonzero (quadlet 1 = "1394").
+        let rom = connector.orpheusDiagnosticBlockRead(
+            guid: guid, addressHigh: 0xFFFF, addressLow: 0xF000_0400, length: 20)
+        // The meter level block, read through the identical path.
+        let meters = connector.orpheusDiagnosticBlockRead(
+            guid: guid,
+            addressHigh: OrpheusVendorCodec.meterAddressHigh,
+            addressLow: OrpheusVendorCodec.meterAddressLow,
+            length: OrpheusVendorCodec.meterReadLengthNew)
+
+        orpheusDiagnosticsLogger.info("OrpheusBlockReadSelfTest configROM[0xFFFF:F0000400] \(dump(rom), privacy: .public)")
+        orpheusDiagnosticsLogger.info("OrpheusBlockReadSelfTest meterBlock[0xFFC7:00600420] \(dump(meters), privacy: .public)")
     }
 
     func refreshMeters() {
@@ -356,6 +390,80 @@ final class OrpheusControlViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Front Panel Meters (local + global)
+
+    /// Current per-device FP Meters selection, decoded from the device byte.
+    var localFpMeters: OrpheusFpMeterLocal {
+        OrpheusFpMeterLocal.from(deviceByte: deviceSettings.meterMode)
+    }
+
+    /// True when this unit is set to follow the panel-wide global meter mode.
+    var isFollowingGlobalFpMeters: Bool {
+        (deviceSettings.meterMode & 0b10) != 0
+    }
+
+    /// Set the per-device FP Meters selection (Input / Output / Follow Global).
+    /// Mirrors onFpMetersLocal: — Follow Global resolves to `global | 2`.
+    func setLocalFpMeters(_ selection: OrpheusFpMeterLocal) {
+        setMeterMode(selection.deviceByte(global: globalFpMeters))
+    }
+
+    /// Set the panel-wide global Input/Output meter mode. Mirrors
+    /// DeviceManager::SetFpMeters: persist it, then re-push to the connected unit
+    /// if (and only if) it is in Follow-Global mode.
+    func setGlobalFpMeters(_ global: OrpheusFpMeterGlobal) {
+        guard global != globalFpMeters || isFollowingGlobalFpMeters else {
+            globalFpMeters = global
+            return
+        }
+        globalFpMeters = global
+        persistGlobalFpMeters(global)
+        if isFollowingGlobalFpMeters {
+            setMeterMode(global.followGlobalDeviceByte)
+        }
+    }
+
+    // MARK: OrpheusGlobals.xml persistence
+    //
+    // The original panel wrote `./OrpheusGlobals.xml` (a relative-path bug). We use a
+    // stable Application Support location. Schema: <Devices><FpMeters>N</FpMeters></Devices>.
+
+    private var orpheusGlobalsURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("ASFW/OrpheusGlobals.xml")
+    }
+
+    private func loadGlobalFpMeters() {
+        guard let url = orpheusGlobalsURL,
+              let xml = try? String(contentsOf: url, encoding: .utf8),
+              let value = OrpheusControlViewModel.parseFpMeters(from: xml),
+              let global = OrpheusFpMeterGlobal(rawValue: value) else {
+            return
+        }
+        globalFpMeters = global
+    }
+
+    private func persistGlobalFpMeters(_ global: OrpheusFpMeterGlobal) {
+        guard let url = orpheusGlobalsURL else { return }
+        let xml = "<Devices><FpMeters>\(global.rawValue)</FpMeters></Devices>\n"
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try xml.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            orpheusDiagnosticsLogger.error("Failed to persist OrpheusGlobals.xml: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Extract N from `<FpMeters>N</FpMeters>`.
+    static func parseFpMeters(from xml: String) -> UInt8? {
+        guard let open = xml.range(of: "<FpMeters>"),
+              let close = xml.range(of: "</FpMeters>", range: open.upperBound..<xml.endIndex) else {
+            return nil
+        }
+        return UInt8(xml[open.upperBound..<close.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     func setSyncSource(_ source: UInt8) {
         guard let syncSource = OrpheusSyncSource(rawValue: source) else {
             errorMessage = "Unsupported sync source"
@@ -423,10 +531,25 @@ final class OrpheusControlViewModel: ObservableObject {
         let version = diagnostics.deviceVersion?.displayName ?? "unread"
         let dawMeters = meterSummary(diagnostics.meters, group: .dawFeeds)
         let outputMeters = meterSummary(diagnostics.meters, group: .physicalOutputs)
+        let analogInputMeters = meterSummary(diagnostics.meters, group: .analogInputs)
+        let digitalInputMeters = meterSummary(diagnostics.meters, group: .digitalInputs)
+        // Full unparsed level block + a nonzero-byte count, so we can tell an all-zero
+        // buffer apart from a parse-offset bug, and see whether ANY region is live.
+        let rawAll = diagnostics.meters?.raw ?? Data()
+        let rawHex = rawAll.map { String(format: "%02x", $0) }.joined()
+        let rawNonZero = rawAll.reduce(0) { $0 + ($1 != 0 ? 1 : 0) }
+        // The +200 trailer carries master volume. We KNOW masterVol from the 0xBF bulk
+        // read, so if the trailer matches but the level slots are zero, the block read
+        // lands correctly and the device's metering DSP is simply dormant for our session.
+        let trailer = diagnostics.meters?.trailer.map {
+            String(format: "masterVol=%d analogType=%@ async=%d unlock=%d",
+                   $0.masterVolume, "\($0.analogType)", $0.digitalAsync ? 1 : 0, $0.digitalUnlock ? 1 : 0)
+        } ?? "none"
         let connectorError = diagnostics.errors.isEmpty ? "none" : (connector.lastError ?? "none")
 
         orpheusDiagnosticsLogger.info("OrpheusDiagnostics[\(reason, privacy: .public)] guid=\(guidLabel, privacy: .public) version=\(version, privacy: .public) source=\(source, privacy: .public) sync=\(sync, privacy: .public) errors=\(diagnostics.errors.count, privacy: .public) connectorError=\(connectorError, privacy: .public)")
-        orpheusDiagnosticsLogger.info("OrpheusMeters[\(reason, privacy: .public)] daw=\(dawMeters, privacy: .public) outputs=\(outputMeters, privacy: .public)")
+        orpheusDiagnosticsLogger.info("OrpheusMeters[\(reason, privacy: .public)] inputs=\(analogInputMeters, privacy: .public) digIn=\(digitalInputMeters, privacy: .public) daw=\(dawMeters, privacy: .public) outputs=\(outputMeters, privacy: .public)")
+        orpheusDiagnosticsLogger.info("OrpheusMetersRaw[\(reason, privacy: .public)] nonZeroBytes=\(rawNonZero, privacy: .public) trailer=\(trailer, privacy: .public) raw=\(rawHex, privacy: .public)")
         if !diagnostics.errors.isEmpty {
             let errorSummary = diagnostics.errors.prefix(8).joined(separator: " | ")
             orpheusDiagnosticsLogger.info("OrpheusDiagnosticsErrors[\(reason, privacy: .public)] \(errorSummary, privacy: .public)")

@@ -671,23 +671,44 @@ struct OrpheusControlView: View {
     private var deviceSettingsSection: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 14) {
-                // Front Panel Meters
+                // Front Panel Meters — per-device (Input / Output / Follow Global)
                 HStack {
                     Text("Front Meters")
                         .frame(width: 100, alignment: .leading)
 
                     Picker("", selection: Binding(
-                        get: { viewModel.deviceSettings.meterMode },
-                        set: { viewModel.setMeterMode($0) }
+                        get: { viewModel.localFpMeters },
+                        set: { viewModel.setLocalFpMeters($0) }
                     )) {
-                        ForEach(OrpheusMeterMode.allCases) { mode in
-                            Text(mode.displayName).tag(mode.rawValue)
+                        ForEach(OrpheusFpMeterLocal.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
                         }
                     }
                     .pickerStyle(.segmented)
-                    .frame(maxWidth: 300)
+                    .frame(maxWidth: 320)
 
                     Text("raw: \(viewModel.deviceSettings.meterMode)")
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
+                // Global FP Meters — panel-wide; drives every unit set to "Follow Global"
+                HStack {
+                    Text("Global Meters")
+                        .frame(width: 100, alignment: .leading)
+
+                    Picker("", selection: Binding(
+                        get: { viewModel.globalFpMeters },
+                        set: { viewModel.setGlobalFpMeters($0) }
+                    )) {
+                        ForEach(OrpheusFpMeterGlobal.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 220)
+
+                    Text(viewModel.isFollowingGlobalFpMeters ? "unit follows" : "unit fixed")
                         .font(.system(.caption2, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }

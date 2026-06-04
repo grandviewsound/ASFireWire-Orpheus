@@ -166,6 +166,25 @@ extension ASFWDriverConnector {
         return OrpheusVendorCodec.parseMeterLevelsResponse(response, usesNewLayout: useNewLayout)
     }
 
+    /// Diagnostic: read an arbitrary block from the device through the SAME async
+    /// block-read path the meter read uses. Used to validate the transport against a
+    /// known-nonzero address (Config ROM) vs the all-zero meter block.
+    func orpheusDiagnosticBlockRead(guid: UInt64,
+                                    addressHigh: UInt16,
+                                    addressLow: UInt32,
+                                    length: UInt32,
+                                    timeoutMs: UInt32 = 5_000) -> Data? {
+        guard let unit = getAVCUnits()?.first(where: { $0.guid == guid }) else {
+            return nil
+        }
+        return orpheusSyncAsyncBlockRead(
+            destinationID: unit.nodeID,
+            addressHigh: addressHigh,
+            addressLow: addressLow,
+            length: length,
+            timeoutMs: timeoutMs)
+    }
+
     func getOrpheusSignalSource(guid: UInt64,
                                 useAdatPlug: Bool,
                                 timeoutMs: UInt32 = 5_000) -> OrpheusSignalSourceState? {

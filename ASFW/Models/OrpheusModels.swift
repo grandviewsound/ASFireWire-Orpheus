@@ -76,6 +76,68 @@ enum OrpheusMeterMode: UInt8, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Front Panel Meters (FP Meters)
+//
+// The device's meter setting — opcode 0xB0, mirrored in the 0xBF bulk byte-11 high
+// nibble (`metersMode`) — is a 2-bit value:
+//   bit 0 → 0 = Input, 1 = Output   (what the front-panel LEDs display)
+//   bit 1 → "Follow Global": this unit tracks the panel-wide global Input/Output setting
+// so all units in a multi-unit rig switch together (manual: hardware_met.htm).
+// Confirmed from the Prism panel behavior analysis: onFpMetersLocal: (Follow Global → global|2),
+// onFpMetersGlobal: → DeviceManager::SetFpMeters (re-pushes global|2 to every Follow-Global
+// unit). See memory panel analysis + panel analysis-persistence.
+
+/// Per-device FP Meters selection (Unit Settings tab): Input / Output / Follow Global.
+enum OrpheusFpMeterLocal: UInt8, CaseIterable, Identifiable {
+    case input        = 0
+    case output       = 1
+    case followGlobal = 2
+
+    var id: UInt8 { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .input:        return "Input"
+        case .output:       return "Output"
+        case .followGlobal: return "Follow Global"
+        }
+    }
+
+    /// Decode the raw device byte (0xB0 value / `metersMode` nibble) into a selection.
+    static func from(deviceByte: UInt8) -> OrpheusFpMeterLocal {
+        if (deviceByte & 0b10) != 0 { return .followGlobal }
+        return (deviceByte & 0b01) != 0 ? .output : .input
+    }
+
+    /// Encode into the device byte to send via 0xB0. The global setting is only
+    /// consulted for `.followGlobal`, mirroring onFpMetersLocal: (`global | 2`).
+    func deviceByte(global: OrpheusFpMeterGlobal) -> UInt8 {
+        switch self {
+        case .input:        return 0
+        case .output:       return 1
+        case .followGlobal: return (global.rawValue & 0b01) | 0b10
+        }
+    }
+}
+
+/// Panel-wide FP Meters global Input/Output setting; persisted in OrpheusGlobals.xml.
+enum OrpheusFpMeterGlobal: UInt8, CaseIterable, Identifiable {
+    case input  = 0
+    case output = 1
+
+    var id: UInt8 { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .input:  return "Input"
+        case .output: return "Output"
+        }
+    }
+
+    /// Device byte pushed to a Follow-Global unit when the global changes.
+    var followGlobalDeviceByte: UInt8 { (rawValue & 0b01) | 0b10 }
+}
+
 // MARK: - Sync Source
 
 enum OrpheusSyncSource: UInt8, CaseIterable, Identifiable {
@@ -978,8 +1040,11 @@ struct OrpheusVendorCodec {
     }
 
     private static func readUInt16BE(_ data: Data, offset: Int) -> UInt16 {
+        // Slice-safe: index relative to startIndex, since a sliced Data does not
+        // re-base its indices to 0.
         guard data.count > offset + 1 else { return 0 }
-        return (UInt16(data[offset]) << 8) | UInt16(data[offset + 1])
+        let b = data.startIndex
+        return (UInt16(data[b + offset]) << 8) | UInt16(data[b + offset + 1])
     }
 
     private static func readInt16BE(_ data: Data, offset: Int) -> Int16 {

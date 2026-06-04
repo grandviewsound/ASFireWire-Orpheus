@@ -265,9 +265,28 @@ kern_return_t IsochService::StartTransmit(uint8_t channel,
     ASFW_LOG(Controller, "[Isoch] IT start wait targetFill=%u (zeroCopy=%{public}s)",
              targetFill, isochTransmitContext_->IsZeroCopyEnabled() ? "YES" : "NO");
 
+    // Hypothesis test (2026-06-02, connect2isoch latency): at attach-time bring-up
+    // the CoreAudio IO proc has not started, so nothing is producing into the
+    // shared TX ring yet — fill stays 0 and this loop burns its full 100ms cap for
+    // nothing, delaying the first isoch packet ~100ms after the iPCR CMP connect.
+    // That gap is the bulk of the connect→isoch window the device's BridgeCo
+    // stream-matcher may be timing out on (BRINGUP TIMING / soft-reject lead).
+    // Apple's NuDCLWrite::Start does NOT host-side-prime; the IT engine emits
+    // silent CIP packets until audio arrives (the SYT-gate path above, also how
+    // the IR side starts). So only prime while frames are actually accumulating;
+    // when the ring is empty with no producer, start the DMA immediately. Changes
+    // no wire AV/C bytes — pure DMA-start timing. Revert by restoring the plain
+    // sleep loop if this does not unblock device ingestion.
     for (int waitMs = 0; waitMs < maxWaitMs; waitMs += 5) {
         fillLevel = isochTransmitContext_->SharedTxFillLevelFrames();
         if (fillLevel >= targetFill) {
+            break;
+        }
+        if (fillLevel == 0) {
+            ASFW_LOG(Controller,
+                     "[Isoch] IT start: TX ring empty / no producer — starting DMA "
+                     "immediately (skip %dms prime wait, Apple output-first parity)",
+                     maxWaitMs);
             break;
         }
         IOSleep(5);

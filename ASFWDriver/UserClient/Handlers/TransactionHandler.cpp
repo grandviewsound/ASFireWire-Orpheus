@@ -358,7 +358,16 @@ kern_return_t TransactionHandler::GetTransactionResult(IOUserClientMethodArgumen
         args->scalarOutputCount = 3;
     }
 
-    if (args->structureOutput && foundResult->dataLength > 0) {
+    // NOTE: args->structureOutput is NULL on entry (DriverKit convention — see the note
+    // in ASFWDriverUserClient::externalMethod and every other handler: Topology,
+    // DeviceDiscovery, ConfigROM, Status all assign it unconditionally). The old code
+    // guarded on `args->structureOutput &&`, which is ALWAYS false on entry, so the OSData
+    // was never created and the client received its pre-zeroed buffer — scalars reported
+    // dataLength=204 while the 204 payload bytes were all zero. This silently broke EVERY
+    // block-read payload (meters, bulk reads) for the lifetime of the driver. Confirmed by
+    // HW log 2026-06-01: dext AR/RSP DATA nonZero=12 + stored len=204, but Swift
+    // OrpheusMeters RX head=00 00 00 00. Assign unconditionally, matching all other handlers.
+    if (foundResult->dataLength > 0) {
         OSData* resultData = OSData::withBytes(foundResult->data, foundResult->dataLength);
         if (resultData) {
             args->structureOutput = resultData;
