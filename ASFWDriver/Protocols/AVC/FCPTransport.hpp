@@ -110,6 +110,9 @@ struct FCPTransportConfig {
     /// Maximum retry attempts
     uint8_t maxRetries{kFCPMaxRetries};
 
+    /// Gap 5.5 — bounded re-sends on an IN_TRANSITION (0x0B) response.
+    uint8_t inTransitionRetries{kFCPInTransitionRetries};
+
     /// Allow bus reset retry (default: false, fail on reset)
     bool allowBusResetRetry{false};
 };
@@ -163,6 +166,7 @@ private:
         FCPCompletion completion;
         uint32_t generation;
         uint8_t retriesLeft;
+        uint8_t inTransitionRetriesLeft{0};  // gap 5.5
         bool allowBusResetRetry;
         bool gotInterim{false};
 

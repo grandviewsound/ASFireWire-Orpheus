@@ -227,6 +227,14 @@ constexpr uint32_t kFCPTimeoutAfterInterim = 10000;
 /// duplicate CONTROL command may corrupt device state).
 constexpr uint8_t kFCPMaxRetries = 4;
 
+/// Gap 5.5 — Apple's AM824AVC::AVCCommand RE-SENDS an AVC command that returns
+/// IN_TRANSITION (0x0B, "device state is changing") until a final response,
+/// rather than failing. We mirror that with a bounded re-send. Unlike the
+/// timeout case, a 0x0B response means the target explicitly DID NOT act on the
+/// command (it's transitioning), so re-sending is safe (no duplicate-CONTROL
+/// hazard). Each retry is a full FCP round-trip, providing natural spacing.
+constexpr uint8_t kFCPInTransitionRetries = 4;
+
 //==============================================================================
 // Plug Types (for PCR/CMP)
 //==============================================================================

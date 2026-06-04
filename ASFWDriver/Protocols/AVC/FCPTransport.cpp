@@ -127,6 +127,7 @@ FCPHandle FCPTransport::SubmitCommand(const FCPFrame& command,
     // Keep generation source consistent with RX routing: always query bus generation.
     cmd->generation = static_cast<uint32_t>(busInfo_->GetGeneration().value);
     cmd->retriesLeft = config_.maxRetries;
+    cmd->inTransitionRetriesLeft = config_.inTransitionRetries;  // gap 5.5
     cmd->allowBusResetRetry = config_.allowBusResetRetry;
     cmd->gotInterim = false;
 
@@ -344,6 +345,33 @@ void FCPTransport::OnFCPResponse(uint16_t srcNodeID,
 
         IOLockUnlock(lock_);
         return;
+    }
+
+    // Gap 5.5 — IN_TRANSITION (0x0B): the target explicitly did NOT act on the
+    // command because its state is changing (this happens during stream setup /
+    // format change). Apple's AM824AVC::AVCCommand RE-SENDS until a final
+    // response rather than failing; mirror that with a bounded re-send. Always
+    // log the occurrence + AVC opcode (instrumentation for the HW run — tells us
+    // which commands hit 0x0B during setup). On exhaustion, fall through and let
+    // the caller map 0x0B → busy (prior behavior).
+    if (response.data[0] == static_cast<uint8_t>(AVCResponseType::kInTransition)) {
+        const uint8_t subunit = response.length > 1 ? response.data[1] : 0xFFu;
+        const uint8_t opcode = response.length > 2 ? response.data[2] : 0xFFu;
+        if (pending_->inTransitionRetriesLeft > 0) {
+            pending_->inTransitionRetriesLeft--;
+            ASFW_LOG(FCP,
+                     "FCPTransport: IN_TRANSITION (0x0B) subunit=0x%02x opcode=0x%02x "
+                     "— re-sending (%u retries left)",
+                     subunit, opcode, pending_->inTransitionRetriesLeft);
+            IOLockUnlock(lock_);
+            RetryCommand();
+            return;
+        }
+        ASFW_LOG(FCP,
+                 "FCPTransport: IN_TRANSITION (0x0B) subunit=0x%02x opcode=0x%02x "
+                 "— retries exhausted, completing as busy",
+                 subunit, opcode);
+        // fall through to complete with the 0x0B response
     }
 
     IOLockUnlock(lock_);
