@@ -3,6 +3,7 @@
 #include "IsochAudioTxPipeline.hpp"
 
 #include "../Encoding/TimingUtils.hpp"
+#include "../Core/CIPHeader.hpp"  // TEMP DIAGNOSTIC (TXTRACE) — remove with the trace block
 
 #include <algorithm>
 #include <cstdio>
@@ -672,6 +673,31 @@ static uint64_t sInjectNonZeroPackets = 0;
 static int32_t  sInjectPeakSample = 0;
 static bool     sInjectFirstNonZeroLogged = false;
 
+// ===== TEMP DIAGNOSTIC (read-only, self-removing): TX consecutive-packet trace =====
+// One-shot capture of N consecutive real-audio DATA packets in steady state, to
+// verify per-packet DBC/SYT/FDF continuity and channel-0 waveform continuity.
+// A clean tone MUST produce: DBC advancing by frames/packet, SYT advancing, and a
+// smooth ch0 sample sequence with no jumps/repeats across the whole burst.
+// Reads only already-built packet data; never mutates the stream. Fires once per
+// dext load (reload to re-arm). REMOVE this block + its two call sites + the
+// CIPHeader.hpp include when the crunch investigation is done.
+namespace {
+constexpr uint64_t kTxTraceStartCall    = 24000;  // ~3s of streaming, past startup fill
+constexpr uint32_t kTxTracePackets      = 24;     // consecutive data packets to capture
+constexpr uint32_t kTxTraceFramesPerPkt = 8;      // ch0 samples logged per packet
+struct TxTracePkt {
+    uint8_t  dbc;
+    uint8_t  fdf;
+    uint16_t syt;
+    uint32_t framesRead;
+    int32_t  ch0[kTxTraceFramesPerPkt];
+};
+TxTracePkt sTxTrace[kTxTracePackets] = {};
+uint32_t   sTxTraceCount  = 0;
+bool       sTxTraceDumped = false;
+} // namespace
+// ===== END TEMP DIAGNOSTIC state =====
+
 void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescriptorSlab& slab) noexcept {
     constexpr uint32_t numPackets = Tx::Layout::kNumPackets;
 
@@ -793,6 +819,25 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
                                              outputChannelMapActive_,
                                              quadlets);
 
+        // ===== TEMP DIAGNOSTIC: capture consecutive real-audio data packets =====
+        if (!sTxTraceDumped && sInjectCallCount >= kTxTraceStartCall &&
+            framesRead == framesPerPacket && sTxTraceCount < kTxTracePackets) {
+            const uint32_t* cip = reinterpret_cast<const uint32_t*>(payloadVirt);
+            TxTracePkt& e = sTxTrace[sTxTraceCount++];
+            if (const auto h = ASFW::Isoch::CIPHeader::Decode(cip[0], cip[1])) {
+                e.dbc = h->dataBlockCounter;
+                e.fdf = h->fdf;
+                e.syt = h->syt;
+            } else {
+                e.dbc = 0; e.fdf = 0xEE; e.syt = 0xEEEE;  // decode-failed sentinel
+            }
+            e.framesRead = framesRead;
+            for (uint32_t f = 0; f < kTxTraceFramesPerPkt; ++f) {
+                e.ch0[f] = (f < framesPerPacket) ? samples[f * pcmChannels] : 0;
+            }
+        }
+        // ===== END TEMP DIAGNOSTIC capture =====
+
         // Track diagnostics
         ++dataPacketsThisCall;
         ++sInjectPacketsWritten;
@@ -871,6 +916,27 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
                  diagNonZeroSlotMask,
                  outputChannelMapActive_ ? "apple" : "identity");
     }
+
+    // ===== TEMP DIAGNOSTIC: dump consecutive-packet trace once =====
+    if (!sTxTraceDumped && sTxTraceCount >= kTxTracePackets) {
+        sTxTraceDumped = true;
+        ASFW_LOG(Isoch,
+                 "TXTRACE begin: %u consecutive data packets, framesPerPkt=%u, pcmCh=%u "
+                 "(expect DBC += framesPerPkt each line, SYT advancing, ch0 a smooth tone)",
+                 kTxTracePackets, framesPerPacket, pcmChannels);
+        for (uint32_t p = 0; p < kTxTracePackets; ++p) {
+            const TxTracePkt& e = sTxTrace[p];
+            ASFW_LOG(Isoch,
+                     "TXTRACE[%02u] dbc=%3u fdf=0x%02x syt=0x%04x fr=%u ch0=%08x %08x %08x %08x %08x %08x %08x %08x",
+                     p, e.dbc, e.fdf, e.syt, e.framesRead,
+                     static_cast<uint32_t>(e.ch0[0]), static_cast<uint32_t>(e.ch0[1]),
+                     static_cast<uint32_t>(e.ch0[2]), static_cast<uint32_t>(e.ch0[3]),
+                     static_cast<uint32_t>(e.ch0[4]), static_cast<uint32_t>(e.ch0[5]),
+                     static_cast<uint32_t>(e.ch0[6]), static_cast<uint32_t>(e.ch0[7]));
+        }
+        ASFW_LOG(Isoch, "TXTRACE end");
+    }
+    // ===== END TEMP DIAGNOSTIC dump =====
 
     // Fix #24: Periodic diagnostic log (every ~4000 calls ≈ every 0.5s)
     if (sInjectCallCount % 4000 == 1) {

@@ -99,7 +99,12 @@ IsochTxDmaRing::PrimeStats IsochTxDmaRing::Prime(IIsochTxPacketProvider& provide
         immDesc->common.branchWord = (nextBlockIOVA & 0xFFFFFFF0u) | Layout::kBlocksPerPacket;
         immDesc->common.statusWord = 0;
         immDesc->immediateData[0] = isochHeaderQ0;
-        immDesc->immediateData[1] = 0;
+        // IT packet header quadlet 1: data_length (payload byte count) in bits
+        // [31:16]. OHCI transmits THIS many payload bytes on the wire; it is the
+        // authoritative packet length, NOT the OUTPUT_LAST reqCount. Leaving it 0
+        // makes every packet egress as len=0 (empty header, no audio) so the
+        // device ingests nothing. Must equal the OUTPUT_LAST payload bytes.
+        immDesc->immediateData[1] = static_cast<uint32_t>(pkt.sizeBytes) << 16;
         immDesc->immediateData[2] = 0;
         immDesc->immediateData[3] = 0;
 
@@ -281,9 +286,14 @@ IsochTxDmaRing::RefillOutcome IsochTxDmaRing::Refill(Driver::HardwareInterface& 
             lastDesc->dataAddress = payloadIOVA;
             lastDesc->statusWord = 0;
 
-            // No isochHeaderQ1 update needed — reqCount=0 means only
-            // the isoch header (immediateData[0]) is sent from OMI (Fix #34a).
-            // The CIP payload starts entirely from the OUTPUT_LAST data buffer.
+            // Update the IT packet header's data_length (immediateData[1], bits
+            // [31:16]) to match THIS packet's payload. OHCI uses this as the wire
+            // packet length; if it stays 0 the packet egresses empty (len=0) and the
+            // device ingests no audio. It must track pkt.sizeBytes per packet because
+            // the data/no-data cadence changes the size each cycle.
+            auto* immDesc = reinterpret_cast<OHCIDescriptorImmediate*>(
+                slab_.GetDescriptorPtr(descBase));
+            immDesc->immediateData[1] = static_cast<uint32_t>(pkt.sizeBytes) << 16;
 
             out.packetsFilled++;
             if (pkt.isData) {

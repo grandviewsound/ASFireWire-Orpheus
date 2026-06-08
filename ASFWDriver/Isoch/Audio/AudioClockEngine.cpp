@@ -181,7 +181,10 @@ void LogPeriodicMetrics(AudioClockEngineState& state,
                         uint32_t rxFill,
                         bool rxPllReady,
                         uint32_t q8) {
-    if (++(*state.metricsLogCounter) % 430 != 0) {
+    // ~1s cadence at the 512-frame/48k tick rate (~93.75 Hz). Kept short so the
+    // CLK:/IO: clock-servo metrics surface within a second and survive the brief
+    // CoreAudio Start/Stop churn (which resets this counter on every StartDevice).
+    if (++(*state.metricsLogCounter) % 96 != 0) {
         return;
     }
 
@@ -350,11 +353,15 @@ void PrepareClockEngineForStart(AudioClockEngineState& state) {
 
     state.audioDevice->UpdateCurrentZeroTimestamp(0, 0);
 
-    const uint64_t currentTime = mach_absolute_time();
-    state.timestampTimer->WakeAtTime(kIOTimerClockMachAbsoluteTime,
-                                     currentTime + *state.hostTicksPerBuffer,
-                                     0);
-    state.timestampTimer->SetEnable(true);
+    // NOTE: the timestamp timer is NOT armed here. It is created and armed inline in
+    // ASFWAudioDriver::Start() (the dext's own work-queue context) and free-runs for
+    // the driver's lifetime — mirroring the sibling ASFWMIDIDriver's RX-poll timer,
+    // which fires reliably. Four prior builds armed the timer from THIS path (reached
+    // on the CoreAudio HAL thread) via DispatchAsync onto a work/dedicated queue, and
+    // the arm block never executed → the timer never fired → the zero-timestamp anchor
+    // stayed frozen → garbled audio. StartDevice now only flips isRunning; the already-
+    // running timer's ZtsTimerOccurred callback gates real work on that flag.
+    // (state.workQueue is retained in the struct for compatibility but is unused here.)
 }
 
 void PrepareClockEngineForStop(AudioClockEngineState& state) {
@@ -365,10 +372,12 @@ void PrepareClockEngineForStop(AudioClockEngineState& state) {
     detail::ResetClockSync(*state.clockSync);
     state.zeroCopyTimeline->valid = false;
 
-    if (state.timestampTimer) {
-        state.timestampTimer->SetEnable(false);
-        ASFW_LOG(Audio, "ASFWAudioDriver: Timestamp timer stopped");
-    }
+    // Do NOT disable the timer here. It free-runs for the driver's lifetime (armed in
+    // Start, like ASFWMIDIDriver's poll); StopDevice just clears isRunning so the
+    // ZtsTimerOccurred callback re-arms but skips the work. Disabling on every stop
+    // re-introduces the "needs to be re-armed on the delivery queue" problem on the
+    // next start. The timer is torn down (SetEnable(false)) only at dext Stop/free.
+    ASFW_LOG(Audio, "ASFWAudioDriver: Clock engine stopped (timer keeps free-running)");
 }
 
 void HandleClockTimerTick(AudioClockEngineState& state, uint64_t time) {
@@ -395,7 +404,23 @@ void HandleClockTimerTick(AudioClockEngineState& state, uint64_t time) {
     const uint32_t q8 = state.rxQueueValid ? state.rxQueueReader->CorrHostNanosPerSampleQ8() : 0;
     const uint64_t hostTicksPerBuffer = detail::ComputeHostTicksPerBuffer(state, q8, rxPllReady);
 
-    if (currentHostTime != 0) {
+    // Apple-faithful path: anchor CoreAudio's zero timestamp to the real hardware
+    // (cycle-timer, host-uptime) pair the RX poll captured at the isoch interrupt,
+    // instead of accumulating a free-running software timer. Use it only when the
+    // anchor is valid AND its sample-time has advanced past the last published one
+    // (monotonicity / freshness); otherwise fall back to the software accumulator
+    // (e.g. RX starved, or before the first poll has run).
+    uint64_t hwSampleTime = 0;
+    uint64_t hwHostTicks = 0;
+    const bool haveHwAnchor = state.rxQueueValid &&
+        state.rxQueueReader->ReadHwZeroTimestampAnchor(hwSampleTime, hwHostTicks);
+    bool usedHwAnchor = false;
+
+    if (haveHwAnchor && (currentHostTime == 0 || hwSampleTime > currentSampleTime)) {
+        currentSampleTime = hwSampleTime;
+        currentHostTime = hwHostTicks;
+        usedHwAnchor = true;
+    } else if (currentHostTime != 0) {
         currentSampleTime += state.ioBufferPeriodFrames;
         currentHostTime += hostTicksPerBuffer;
     } else {
@@ -404,9 +429,19 @@ void HandleClockTimerTick(AudioClockEngineState& state, uint64_t time) {
     }
 
     state.audioDevice->UpdateCurrentZeroTimestamp(currentSampleTime, currentHostTime);
-    state.timestampTimer->WakeAtTime(kIOTimerClockMachAbsoluteTime,
-                                     currentHostTime + hostTicksPerBuffer,
-                                     0);
+
+    // The timer free-runs and re-arms itself in ZtsTimerOccurred (unconditionally, even
+    // when not streaming). Publish the freshly corrected period so that re-arm tracks
+    // the device clock instead of the nominal seed. (No WakeAtTime here — the callback
+    // owns re-arm, so a stop/start can't leave the timer un-armed.)
+    *state.hostTicksPerBuffer = hostTicksPerBuffer;
+
+    ASFW_LOG_RL(Audio, "zts/anchor", 1000, OS_LOG_TYPE_DEFAULT,
+                "zts/anchor: src=%{public}s sample=%llu host=%llu q8=%u",
+                usedHwAnchor ? "hw" : "accum",
+                currentSampleTime,
+                currentHostTime,
+                q8);
 
     detail::LogPeriodicMetrics(state, time, localEncodingActive, rxFill, rxPllReady, q8);
 

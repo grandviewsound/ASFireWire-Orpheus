@@ -49,6 +49,10 @@ struct ClockSyncState {
 struct AudioClockEngineState {
     IOUserAudioDevice* audioDevice{nullptr};
     IOTimerDispatchSource* timestampTimer{nullptr};
+    // Queue the timestampTimer is delivered on. IOTimerDispatchSource::WakeAtTime
+    // must be issued ON this queue (per the SDK contract), so the initial arm is
+    // dispatched here rather than run inline on the CoreAudio StartDevice thread.
+    IODispatchQueue* workQueue{nullptr};
 
     bool txQueueValid{false};
     ASFW::Shared::TxSharedQueueSPSC* txQueueWriter{nullptr};

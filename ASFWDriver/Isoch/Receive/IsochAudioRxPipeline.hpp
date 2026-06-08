@@ -61,6 +61,12 @@ private:
         uint32_t pollsSinceLastUpdate{0};
         double   sampleRate{48000.0};
     } cycleCorr_{};
+
+    // Hardware zero-timestamp anchor: monotonic device sample clock derived from
+    // the FireWire cycle timer (device is cycle-master). Published every poll so
+    // the audio driver can anchor CoreAudio's zero timestamp to real hardware
+    // time instead of a free-running software accumulator.
+    Timing::FwSampleClock ztsClock_{};
 };
 
 } // namespace ASFW::Isoch::Rx

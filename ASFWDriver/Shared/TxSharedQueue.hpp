@@ -40,6 +40,12 @@ struct alignas(64) CachelineAtomicU32 {
 };
 static_assert(sizeof(CachelineAtomicU32) == 64, "CachelineAtomicU32 must be 64 bytes");
 
+struct alignas(64) CachelineAtomicU64 {
+    std::atomic<uint64_t> v;
+    uint8_t pad[64 - sizeof(std::atomic<uint64_t>)];
+};
+static_assert(sizeof(CachelineAtomicU64) == 64, "CachelineAtomicU64 must be 64 bytes");
+
 // Shared memory header layout
 // This structure is at the beginning of the shared IOBufferMemoryDescriptor
 struct TxQueueHeader {
@@ -67,6 +73,17 @@ struct TxQueueHeader {
     // Written by IR Poll (controller process), read by audio driver process.
     // 0 = not yet computed. Example: 48kHz → 20833.33ns * 256 = 5,333,333
     CachelineAtomicU32 corrHostNanosPerSampleQ8;
+
+    // Hardware zero-timestamp anchor (Apple getCycleTimeAndUpTime pattern).
+    // Written by IR Poll (controller) from an atomic (cycle-timer, host-uptime)
+    // read; read by the audio driver so CoreAudio's zero timestamp is anchored to
+    // real hardware time instead of a free-running software accumulator. The
+    // (sampleTime, hostTicks) pair must be read consistently, so it is published
+    // under a seqlock: anchorSeq is even when stable, odd while a write is in
+    // flight. hostTicks == 0 means "no hardware anchor yet" (use fallback).
+    CachelineAtomicU32 ztsAnchorSeq;
+    CachelineAtomicU64 ztsAnchorSampleTime;  // monotonic device sample-time (frames)
+    CachelineAtomicU64 ztsAnchorHostTicks;   // paired mach_absolute_time ticks
 };
 static_assert((sizeof(TxQueueHeader) % 8) == 0, "Header alignment sanity");
 
@@ -112,6 +129,9 @@ public:
         hdr->writeIndexFrames.v.store(0, std::memory_order_relaxed);
         hdr->readIndexFrames.v.store(0, std::memory_order_relaxed);
         hdr->corrHostNanosPerSampleQ8.v.store(0, std::memory_order_relaxed);
+        hdr->ztsAnchorSeq.v.store(0, std::memory_order_relaxed);
+        hdr->ztsAnchorSampleTime.v.store(0, std::memory_order_relaxed);
+        hdr->ztsAnchorHostTicks.v.store(0, std::memory_order_relaxed);
 
         // Publish header initialization
         std::atomic_thread_fence(std::memory_order_release);
@@ -342,6 +362,42 @@ public:
     }
     uint32_t CorrHostNanosPerSampleQ8() const {
         return hdr_ ? hdr_->corrHostNanosPerSampleQ8.v.load(std::memory_order_acquire) : 0;
+    }
+
+    // Hardware zero-timestamp anchor (seqlock-protected pair). Single producer
+    // (IR Poll), single consumer (audio driver timer). See header field comments.
+    void PublishHwZeroTimestampAnchor(uint64_t sampleTime, uint64_t hostTicks) {
+        if (!hdr_) return;
+        const uint32_t seq = hdr_->ztsAnchorSeq.v.load(std::memory_order_relaxed);
+        // seq -> odd: write in progress
+        hdr_->ztsAnchorSeq.v.store(seq + 1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        hdr_->ztsAnchorSampleTime.v.store(sampleTime, std::memory_order_relaxed);
+        hdr_->ztsAnchorHostTicks.v.store(hostTicks, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        // seq -> even: stable
+        hdr_->ztsAnchorSeq.v.store(seq + 2, std::memory_order_release);
+    }
+
+    // Returns true and fills the pair when a consistent, valid (hostTicks != 0)
+    // anchor was read; false if no anchor yet or repeatedly torn.
+    bool ReadHwZeroTimestampAnchor(uint64_t& sampleTime, uint64_t& hostTicks) const {
+        if (!hdr_) return false;
+        for (int tries = 0; tries < 8; ++tries) {
+            const uint32_t s1 = hdr_->ztsAnchorSeq.v.load(std::memory_order_acquire);
+            if (s1 & 1u) continue;  // write in progress, retry
+            std::atomic_thread_fence(std::memory_order_acquire);
+            const uint64_t st = hdr_->ztsAnchorSampleTime.v.load(std::memory_order_relaxed);
+            const uint64_t ht = hdr_->ztsAnchorHostTicks.v.load(std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_acquire);
+            const uint32_t s2 = hdr_->ztsAnchorSeq.v.load(std::memory_order_acquire);
+            if (s1 == s2) {
+                sampleTime = st;
+                hostTicks = ht;
+                return ht != 0;
+            }
+        }
+        return false;
     }
 
 private:

@@ -88,6 +88,12 @@ struct AudioDriverSharedMemoryState {
 // Runtime layout is intentionally organized around hot-path state ownership, not field packing.
 // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 struct AudioDriverRuntimeState {
+    // Dedicated queue for the timestamp/clock-discipline timer. The driver's default
+    // GetWorkQueue() did NOT deliver this timer across every build (it never fired);
+    // a self-owned IODispatchQueue runs its own serviced thread, matching the queues
+    // used by FCPTransport/IsochTxVerifier/DiceAudioBackend. The timer is both created
+    // on and armed (WakeAtTime) on this queue, satisfying the SDK's same-queue rule.
+    OSSharedPtr<IODispatchQueue> timestampQueue;
     OSSharedPtr<IOTimerDispatchSource> timestampTimer;
     OSSharedPtr<OSAction> timestampTimerAction;
     uint64_t hostTicksPerBuffer{0};
@@ -177,6 +183,7 @@ void ASFWAudioDriver::free()
             ivars->runtime.timestampTimer.reset();
         }
         ivars->runtime.timestampTimerAction.reset();
+        ivars->runtime.timestampQueue.reset();
 
         // Release ZERO-COPY shared output buffer resources
         ASFW::Isoch::Audio::ResetZeroCopyState(ivars->shared.sharedOutputBuffer,
@@ -679,9 +686,24 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
         return error;
     }
     
-    // Create timer for timestamp generation
+    // Use the IOService default work queue for the timestamp timer. A prior build
+    // created a dedicated IODispatchQueue::Create("com.asfw.audio.zts") queue on the
+    // theory GetWorkQueue() was never serviced. On HW that dedicated queue turned out
+    // to be the real dead end: neither the timer created on it NOR the DispatchAsync
+    // arm block posted to it ever ran (zero zts/arm logs, zero firings, across three
+    // HW builds). In an AudioDriverKit (IOUserAudioDriver) dext a free-standing
+    // IODispatchQueue::Create queue is not pumped. The sibling ASFWMIDIDriver proves
+    // GetWorkQueue() IS serviced here — its RX poll timer is created on GetWorkQueue()
+    // and fires reliably (intervalUsec=1000). Mirror that: create and arm on it.
+    ivars->runtime.timestampQueue = GetWorkQueue();
+    if (!ivars->runtime.timestampQueue) {
+        ASFW_LOG(Audio, "ASFWAudioDriver: GetWorkQueue() returned null");
+        return kIOReturnNoResources;
+    }
+
+    // Create timer for timestamp generation ON the work queue (its delivery queue).
     IOTimerDispatchSource* timerSource = nullptr;
-    error = IOTimerDispatchSource::Create(ivars->workQueue.get(), &timerSource);
+    error = IOTimerDispatchSource::Create(ivars->runtime.timestampQueue.get(), &timerSource);
     if (error != kIOReturnSuccess) {
         ASFW_LOG(Audio, "ASFWAudioDriver: Failed to create timestamp timer: %d", error);
         return error;
@@ -697,7 +719,36 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
     }
     ivars->runtime.timestampTimerAction = OSSharedPtr(timerAction, OSNoRetain);
     ivars->runtime.timestampTimer->SetHandler(ivars->runtime.timestampTimerAction.get());
-    
+
+    // Arm the timestamp timer HERE, inline, in Start()'s context — exactly like the
+    // sibling ASFWMIDIDriver arms its RX-poll timer (which fires reliably). Start()
+    // runs on the work queue, so SetEnable+WakeAtTime land on the timer's own
+    // delivery queue, satisfying the SDK's same-queue rule WITHOUT any DispatchAsync.
+    // Four prior builds armed via DispatchAsync (from the CoreAudio HAL thread, or onto
+    // a non-serviced queue) and the block never ran → timer never fired. The timer now
+    // FREE-RUNS for the driver's lifetime; ZtsTimerOccurred re-arms unconditionally and
+    // gates real work on isRunning (set by StartDevice/StopDevice). Seed the period to
+    // the nominal buffer interval; HandleClockTimerTick refines it from the device clock.
+    {
+        struct mach_timebase_info tb;
+        mach_timebase_info(&tb);
+        const double rate = ivars->device.currentSampleRate > 0
+                          ? static_cast<double>(ivars->device.currentSampleRate)
+                          : 48000.0;
+        double ticks = static_cast<double>(ASFW::Isoch::Config::kAudioIoPeriodFrames * NSEC_PER_SEC) / rate;
+        ticks = (ticks * static_cast<double>(tb.denom)) / static_cast<double>(tb.numer);
+        ivars->runtime.hostTicksPerBuffer = static_cast<uint64_t>(ticks);
+
+        const kern_return_t enableKr =
+            ivars->runtime.timestampTimer->SetEnableWithCompletion(true, nullptr);
+        const uint64_t now = mach_absolute_time();
+        const kern_return_t wakeKr = ivars->runtime.timestampTimer->WakeAtTime(
+            kIOTimerClockMachAbsoluteTime, now + ivars->runtime.hostTicksPerBuffer, 0);
+        ASFW_LOG(Audio,
+                 "zts/arm (inline @Start): enable kr=0x%x wake kr=0x%x period=%llu ticks",
+                 enableKr, wakeKr, ivars->runtime.hostTicksPerBuffer);
+    }
+
     ASFW_LOG(Audio,
              "✅ ASFWAudioDriver: Started - device '%{public}s' (in=%u out=%u aggregate=%u)",
              ivars->device.deviceName,
@@ -756,6 +807,9 @@ kern_return_t ASFWAudioDriver::StartDevice(IOUserAudioObjectID in_object_id,
     ASFW::Isoch::Audio::AudioClockEngineState clockState{
         .audioDevice = ivars->audioDevice.get(),
         .timestampTimer = ivars->runtime.timestampTimer.get(),
+        // Arm on the timer's OWN delivery queue (not the default work queue), so
+        // WakeAtTime runs on the same queue the timer fires on, per the SDK.
+        .workQueue = ivars->runtime.timestampQueue.get(),
         .txQueueValid = ivars->shared.txQueueValid,
         .txQueueWriter = &ivars->shared.txQueueWriter,
         .rxQueueValid = ivars->shared.rxQueueValid,
@@ -831,8 +885,30 @@ kern_return_t ASFWAudioDriver::ReadProtocolBooleanControl(uint32_t classIdFourCC
 // Timer callback - called periodically to update zero timestamps
 void ASFWAudioDriver::ZtsTimerOccurred_Impl([[maybe_unused]] OSAction* action, uint64_t time)
 {
+    // DIAG (zts-fire): confirm the timestamp timer callback actually fires.
+    // Before the SetEnable/WakeAtTime reorder this never logged. ~1s rate limit.
+    // Remove once the clock loop is confirmed live.
+    ASFW_LOG_RL(Audio, "zts/fire", 1000, OS_LOG_TYPE_DEFAULT,
+                "ZtsTimerOccurred: timer FIRING (time=%llu)", time);
 
-    if (!ivars || !ivars->runtime.isRunning.load(std::memory_order_acquire) || !ivars->audioDevice) {
+    if (!ivars || !ivars->runtime.timestampTimer) {
+        return;
+    }
+
+    // Re-arm UNCONDITIONALLY (MIDI ScheduleMidiRxPoll pattern) so the timer free-runs
+    // for the driver's lifetime, independent of streaming. The period tracks
+    // hostTicksPerBuffer, which HandleClockTimerTick refines from the device clock;
+    // fall back to a 10 ms idle cadence before the first period is computed.
+    uint64_t period = ivars->runtime.hostTicksPerBuffer;
+    if (period == 0) {
+        struct mach_timebase_info tb;
+        mach_timebase_info(&tb);
+        // 10 ms idle cadence (NSEC_PER_SEC/100) converted to mach ticks.
+        period = static_cast<uint64_t>(((NSEC_PER_SEC / 100ull) * tb.denom) / tb.numer);
+    }
+    ivars->runtime.timestampTimer->WakeAtTime(kIOTimerClockMachAbsoluteTime, time + period, 0);
+
+    if (!ivars->runtime.isRunning.load(std::memory_order_acquire) || !ivars->audioDevice) {
         return;
     }
 

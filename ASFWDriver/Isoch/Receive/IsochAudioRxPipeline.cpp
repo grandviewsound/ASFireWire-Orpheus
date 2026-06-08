@@ -13,6 +13,8 @@ void IsochAudioRxPipeline::ConfigureFor48k() noexcept {
 void IsochAudioRxPipeline::OnStart() noexcept {
     streamProcessor_.Reset();
     packetParser_.Reset();
+    ztsClock_.Reset();
+    cycleCorr_ = CycleTimeCorrelation{};
 
     if (externalSyncBridge_) {
         externalSyncBridge_->Reset();
@@ -83,26 +85,50 @@ void IsochAudioRxPipeline::OnPollEnd(Driver::HardwareInterface& hw,
         streamProcessor_.RecordPollLatency(deltaUs, packetsProcessed);
     }
 
-    // Periodic cycle-time rate estimation (~1 second intervals, assuming 1kHz Poll cadence).
+    // Read the (cycle-timer, host-uptime) pair once per poll, as atomically as the
+    // hardware allows, and reuse it for both the zero-timestamp anchor (every poll)
+    // and the rate estimate (every kCycleCorrPollInterval polls).
+    auto [ct, up] = hw.ReadCycleTimeAndUpTime();
+
+    // Hardware zero-timestamp anchor (Apple "use the time passed in the hardware
+    // interrupt"): the device is bus cycle-master, so the FireWire cycle timer IS
+    // its sample clock. Advance the monotonic device sample clock from the cycle
+    // timer and publish (sampleTime, hostTicks) so the audio driver anchors
+    // CoreAudio's zero timestamp to real hardware time rather than accumulating a
+    // free-running software timer. Only advance while actually streaming.
+    if (packetsProcessed > 0) {
+        const uint64_t sampleTime = ztsClock_.Advance(ct, cycleCorr_.sampleRate);
+        rxSharedQueue_.PublishHwZeroTimestampAnchor(sampleTime, up);
+    }
+
+    // Cycle-time rate estimation: slave the host audio clock to the device's
+    // FireWire cycle clock so CoreAudio produces samples at *exactly* the device
+    // rate (otherwise the host free-runs the nominal 48000 Hz software timer and
+    // drifts against the device crystal → TX ring underruns → "funky" playback).
+    // Capture the baseline on the very first poll, then re-estimate every
+    // kCycleCorrPollInterval polls. Was 1000 with the baseline only taken on the
+    // first interval boundary, so q8 stayed 0 (free-running fallback) for ~2
+    // intervals after stream start; halved + baseline-on-first-poll so the lock
+    // engages ~4x sooner.
+    constexpr uint32_t kCycleCorrPollInterval = 500;
     cycleCorr_.pollsSinceLastUpdate++;
-    if (cycleCorr_.pollsSinceLastUpdate >= 1000) {
-        auto [ct, up] = hw.ReadCycleTimeAndUpTime();
+    if (!cycleCorr_.hasPrevious || cycleCorr_.pollsSinceLastUpdate >= kCycleCorrPollInterval) {
         if (cycleCorr_.hasPrevious) {
             const int64_t dFW = ASFW::Timing::deltaFWTimeNanos(ct, cycleCorr_.prevCycleTimer);
             const int64_t dHost = static_cast<int64_t>(ASFW::Timing::hostTicksToNanos(up))
                                 - static_cast<int64_t>(ASFW::Timing::hostTicksToNanos(cycleCorr_.prevHostTicks));
-            ASFW_LOG_V3(Isoch, "CycleCorr: ct=0x%08x prev=0x%08x dFW=%lld dHost=%lld",
-                        ct, cycleCorr_.prevCycleTimer, dFW, dHost);
             if (dFW > 0 && dHost > 0) {
                 const double ratio = static_cast<double>(dHost) / static_cast<double>(dFW);
                 const double nanosPerSample = ratio * (1e9 / cycleCorr_.sampleRate);
                 const uint32_t q8 = static_cast<uint32_t>(nanosPerSample * 256.0 + 0.5);
                 rxSharedQueue_.SetCorrHostNanosPerSampleQ8(q8);
-                ASFW_LOG_V3(Isoch, "CycleCorr: ratio=%.6f nanosPerSample=%.1f q8=%u",
-                            ratio, nanosPerSample, q8);
+                // Always-on (rate-limited to ~1s) so the host-clock lock is visible
+                // at the default ASFWIsochVerbosity=1 — the 2026-06-06 first-audio
+                // run could not confirm whether this lock ever engaged.
+                ASFW_LOG_RL(Isoch, "cyclecorr/q8", 1000, OS_LOG_TYPE_DEFAULT,
+                            "CycleCorr: ratio=%.6f nanosPerSample=%.1f q8=%u dFW=%lld dHost=%lld",
+                            ratio, nanosPerSample, q8, dFW, dHost);
             }
-        } else {
-            ASFW_LOG_V3(Isoch, "CycleCorr: baseline ct=0x%08x up=%llu", ct, up);
         }
         cycleCorr_.prevCycleTimer = ct;
         cycleCorr_.prevHostTicks = up;

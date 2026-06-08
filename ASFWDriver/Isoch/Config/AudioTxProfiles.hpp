@@ -33,11 +33,11 @@ inline constexpr uint32_t kTransferChunkFrames = 256;
 inline constexpr TxBufferProfile kTxProfileA{
     "A",
     256,   // startWaitTargetFrames
-    512,   // startupPrimeLimitFrames
-    512,   // legacyRbTargetFrames
-    768,   // legacyRbMaxFrames
+    768,   // startupPrimeLimitFrames  (was 512: deeper prime absorbs the CoreAudio Start/Stop re-prime glitch)
+    768,   // legacyRbTargetFrames     (was 512: more drain margin; 2026-06-06 run hovered 56–312 and underran)
+    1024,  // legacyRbMaxFrames        (was 768: keep > target with headroom)
     6,     // legacyMaxChunksPerRefill
-    64,    // safetyOffsetFrames (2A)
+    128,   // safetyOffsetFrames (2A)  (was 64: keep CoreAudio writing further ahead of the drain head → fewer underruns)
     48     // minPrimeDataPackets (2B)
 };
 

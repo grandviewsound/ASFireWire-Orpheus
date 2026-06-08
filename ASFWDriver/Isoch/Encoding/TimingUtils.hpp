@@ -133,4 +133,45 @@ constexpr uint32_t kCycleTimerOffsetMask = 0x00000FFF;   // bits 11:0
     return static_cast<uint64_t>(normalized);
 }
 
+//-----------------------------------------------------------------------------
+// FireWire cycle-timer → monotonic device sample clock
+//-----------------------------------------------------------------------------
+
+/// Accumulates wrap-corrected FireWire cycle-timer deltas into a monotonic
+/// device-nanosecond clock and converts it to a sample-frame count. When the
+/// device is bus cycle-master (e.g. Orpheus), the OHCI cycle timer *is* the
+/// device's sample clock, so this yields CoreAudio's zero-timestamp sample-time
+/// straight from hardware — Apple's "use the time passed in the hardware
+/// interrupt" contract. Pure/header-only so it is unit-testable off-hardware.
+struct FwSampleClock {
+    uint64_t deviceNanos{0};  // monotonic device time in ns since Reset()
+    uint32_t prevCt{0};       // last cycle-timer reading
+    bool     hasPrev{false};
+
+    /// Reject absurd inter-poll gaps (anomalous reads / long stalls) so a single
+    /// bad delta cannot corrupt the monotonic clock. Polls are sub-ms..few-ms.
+    static constexpr int64_t kMaxPollDeltaNanos = 100'000'000;  // 100 ms
+
+    void Reset() noexcept {
+        deviceNanos = 0;
+        prevCt = 0;
+        hasPrev = false;
+    }
+
+    /// Advance by the wrap-corrected delta from the previous reading and return
+    /// the device sample-time (frames) for the given sample rate.
+    [[nodiscard]] uint64_t Advance(uint32_t cycleTimer, double sampleRate) noexcept {
+        if (hasPrev) {
+            const int64_t dNs = deltaFWTimeNanos(cycleTimer, prevCt);
+            if (dNs > 0 && dNs < kMaxPollDeltaNanos) {
+                deviceNanos += static_cast<uint64_t>(dNs);
+            }
+        }
+        prevCt = cycleTimer;
+        hasPrev = true;
+        return static_cast<uint64_t>(
+            (static_cast<double>(deviceNanos) * sampleRate) / 1e9 + 0.5);
+    }
+};
+
 } // namespace ASFW::Timing

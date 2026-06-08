@@ -1087,6 +1087,25 @@ target_include_directories(BlockingCadenceTests PRIVATE ${ASFW_COMMON_INCLUDES})
 
 gtest_discover_tests(BlockingCadenceTests)
 
+# Zero-Timestamp Anchor Tests (hardware-driven clock anchor)
+add_executable(ZeroTimestampAnchorTests
+    "${ASFW_TESTS_DIR}/ZeroTimestampAnchorTests.cpp"
+)
+
+target_link_libraries(ZeroTimestampAnchorTests
+    PRIVATE
+        GTest::gtest_main
+)
+
+target_compile_definitions(ZeroTimestampAnchorTests
+    PRIVATE
+        ASFW_HOST_TEST
+)
+
+target_include_directories(ZeroTimestampAnchorTests PRIVATE ${ASFW_COMMON_INCLUDES})
+
+gtest_discover_tests(ZeroTimestampAnchorTests)
+
 # Non-Blocking Cadence Tests (48 kHz)
 add_executable(NonBlockingCadenceTests
     "${ASFW_TESTS_DIR}/NonBlockingCadenceTests.cpp"
