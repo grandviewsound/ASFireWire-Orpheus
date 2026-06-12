@@ -105,7 +105,7 @@ constexpr uint32_t kPlugSignalFmtCommandSize = 8;
 //   [ctype][subunit=0x08][opcode=0x00][OUI_0][OUI_1][OUI_2][cmd][value][0xFF x7]
 // Total: 15 bytes
 //
-// Reference: implementation analysis of Orpheus Control Panel, OrpheusModels.swift
+// Reference: Orpheus Control Panel behavior, OrpheusModels.swift
 constexpr uint8_t kAVCSubunitAudio       = 0x08;  // Audio subunit type=1, ID=0
 constexpr uint8_t kAVCOpcodeVendorDep    = 0x00;  // VENDOR-DEPENDENT
 constexpr uint8_t kPrismOUI0             = 0x00;

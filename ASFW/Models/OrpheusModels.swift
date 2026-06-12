@@ -83,9 +83,9 @@ enum OrpheusMeterMode: UInt8, CaseIterable, Identifiable {
 //   bit 0 → 0 = Input, 1 = Output   (what the front-panel LEDs display)
 //   bit 1 → "Follow Global": this unit tracks the panel-wide global Input/Output setting
 // so all units in a multi-unit rig switch together (manual: hardware_met.htm).
-// Confirmed from the Prism panel behavior analysis: onFpMetersLocal: (Follow Global → global|2),
+// Confirmed from the Prism panel's behavior: onFpMetersLocal: (Follow Global → global|2),
 // onFpMetersGlobal: → DeviceManager::SetFpMeters (re-pushes global|2 to every Follow-Global
-// unit). See memory panel analysis + panel analysis-persistence.
+// unit).
 
 /// Per-device FP Meters selection (Unit Settings tab): Input / Output / Follow Global.
 enum OrpheusFpMeterLocal: UInt8, CaseIterable, Identifiable {

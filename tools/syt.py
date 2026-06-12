@@ -4,7 +4,7 @@ SYT (Synchronization Timestamp) Generator Simulator
 
 Simulates Apple's AM824NuDCLWrite SYT generation algorithm for FireWire audio.
 
-Key constants from Apple's implementation analysis:
+Key constants from Apple's implementation:
 - 30,720,000 = one FireWire cycle in "TenThousand" units (3072 × 10000)
 - 491,520,000 = 16 cycles wrap (SYT cycle field is 4 bits)
 - +3 cycles transfer delay = 375µs presentation offset
@@ -83,7 +83,7 @@ class AppleSYTGenerator:
     """
     Apple-style SYT generator.
     
-    Key insight from implementation analysis:
+    Key insight from Apple's implementation:
     - Counter increments by 30,720,000 per packet (one cycle)
     - SYT = (bus_cycle + counter_cycles + 3) & 0xF | offset
     """

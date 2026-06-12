@@ -43,8 +43,7 @@ kern_return_t ATManager<ContextT, RingT, RoleTag>::Submit(DescriptorChain&& chai
     const uint32_t txid = chain.txid;
 
     // PATH decision using software state only (Apple's pattern)
-    // From implementation analysis @ 0xDBBE line 109: if (*((byte *)this + 28))
-    // Apple checks ONLY software flag, never reads hardware registers
+    // Apple checks ONLY a software flag, never reads hardware registers
     bool canP2;
     {
         IOLockWrapper lockWrapper(lock());
@@ -188,7 +187,7 @@ kern_return_t ATManager<ContextT, RingT, RoleTag>::SubmitPath2_(const Descriptor
     }
 
     // Pulse WAKE bit and return immediately (Apple's fire-and-forget pattern)
-    // From implementation analysis @ 0xDBBE: WAKE is a hint, hardware picks up branch asynchronously
+    // WAKE is a hint; hardware picks up the branch asynchronously.
     // NO POLLING - Apple never polls ACTIVE after WAKE in PATH-2!
     ctx().WriteControlSet(kContextControlWakeBit);
 

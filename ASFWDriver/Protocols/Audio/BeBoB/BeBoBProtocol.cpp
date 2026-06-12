@@ -840,9 +840,9 @@ IOReturn BeBoBProtocol::ApplyVendorBulkSource(uint8_t source)
 }
 
 // ---------------------------------------------------------------------------
-// Prism mix CONTROL helpers — analysis-backed Orpheus::Device::SetMix opcodes
+// Prism mix CONTROL helpers — Orpheus::Device::SetMix opcodes
 // ---------------------------------------------------------------------------
-// Analyze evidence:
+// Observed behavior:
 //   SetMix(output,param,value) builds [00 08 00 00 11 98 cmd output value...]
 //   SetMix(output,input,param,value) builds
 //   [00 08 00 00 11 98 cmd output input value...].

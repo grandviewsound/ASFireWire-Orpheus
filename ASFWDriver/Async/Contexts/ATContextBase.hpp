@@ -397,8 +397,8 @@ kern_return_t ATContextBase<Derived, Tag>::Arm(uint32_t commandPtr) noexcept {
     // This ensures PCIe posted write reaches hardware before we set RUN.
     OSSynchronizeIO();
 
-    // Step 3: Set RUN bit ONLY (Apple pattern from implementation analysis)
-    // Apple executeCommandElement() at 0xdbbe, lines 116-120:
+    // Step 3: Set RUN bit ONLY (matches Apple's implementation)
+    // Apple's executeCommandElement():
     //   WriteCommandPtr(elementPhysAddr | elementZ);
     //   WriteControlSet(0x8000);  // RUN ONLY, NO WAKE
     //   contextRunning_ = 1;
@@ -542,7 +542,7 @@ kern_return_t ATContextBase<Derived, Tag>::SubmitChain(
         return kIOReturnNoSpace;
     }
 
-    // Step 3: Two-path execution model (per Apple's implementation @ the implementation notes)
+    // Step 3: Two-path execution model (matches Apple's implementation)
     const bool ringEmpty = (headIndex == tailIndex);
     // Use TotalBlocks as the Z nibble per OHCI; chain.firstBlocks alone is incorrect for header+payload chains
     const uint32_t commandPtr = HW::MakeBranchWordAT(chain.firstIOVA32, chain.TotalBlocks());
@@ -697,7 +697,7 @@ std::optional<TxCompletion> ATContextBase<Derived, Tag>::ScanCompletion() noexce
                                                 : sizeof(HW::OHCIDescriptor));
         }
 
-        // APPLE'S APPROACH: No explicit barriers in descriptor scanning (per implementation analysis)
+        // APPLE'S APPROACH: No explicit barriers in descriptor scanning
         // - Direct loads from descriptors
         // - Relies on hardware ordering or volatile semantics
         // - DSB from IoBarrier is sufficient for device memory
@@ -716,7 +716,7 @@ std::optional<TxCompletion> ATContextBase<Derived, Tag>::ScanCompletion() noexce
 
         const uint16_t xferStatus = HW::AT_xferStatus(*desc);
         if (xferStatus == 0) {
-            // Per Apple's handleCompletedCommand (the implementation notes):
+            // Matches Apple's handleCompletedCommand:
             // When statusWord==0, hardware hasn't completed. But check if this is an
             // ORPHANED descriptor - one that was cancelled/timed out and hardware skipped over.
             //

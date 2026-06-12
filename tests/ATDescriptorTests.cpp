@@ -227,7 +227,7 @@ TEST_F(ATDescriptorZValueTests, ExtractTLabel_HandlesNullPointer) {
 }
 
 TEST_F(ATDescriptorZValueTests, ExtractTLabel_RealHardwarePacket) {
-    // Real packet data from hardware logs (see the implementation notes tLabel extraction bug fix)
+    // Real packet data from hardware logs (tLabel extraction bug fix)
     // TX descriptor sent with tLabel=0, hardware completion showed 0xFFC00140 in immediateData[0]
     //
     // IEEE 1394 format breakdown of 0xFFC00140:
@@ -370,10 +370,10 @@ TEST_F(ATDescriptorZValueTests, ControlWord_AppleQuadletRead_ExactMatch) {
     // This uses OHCI 1.2 draft bit positions (not OHCI 1.1 spec!).
     //
     // Validated against:
-    //   - Apple kext implementation analysis: 0x123C0000 constant
+    //   - Apple's AppleFWOHCI implementation: 0x123C0000 constant
     //   - Linux firewire driver: same bit layout (drivers/firewire/ohci.c)
 
-    // Apple's hardcoded constant from implementation analysis
+    // Apple's hardcoded constant
     constexpr uint32_t kAppleControlWord = 0x123C000C;
     constexpr uint16_t kAppleHighWord = static_cast<uint16_t>(kAppleControlWord >> 16);
 

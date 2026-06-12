@@ -40,7 +40,7 @@ namespace ASFW::Async {
  * 5. Destructor unmaps IOMemoryMap and releases DMABuffer when refcount→0
  * 
  * Reference: Apple's IOFWAsyncCommand allocates per-transaction IODMACommand
- *            and keeps it alive until completion (see the implementation notes §Async Submission).
+ *            and keeps it alive until completion.
  */
 class PayloadContext {
 public:

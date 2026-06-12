@@ -175,7 +175,7 @@ struct alignas(16) OHCIDescriptor {
     // CRITICAL: These positions match OHCI 1.2 draft (not OHCI 1.1 spec!).
     // Validated against:
     //   1. Linux firewire-ohci driver (drivers/firewire/ohci.c lines 56-68)
-    //   2. Apple's AppleFWOHCI kext (implementation analysis, control word 0x123C000C)
+    //   2. Apple's AppleFWOHCI implementation (control word 0x123C000C)
     //
     // OHCI 1.2 moved several fields compared to OHCI 1.1:
     //   - key field: bits[10:8] (was [11:9] in OHCI 1.1)
@@ -218,7 +218,7 @@ struct alignas(16) OHCIDescriptor {
     
     // ========================================================================
     // Control Word Construction - Single Source of Truth
-    // Matches Apple's 0x123C0000 pattern (the implementation notes Line 87)
+    // Matches Apple's 0x123C0000 pattern
     // Per OHCI 1.2 draft spec (Apple implementation)
     // ========================================================================
     

@@ -166,7 +166,7 @@ DescriptorBuilder::DescriptorChain DescriptorBuilder::BuildTransactionChain(cons
     }
 
     // CRITICAL: Always use kIntAlways (i=3) for OUTPUT_LAST descriptors per Apple's pattern
-    // (the implementation notes Line 87: asyncRead uses i=3 for all OUTPUT_LAST_Immediate)
+    // (asyncRead uses i=3 for all OUTPUT_LAST_Immediate)
     // This ensures we ALWAYS get an AT_req completion IRQ, even if no AR response arrives.
     // Without this, timeout detection depends solely on software timers, which is unreliable.
     // The interrupt policy is the same for both single-descriptor and two-descriptor paths.

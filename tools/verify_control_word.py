@@ -64,7 +64,7 @@ def test_apple_reference():
     print("TEST 1: Apple Reference Case (quadlet read)")
     print("=" * 70)
     
-    # Apple's actual control word from implementation analysis
+    # Apple's actual control word
     apple_control = 0x123C000C
     
     # Parameters for quadlet read

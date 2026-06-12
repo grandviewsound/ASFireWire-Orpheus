@@ -5,8 +5,7 @@
 // Producer: IOOperationHandler (CoreAudio callback)
 // Consumer: Encoding pipeline (simulated at 8kHz cycle rate)
 //
-// Reference: docs/Isoch/PHASE_1_5_ENCODING.md
-// Based on: the implementation notes analyzed RingBuffer analysis
+// Reference: Apple's RingBuffer behavior
 //
 
 #pragma once
