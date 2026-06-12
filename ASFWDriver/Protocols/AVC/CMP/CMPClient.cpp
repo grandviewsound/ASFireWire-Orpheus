@@ -274,8 +274,8 @@ void CMPClient::DisconnectIPCR(uint8_t plugNum, CMPCallback callback) {
 // ============================================================================
 
 // Fix 98: SINGLE combined compare-swap per connect, byte-for-byte matching
-// Apple's AM824AVC::cmpNewPointToPointConnection (IOFireWireAVC, analysis
-// 2026-05-19). Apple computes one new value — p2p counter +1, plus speed and
+// Apple's AM824AVC::cmpNewPointToPointConnection (IOFireWireAVC).
+// Apple computes one new value — p2p counter +1, plus speed and
 // (ONLY on the first connection, i.e. p2p 0→1) the channel — and writes it in
 // ONE CAS. The earlier two-stage form wrote the channel with p2p unchanged
 // first; that standalone channel write (ch!=0, p2p=0) is an operation Apple

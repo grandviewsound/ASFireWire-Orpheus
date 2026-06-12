@@ -131,9 +131,9 @@ constexpr int8_t kFullRightPan = 20;
     return rawFormatBlock.size() >= 3 && rawFormatBlock[0] == 0x90;
 }
 
-// Sync-source enum decode — confirmed by analysis of Prism Control Panel
+// Sync-source enum decode — confirmed against the Prism Control Panel's
 // `Orpheus::Device::SetSyncAvc(int)` switch builder + `Sync()` response decoder
-// (Apr 26 2026, see orpheus-vendor-avc-decoded.md).
+// (Apr 26 2026).
 [[nodiscard]] const char* DecodeSyncSource(uint8_t value) noexcept
 {
     switch (value) {
@@ -1200,8 +1200,8 @@ IOReturn BeBoBProtocol::QueryVendorDeviceStatus(uint8_t cmdByte,
 // ---------------------------------------------------------------------------
 // QueryVendorBulkState — vendor 0xBF STATUS bulk state read (panel Get(13))
 // ---------------------------------------------------------------------------
-// Mirrors the Prism Control Panel's `Orpheus::Device::Get(13)` (analysis
-// addr 0x10001b1cc). Wire layout — exact panel byte sequence:
+// Mirrors the Prism Control Panel's `Orpheus::Device::Get(13)`.
+// Wire layout — exact panel byte sequence:
 //   [0]=0x01 STATUS  [1]=0x08 music subunit  [2]=0x00 VENDOR-DEPENDENT
 //   [3..5]=Prism OUI 00 11 98               [6]=0xBF bulk-state opcode
 //   [7..14]=0x00 (panel sends uninitialized stack; AV/C ignores unread bytes)
@@ -1304,8 +1304,8 @@ IOReturn BeBoBProtocol::QueryVendorBulkState(OrpheusDeviceState& out)
 // ---------------------------------------------------------------------------
 // QuerySignalSourceSync — AV/C SignalSource STATUS at UNIT (panel Sync())
 // ---------------------------------------------------------------------------
-// Mirrors the Prism Control Panel's `Orpheus::Device::Sync()` (analysis
-// addr 0x1cb78). 8-byte AV/C General SignalSource STATUS, addressing the
+// Mirrors the Prism Control Panel's `Orpheus::Device::Sync()`.
+// 8-byte AV/C General SignalSource STATUS, addressing the
 // device's sync-input external plug.
 //   [0]=0x01 STATUS  [1]=0xFF UNIT  [2]=0x1A SIGNAL_SOURCE
 //   [3]=0x0F reserved   [4..5]=0xFF 0xFF source plug query (wildcard)

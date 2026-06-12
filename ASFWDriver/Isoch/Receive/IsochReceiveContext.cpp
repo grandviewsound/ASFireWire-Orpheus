@@ -91,8 +91,8 @@ kern_return_t IsochReceiveContext::Start() {
     hardware_->Write(registers_.CommandPtr, cmdPtr);
 
     hardware_->Write(registers_.ContextControlClear, 0xFFFFFFFFu);
-    // Apple sets bit 31 (bufferFill) for ALL IR contexts, verified via analysis
-    // of AppleFWOHCI_DMAManager::Context::start at sym 0xac68. In bufferFill
+    // Apple sets bit 31 (bufferFill) for ALL IR contexts
+    // (AppleFWOHCI_DMAManager::Context::start). In bufferFill
     // mode hardware writes packets contiguously across descriptors and
     // PacketStreamParser splits the byte stream. See
     // apple-ir-bufferfill-confirmed.md.

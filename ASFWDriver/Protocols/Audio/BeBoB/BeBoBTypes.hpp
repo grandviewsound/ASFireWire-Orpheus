@@ -113,7 +113,7 @@ constexpr uint8_t kPrismOUI1             = 0x11;
 constexpr uint8_t kPrismOUI2             = 0x98;
 constexpr uint32_t kVendorDeviceCmdSize  = 15;
 
-// Vendor opcode table — confirmed by analysis of Prism Control Panel's
+// Vendor opcode table — confirmed against the Prism Control Panel's
 // Orpheus::Device::{Get,Set,SetSyncAvc} (Apr 26 2026). Opcodes 0xA0-0xBF
 // at music subunit (0x08), VENDOR-DEPENDENT (0x00), Prism OUI 00:11:98.
 // CONTROL writes use ctype=0x00, STATUS reads use ctype=0x01.

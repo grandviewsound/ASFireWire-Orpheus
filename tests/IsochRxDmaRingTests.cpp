@@ -70,8 +70,8 @@ TEST(IsochRxDmaRingTests, ChainTopology_LastDescriptorIsTerminator) {
 }
 
 TEST(IsochRxDmaRingTests, ControlWord_MatchesAppleIR) {
-    // Per AppleFWOHCI analysis of MultiIsochReceiver::newCommandElement
-    // (sym 0x197dc), the IR descriptor control word is 0x280C1000 for a
+    // Per AppleFWOHCI MultiIsochReceiver::newCommandElement,
+    // the IR descriptor control word is 0x280C1000 for a
     // 4096-byte buffer: cmd=INPUT_MORE, s=1, key=0, i=Never, b=Always,
     // w=Never, reqCount=4096. Our 64-byte test buffer differs only in the
     // reqCount low half; the upper half (control flags) must match.

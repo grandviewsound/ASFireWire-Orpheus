@@ -98,10 +98,9 @@ struct ContextControl {
     //                        software parses per-packet boundaries from the
     //                        4-byte hardware-prepended cycleTimestamp + the
     //                        4-byte wire isoch header. Apple ALWAYS sets this
-    //                        for IR contexts (verified via analysis of
-    //                        AppleFWOHCI_DMAManager::Context::start at sym
-    //                        0xac68 — sets 0x80000000 for type=2 single IR and
-    //                        type=3 multiIsoch).
+    //                        for IR contexts: AppleFWOHCI_DMAManager::
+    //                        Context::start sets 0x80000000 for type=2 single
+    //                        IR and type=3 multiIsoch.
     //   bit 28 multiChanMode — Apple's MultiIsochReceiver type=3 only.
     //   bit 27 dualBufferMode — alternate dual-buffer receive (rare).
     static constexpr uint32_t kBufferFill     = 1u << 31;

@@ -124,7 +124,7 @@ public:
         }
     }
 
-    // Per OHCI §10.2.2 + AppleFWOHCI processReceivedPackets analysis:
+    // Per OHCI §10.2.2 + AppleFWOHCI processReceivedPackets:
     // pktSize = 8 (prefix) + roundUp4(data_length).
     // data_length is bits 31-16 of the isoch header quadlet at offset +4
     // when read as a host-endian uint32_t (OHCI byte-swaps wire→host).

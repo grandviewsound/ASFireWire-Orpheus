@@ -31,7 +31,7 @@
 namespace ASFW::Audio::BeBoB {
 
 /// Mirror of the Prism Control Panel's internal device-state struct, populated
-/// from the same read paths. Source: analysis of
+/// from the same read paths. Source: the Prism Control Panel's
 /// Orpheus::Device::{Get(13), Sync()} (May 2026).
 ///
 /// Path A — vendor STATUS opcode 0xBF at music subunit returns 8 bytes packed
@@ -46,8 +46,8 @@ struct OrpheusDeviceState {
     bool     adatReadValid{false};      // 0xB3 STATUS succeeded
     bool     unknownB6Valid{false};     // 0xB6 STATUS succeeded
 
-    // From 0xBF bulk STATUS. Field offsets per analysis of
-    // Orpheus::Device::Get(int) case 13 response decoder at 0x10001b1cc.
+    // From 0xBF bulk STATUS. Field offsets per the Prism Control Panel's
+    // Orpheus::Device::Get(int) case 13 response decoder.
     int16_t  masterVolValue{0};         // resp[7..8] s16 BE
     int16_t  masterVolEnabled{0};       // resp[9..10] s16 BE
     bool     masterMute{false};         // resp[11] bit 0

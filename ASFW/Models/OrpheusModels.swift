@@ -25,7 +25,7 @@ enum OrpheusAnalogCommand: UInt8 {
     case micGain        = 0xC7
     /// Instrument-input gain for the inst-capable channels (0..1). The Prism
     /// panel labels this "Inst gain"; the original Swift port had it as
-    /// `impedance` which is wrong per the analysis RE (`onInstSlider:` →
+    /// `impedance` which is wrong per the panel's behavior (`onInstSlider:` →
     /// `Device::SetAnalog(ch, 4, val)` → opcode 0xC8).
     case instGain       = 0xC8
     case lineOutLevel   = 0xC9
@@ -224,7 +224,7 @@ struct OrpheusAnalogChannelState: Equatable {
     var type: UInt8 = 0                 // input type identifier
 
     /// Parse the packed "All" boolean byte from bulk read response byte 9.
-    /// analysis: Analog::GetAll() packs input level at bit 0 and output level at bit 1.
+    /// Panel behavior: Analog::GetAll() packs input level at bit 0 and output level at bit 1.
     mutating func parseAllByte(_ byte: UInt8) {
         lineInLevel  = (byte & 0x01) != 0
         lineOutLevel = (byte & 0x02) != 0
