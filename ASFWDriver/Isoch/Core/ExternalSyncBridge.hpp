@@ -24,6 +24,15 @@ struct ExternalSyncBridge {
     std::atomic<uint32_t> lastPackedRx{0};      // [SYT:16][FDF:8][DBS:8]
     std::atomic<uint64_t> lastUpdateHostTicks{0};
 
+    // Host-vs-FW-bus clock ratio measured by the IR pipeline (CycleCorr), as
+    // host nanoseconds-per-sample in Q8 fixed point (value * 256). 0 = not yet
+    // measured. The IT SYT generator reads this to drift SYT at the REAL device
+    // rate (Apple AppleFWAudio CalculateNewTimeStamp equivalent) instead of the
+    // nominal 48 kHz. Carried here because this is the existing IR->IT shared
+    // channel; UNLIKE the external-sync fields above, it applies on the device's
+    // INTERNAL clock too (the host-vs-bus crystal drift is always present).
+    std::atomic<uint32_t> hostNanosPerSampleQ8{0};
+
     static constexpr uint32_t PackRxSample(uint16_t syt, uint8_t fdf, uint8_t dbs) noexcept {
         return (static_cast<uint32_t>(syt) << 16) |
                (static_cast<uint32_t>(fdf) << 8) |
@@ -48,6 +57,7 @@ struct ExternalSyncBridge {
         updateSeq.store(0, std::memory_order_release);
         lastPackedRx.store(0, std::memory_order_release);
         lastUpdateHostTicks.store(0, std::memory_order_release);
+        hostNanosPerSampleQ8.store(0, std::memory_order_release);
     }
 };
 

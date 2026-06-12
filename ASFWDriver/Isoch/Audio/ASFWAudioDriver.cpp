@@ -97,6 +97,13 @@ struct AudioDriverRuntimeState {
     OSSharedPtr<IOTimerDispatchSource> timestampTimer;
     OSSharedPtr<OSAction> timestampTimerAction;
     uint64_t hostTicksPerBuffer{0};
+    // Absolute mach-time deadline grid for the free-running zts timer: each re-arm
+    // extends the PREVIOUS deadline rather than the delivered callback time, so
+    // delivery latency stays a constant phase offset instead of compounding into
+    // the cadence (see ZtsTimerOccurred). ztsPeriodsArmed = beats the pending
+    // deadline represents, credited to the clock engine when it fires.
+    uint64_t ztsNextDeadline{0};
+    uint32_t ztsPeriodsArmed{1};
     std::atomic<bool> isRunning{false};
 
     ASFW::Isoch::Audio::IOMetricsState ioMetrics;
@@ -906,7 +913,30 @@ void ASFWAudioDriver::ZtsTimerOccurred_Impl([[maybe_unused]] OSAction* action, u
         // 10 ms idle cadence (NSEC_PER_SEC/100) converted to mach ticks.
         period = static_cast<uint64_t>(((NSEC_PER_SEC / 100ull) * tb.denom) / tb.numer);
     }
-    ivars->runtime.timestampTimer->WakeAtTime(kIOTimerClockMachAbsoluteTime, time + period, 0);
+
+    // Deadline-anchored re-arm (HW log 2026-06-10_22-22-09): `WakeAtTime(time + period)`
+    // anchored each deadline at the DELIVERED callback time, which lags its deadline by
+    // ~1.9 ms on this queue — the lag compounded into the cadence (12.6 ms beats vs the
+    // 10.7 ms grid period), so the published zero-timestamp receded from wall clock at
+    // ~0.15 s/s (lead ramped to -132M ticks over the run). Extending the PREVIOUS
+    // deadline instead makes delivery lag a constant phase offset. Beats skipped while
+    // catching back up ahead of "now" are credited to the clock engine (elapsedPeriods)
+    // so the published grid still advances by real elapsed time.
+    const uint64_t now = mach_absolute_time();
+    uint64_t deadline = ivars->runtime.ztsNextDeadline;
+    if (deadline == 0 || deadline + (period * 64) < now) {
+        deadline = time;  // first fire, or stalled >64 beats: re-anchor at delivery
+    }
+    uint32_t beatsArmed = 0;
+    do {
+        deadline += period;
+        ++beatsArmed;
+    } while (deadline <= now);
+    const uint32_t elapsedPeriods =
+        ivars->runtime.ztsPeriodsArmed > 0 ? ivars->runtime.ztsPeriodsArmed : 1;
+    ivars->runtime.ztsNextDeadline = deadline;
+    ivars->runtime.ztsPeriodsArmed = beatsArmed;
+    ivars->runtime.timestampTimer->WakeAtTime(kIOTimerClockMachAbsoluteTime, deadline, 0);
 
     if (!ivars->runtime.isRunning.load(std::memory_order_acquire) || !ivars->audioDevice) {
         return;
@@ -923,6 +953,7 @@ void ASFWAudioDriver::ZtsTimerOccurred_Impl([[maybe_unused]] OSAction* action, u
         .zeroCopyFrameCapacity = ivars->shared.zeroCopyFrameCapacity,
         .zeroCopyTimeline = &ivars->runtime.zeroCopyTimeline,
         .ioBufferPeriodFrames = ASFW::Isoch::Config::kAudioIoPeriodFrames,
+        .elapsedPeriods = elapsedPeriods,
         .currentSampleRate = ivars->device.currentSampleRate,
         .hostTicksPerBuffer = &ivars->runtime.hostTicksPerBuffer,
         .clockSync = &ivars->runtime.clockSync,

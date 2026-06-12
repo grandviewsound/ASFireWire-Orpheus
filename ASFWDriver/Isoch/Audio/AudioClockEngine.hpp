@@ -3,6 +3,7 @@
 #include "AudioIOPath.hpp"
 #include "../../Shared/TxSharedQueue.hpp"
 #include "../Encoding/PacketAssembler.hpp"
+#include "../Encoding/TimingUtils.hpp"
 
 #include <AudioDriverKit/AudioDriverKit.h>
 
@@ -44,6 +45,10 @@ struct ClockSyncState {
     bool wasSaturated{false};
     int32_t driftDirection{0};
     uint32_t monotoneDriftTicks{0};
+
+    // Zero-timestamp anchor PLL: publishes a smooth grid timeline phase-slewed
+    // toward the raw RX-poll hw anchor (see ZtsAnchorPll in TimingUtils.hpp).
+    Timing::ZtsAnchorPll ztsAnchorPll{};
 };
 
 struct AudioClockEngineState {
@@ -64,6 +69,11 @@ struct AudioClockEngineState {
     ZeroCopyTimelineState* zeroCopyTimeline{nullptr};
 
     uint32_t ioBufferPeriodFrames{0};
+    // Whole grid periods this tick represents (≥1). The free-running timer arms
+    // deadline-anchored; when it has to skip beats to get back ahead of "now",
+    // the skipped beats are credited here so the published timeline still
+    // advances by real elapsed periods instead of silently running slow.
+    uint32_t elapsedPeriods{1};
     double currentSampleRate{0.0};
     uint64_t* hostTicksPerBuffer{nullptr};
     ClockSyncState* clockSync{nullptr};

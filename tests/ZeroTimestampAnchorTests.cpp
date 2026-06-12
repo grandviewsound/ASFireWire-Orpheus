@@ -1,15 +1,19 @@
 // ZeroTimestampAnchorTests.cpp
 // ASFW - Host-safe unit tests for the hardware-driven zero-timestamp anchor.
 //
-// Validates, off-hardware, the two pieces of the Apple-faithful clock path that
+// Validates, off-hardware, the pieces of the Apple-faithful clock path that
 // would otherwise only be exercisable on the device:
 //   1. FwSampleClock — FireWire cycle-timer -> monotonic device sample-time.
 //   2. TxSharedQueueSPSC hardware anchor — seqlock-protected (sampleTime,
 //      hostTicks) publish/read across the shared-memory boundary.
+//   3. ZtsAnchorPll — smooth published zero-timestamp timeline phase-slewed
+//      toward the jittery raw RX-poll anchor (HW log 2026-06-10_21-22-25:
+//      raw republish made HAL IO wakes run 161/s instead of 250/s).
 
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -152,4 +156,144 @@ TEST_F(HwAnchorQueueTest, ZeroHostTicksReportsNoAnchor) {
     producer_.PublishHwZeroTimestampAnchor(/*sampleTime=*/999, /*hostTicks=*/0);
     uint64_t s = 0, h = 0;
     EXPECT_FALSE(consumer_.ReadHwZeroTimestampAnchor(s, h));
+}
+
+// --- Zero-timestamp anchor PLL ---------------------------------------------
+
+namespace {
+
+using ASFW::Timing::ZtsAnchorPll;
+
+// 512-frame zts buffer at 48 kHz against a 24 MHz host timebase.
+constexpr uint32_t kPeriodFrames = 512;
+constexpr double kTicksPerBuffer = 256000.0;  // 24e6 * 512 / 48000
+constexpr double kTicksPerFrame = kTicksPerBuffer / kPeriodFrames;
+
+// Deterministic pseudo-noise in [-amplitude, +amplitude].
+int64_t PairNoise(uint32_t k, int64_t amplitude) {
+    const uint32_t h = (k * 2654435761u) ^ (k << 7);
+    return static_cast<int64_t>(h % (2 * static_cast<uint64_t>(amplitude) + 1)) - amplitude;
+}
+
+} // namespace
+
+TEST(ZtsAnchorPll, FallsBackUntilFirstAnchorThenSeedsRaw) {
+    ZtsAnchorPll pll;
+    EXPECT_FALSE(pll.Tick(kPeriodFrames, kTicksPerBuffer, false, 0, 0));
+    EXPECT_FALSE(pll.valid);
+    ASSERT_TRUE(pll.Tick(kPeriodFrames, kTicksPerBuffer, true, 96000, 5'000'000));
+    EXPECT_EQ(pll.sampleTime, 96000u);
+    EXPECT_EQ(pll.hostTicks, 5'000'000u);
+}
+
+TEST(ZtsAnchorPll, CoastsOnExactGridWhenAnchorFrozen) {
+    ZtsAnchorPll pll;
+    ASSERT_TRUE(pll.Tick(kPeriodFrames, kTicksPerBuffer, true, 0, 1'000'000));
+    // Same anchor pair every tick (RX stopped publishing): pure accumulator.
+    for (uint32_t k = 1; k <= 100; ++k) {
+        ASSERT_TRUE(pll.Tick(kPeriodFrames, kTicksPerBuffer, true, 0, 1'000'000));
+        EXPECT_EQ(pll.sampleTime, static_cast<uint64_t>(k) * kPeriodFrames);
+        EXPECT_EQ(pll.hostTicks, 1'000'000u + static_cast<uint64_t>(k * kTicksPerBuffer));
+    }
+}
+
+TEST(ZtsAnchorPll, SmoothsJitteryAnchorHostDeltas) {
+    // True device timeline: sample k*period at host k*ticksPerBuffer. The raw
+    // anchor pair carries ±65k ticks (~2.7 ms) of capture noise — the noise
+    // observed in HW log 21-22-25's `lead` field. The published host deltas
+    // must stay within the 1% slew bound of the nominal period (raw republish
+    // would carry the full ±2.7 ms into consecutive deltas).
+    ZtsAnchorPll pll;
+    constexpr int64_t kNoise = 65000;
+    ASSERT_TRUE(pll.Tick(kPeriodFrames, kTicksPerBuffer, true, 0, 10'000'000));
+    uint64_t prevHost = pll.hostTicks;
+    for (uint32_t k = 1; k <= 2000; ++k) {
+        const uint64_t hwSample = static_cast<uint64_t>(k) * kPeriodFrames;
+        const uint64_t hwHost = 10'000'000u
+            + static_cast<uint64_t>(static_cast<int64_t>(k * kTicksPerBuffer)
+                                    + PairNoise(k, kNoise));
+        ASSERT_TRUE(pll.Tick(kPeriodFrames, kTicksPerBuffer, true, hwSample, hwHost));
+        const int64_t delta = static_cast<int64_t>(pll.hostTicks - prevHost);
+        EXPECT_GT(delta, 0) << "host must be strictly monotonic (tick " << k << ")";
+        EXPECT_NEAR(static_cast<double>(delta), kTicksPerBuffer,
+                    kTicksPerBuffer * ZtsAnchorPll::kMaxSlewFractionOfPeriod + 1.0)
+            << "published delta exceeded the slew bound at tick " << k;
+        prevHost = pll.hostTicks;
+    }
+    // Long-run phase must track the true line (not wander off): the published
+    // host at the published sample should sit well inside the raw noise band.
+    const double trueHostAtSample = 10'000'000.0
+        + static_cast<double>(pll.sampleTime) * kTicksPerFrame;
+    EXPECT_NEAR(static_cast<double>(pll.hostTicks), trueHostAtSample,
+                static_cast<double>(kNoise));
+}
+
+TEST(ZtsAnchorPll, TracksRealRateOffsetThroughPhaseSlew) {
+    // Device runs +500 ppm fast relative to the rate fed to the PLL; the
+    // bounded slew (1% per tick >> 500 ppm) must absorb it so the published
+    // timeline follows the device line instead of drifting away linearly.
+    ZtsAnchorPll pll;
+    const double deviceTicksPerBuffer = kTicksPerBuffer * (1.0 - 500e-6);
+    ASSERT_TRUE(pll.Tick(kPeriodFrames, kTicksPerBuffer, true, 0, 10'000'000));
+    for (uint32_t k = 1; k <= 4000; ++k) {
+        const uint64_t hwSample = static_cast<uint64_t>(k) * kPeriodFrames;
+        const uint64_t hwHost = 10'000'000u
+            + static_cast<uint64_t>(k * deviceTicksPerBuffer);
+        ASSERT_TRUE(pll.Tick(kPeriodFrames, kTicksPerBuffer, true, hwSample, hwHost));
+    }
+    const double trueHostAtSample = 10'000'000.0
+        + static_cast<double>(pll.sampleTime) * (deviceTicksPerBuffer / kPeriodFrames);
+    // Steady-state lag of a first-order loop = rate-error/gain ≈ 128/0.03125
+    // = ~4096 ticks; allow a few times that.
+    EXPECT_NEAR(static_cast<double>(pll.hostTicks), trueHostAtSample, 16384.0);
+}
+
+TEST(ZtsAnchorPll, ReseedsWhenAnchorRestarts) {
+    ZtsAnchorPll pll;
+    ASSERT_TRUE(pll.Tick(kPeriodFrames, kTicksPerBuffer, true, 0, 10'000'000));
+    for (uint32_t k = 1; k <= 100; ++k) {
+        const uint64_t hwSample = static_cast<uint64_t>(k) * kPeriodFrames;
+        const uint64_t hwHost = 10'000'000u + static_cast<uint64_t>(k * kTicksPerBuffer);
+        ASSERT_TRUE(pll.Tick(kPeriodFrames, kTicksPerBuffer, true, hwSample, hwHost));
+    }
+    // Bus reset: FwSampleClock restarts near 0 while host time keeps going —
+    // the projected error is enormous, so the PLL must snap, not slew.
+    const uint64_t restartHost = pll.hostTicks + 50'000'000;
+    ASSERT_TRUE(pll.Tick(kPeriodFrames, kTicksPerBuffer, true, 8, restartHost));
+    EXPECT_EQ(pll.sampleTime, 8u);
+    EXPECT_EQ(pll.hostTicks, restartHost);
+}
+
+TEST(ZtsAnchorPll, ReseedsWhenGridRecedesOnSampleAxis) {
+    // HW log 2026-06-10_22-22-09: timer beats arrived ~18% slower than the grid
+    // period, so the published pair fell behind real time while staying exactly
+    // ON the device line — the projected host error never saw it (lead reached
+    // -132M ticks with zero re-seeds). Model that cadence deficit: the raw
+    // anchor advances 604 frames of device time per tick while the grid only
+    // credits 512. The sample-axis guard must re-seed once the gap exceeds the
+    // threshold, keeping the published pair near the present.
+    ZtsAnchorPll pll;
+    constexpr uint64_t kDeviceFramesPerTick = 604;
+    ASSERT_TRUE(pll.Tick(kPeriodFrames, kTicksPerBuffer, true, 0, 10'000'000));
+    for (uint32_t k = 1; k <= 600; ++k) {
+        const uint64_t hwSample = k * kDeviceFramesPerTick;
+        const uint64_t hwHost = 10'000'000u
+            + static_cast<uint64_t>(static_cast<double>(hwSample) * kTicksPerFrame);
+        ASSERT_TRUE(pll.Tick(kPeriodFrames, kTicksPerBuffer, true, hwSample, hwHost));
+        const double gap = static_cast<double>(pll.sampleTime)
+            - static_cast<double>(hwSample);
+        EXPECT_LE(std::abs(gap),
+                  ZtsAnchorPll::kReseedThresholdPeriods * kPeriodFrames
+                      + kPeriodFrames)
+            << "published sample receded past the staleness threshold (tick "
+            << k << ")";
+    }
+}
+
+TEST(ZtsAnchorPll, ResetReturnsToFallback) {
+    ZtsAnchorPll pll;
+    ASSERT_TRUE(pll.Tick(kPeriodFrames, kTicksPerBuffer, true, 100, 200));
+    pll.Reset();
+    EXPECT_FALSE(pll.valid);
+    EXPECT_FALSE(pll.Tick(kPeriodFrames, kTicksPerBuffer, false, 0, 0));
 }

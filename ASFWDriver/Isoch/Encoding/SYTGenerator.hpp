@@ -63,10 +63,12 @@ private:
     /// Was 0x2E00 (Linux TRANSFER_DELAY) → sub-cycle offset 0xA00. The Apple
     /// golden sniffer capture (research/captures/.../passive_sniffer_run.txt)
     /// shows Apple's SYT sub-cycle offset based at ~0x4CF, so 3 whole cycles +
-    /// 0x4CF = 0x28CF matches Apple's base. NOTE: this only fixes the BASE
-    /// offset — it does NOT reproduce Apple's per-packet drift (Apple derives
-    /// SYT from HOST time via CalculateNewTimeStamp, tracking host-audio vs
-    /// FW-bus clock; ours is nominal). See may24-golden-diff-syt-offset-drift.
+    /// 0x4CF = 0x28CF matches Apple's base. The per-packet advance is EXACTLY
+    /// nominal (cycle-locked) by design: Apple's host-rate SYT creep only works
+    /// with their adaptive NuDCL cadence; on our rigid DMA-ring cadence any
+    /// creep ramps SYT-vs-cycle phase unboundedly and wraps the 16-cycle SYT
+    /// window (~2 ms presentation snap every ~26 s = periodic ticks, HW log
+    /// 2026-06-11_22-26-05). See computeDataSYT.
     static constexpr uint32_t kTransferDelayTicks = 0x28CF;  // 3 cycles + 0x4CF (Apple golden base)
 
     /// Ticks per audio sample at 48 kHz: 24576000 / 48000 = 512
@@ -89,6 +91,15 @@ private:
 
     /// Sample-position offset accumulator (advances by samplesInPacket * ticksPerSample_ per DATA packet)
     uint32_t sytOffsetTicks_{0};
+
+    /// Fixed presentation-cycle base, latched from the transmit cycle on the
+    /// FIRST DATA packet after reset(). The presentation timestamp is a monotonic
+    /// accumulator on top of this base; it must NOT re-anchor to the live transmit
+    /// cycle each packet (that double-counts the bus-cycle progression → 2× SYT
+    /// rate). Golden Orpheus SYT advances a constant 4096 ticks/DATA packet across
+    /// the NO-DATA cadence gaps (golden_wire_2026-06-05), confirming a fixed base.
+    uint32_t baseCycle_{0};
+    bool baseCycleValid_{false};
 
     /// Diagnostic counter
     uint64_t dataPacketCount_{0};

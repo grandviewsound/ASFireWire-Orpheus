@@ -122,6 +122,12 @@ void IsochAudioRxPipeline::OnPollEnd(Driver::HardwareInterface& hw,
                 const double nanosPerSample = ratio * (1e9 / cycleCorr_.sampleRate);
                 const uint32_t q8 = static_cast<uint32_t>(nanosPerSample * 256.0 + 0.5);
                 rxSharedQueue_.SetCorrHostNanosPerSampleQ8(q8);
+                // Also hand the measured rate to the IT SYT generator (via the
+                // shared bridge) so transmit SYT drifts at the REAL device rate
+                // instead of nominal 48k. Applies on internal-clock devices too.
+                if (externalSyncBridge_) {
+                    externalSyncBridge_->hostNanosPerSampleQ8.store(q8, std::memory_order_release);
+                }
                 // Always-on (rate-limited to ~1s) so the host-clock lock is visible
                 // at the default ASFWIsochVerbosity=1 — the 2026-06-06 first-audio
                 // run could not confirm whether this lock ever engaged.

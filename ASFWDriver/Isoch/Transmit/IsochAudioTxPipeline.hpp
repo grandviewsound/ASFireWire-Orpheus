@@ -34,8 +34,10 @@ public:
         std::atomic<uint64_t> legacyPumpSkipped{0};
         std::atomic<uint64_t> exitZeroRefill{0};
         std::atomic<uint64_t> underrunSilencedPackets{0};
+        std::atomic<uint64_t> injectFramesRead{0};
         std::atomic<uint64_t> audioInjectCursorResets{0};
         std::atomic<uint64_t> audioInjectMissedPackets{0};
+        std::atomic<uint64_t> injectPrimingRearms{0};
         std::atomic<uint64_t> midiTxBytesQueued{0};
 
         // Fill level low-water alerts (with hysteresis)
@@ -69,6 +71,7 @@ public:
     [[nodiscard]] Encoding::AudioRingBuffer<>& RingBuffer() noexcept { return assembler_.ringBuffer(); }
     [[nodiscard]] uint64_t UnderrunCount() const noexcept { return assembler_.underrunCount(); }
     [[nodiscard]] uint32_t BufferFillLevel() const noexcept { return assembler_.bufferFillLevel(); }
+    [[nodiscard]] bool IsInjectPriming() const noexcept { return injectPriming_; }
 
     [[nodiscard]] uint32_t FramesPerDataPacket() const noexcept { return assembler_.samplesPerDataPacket(); }
     [[nodiscard]] uint32_t ChannelCount() const noexcept { return assembler_.channelCount(); } // PCM channels
@@ -159,8 +162,20 @@ private:
     Core::ExternalSyncDiscipline48k externalSyncDiscipline_{};
     bool lastDisciplineEnabled_{false};  // for engage/disengage transition logging
 
+    // SYTLEAD diagnostic: latest SYT presentation lead over its transmit cycle,
+    // in 16-cycle-domain ticks [0, 49152). Cycle-locked SYT ⇒ constant; a ~26 s
+    // sawtooth = rate correction leaking into SYT (jun11 periodic-tick bug).
+    std::atomic<int32_t> lastSytLeadTicks_{0};
+
     // Audio injection cursor (packet index)
     uint32_t audioWriteIndex_{0};
+
+    // Standing-cushion priming gate (non-zero-copy path). While true, InjectNearHw
+    // leaves the Phase-2 silent CIP packets on the wire and does NOT drain the
+    // assembler ring; real-data injection begins only once the ring holds the
+    // adaptive fill target of REAL frames. Re-armed when the ring runs dry so the
+    // cushion is rebuilt after producer stalls instead of limping at one burst.
+    bool injectPriming_{true};
 
     // DBC continuity validation for produced packets (ignore NO-DATA).
     struct DbcTracker {

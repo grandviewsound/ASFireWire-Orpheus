@@ -72,7 +72,7 @@ TEST(CompletionRefactorPlan, AckCompleteWriteCompletesOnAT) {
                               /*tcode=*/0x1, CompletionStrategy::CompleteOnAT, cb);
     ASSERT_NE(txn, nullptr);
 
-    h.handler.OnATCompletion(MakeTx(/*label=*/1, /*ackCode=*/0x0));
+    h.handler.OnATCompletion(MakeTx(/*label=*/1, /*ackCode=*/0x1));  // ack_complete
 
     EXPECT_EQ(cb.called, 1);
     EXPECT_EQ(cb.lastKr, kIOReturnSuccess);
@@ -87,7 +87,7 @@ TEST(CompletionRefactorPlan, AckPendingWriteWaitsForARThenCompletes) {
                               /*tcode=*/0x1, CompletionStrategy::CompleteOnAT, cb);
     ASSERT_NE(txn, nullptr);
 
-    h.handler.OnATCompletion(MakeTx(/*label=*/2, /*ackCode=*/0x1));
+    h.handler.OnATCompletion(MakeTx(/*label=*/2, /*ackCode=*/0x2));  // ack_pending
 
     // Should still be managed and waiting for AR
     Transaction* live = h.mgr.Find(TLabel{2});

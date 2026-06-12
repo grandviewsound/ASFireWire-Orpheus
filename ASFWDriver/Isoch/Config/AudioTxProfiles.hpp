@@ -37,7 +37,7 @@ inline constexpr TxBufferProfile kTxProfileA{
     768,   // legacyRbTargetFrames     (was 512: more drain margin; 2026-06-06 run hovered 56–312 and underran)
     1024,  // legacyRbMaxFrames        (was 768: keep > target with headroom)
     6,     // legacyMaxChunksPerRefill
-    128,   // safetyOffsetFrames (2A)  (was 64: keep CoreAudio writing further ahead of the drain head → fewer underruns)
+    128,   // safetyOffsetFrames (2A)  (REVERTED 768->128 after 2026-06-09 log 20-39-12: bumping the *reported* HAL safety offset to 768 made things strictly WORSE — CoreAudio read the large cushion as slack and throttled its IO feed ~130x (caIn 76000->~576/window, cb 2-6 over multi-second windows), so the assembler ring ran fully empty (rbFill=0 every window, silPkt ~10k/s) = mostly silence. The "rbFill steady = safetyOffset" model is falsified: the offset is a number we report, not real frames in our ring. The real cushion is the InjectNearHw priming gate (2026-06-10): injection holds on silent CIP until the assembler ring banks legacyRbTargetFrames of REAL frames, permanently phase-delaying consumption behind production. The earlier one-shot silence-pad at Start drained out during the startup gap (log 22-17-26) and was removed.)
     48     // minPrimeDataPackets (2B)
 };
 

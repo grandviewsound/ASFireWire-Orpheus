@@ -1233,6 +1233,8 @@ add_executable(IsochTransmitContextTests
     "${ASFW_DRIVER_DIR}/Isoch/Transmit/IsochTxVerifier.cpp"
     "${ASFW_DRIVER_DIR}/Isoch/Transmit/IsochTxRecoveryController.cpp"
     "${ASFW_DRIVER_DIR}/Isoch/Encoding/SYTGenerator.cpp"
+    "${ASFW_DRIVER_DIR}/Isoch/Memory/IsochDMAMemoryManager.cpp"
+    "${ASFW_DRIVER_DIR}/Shared/Memory/DMAMemoryManager.cpp"
     "${ASFW_DRIVER_DIR}/Common/BarrierUtils.cpp"
     "${ASFW_TESTS_DIR}/HardwareInterfaceStub.cpp"
     "${ASFW_TESTS_DIR}/LoggingStubs.cpp"

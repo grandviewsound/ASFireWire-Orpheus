@@ -174,4 +174,124 @@ struct FwSampleClock {
     }
 };
 
+//-----------------------------------------------------------------------------
+// Zero-timestamp anchor PLL — smooth published timeline, hw-disciplined phase
+//-----------------------------------------------------------------------------
+
+/// Smooths the raw hardware zero-timestamp anchor into a low-jitter published
+/// (sampleTime, hostTicks) timeline for UpdateCurrentZeroTimestamp.
+///
+/// Why (HW log 2026-06-10_21-22-25): the raw anchor pair is captured at the RX
+/// poll instant, so successive publishes carry up to ~2.7 ms of phase noise.
+/// The CoreAudio HAL schedules each IO wake directly off the published anchor
+/// host time (per the 2026-06-09 HAL zero-timestamp cadence analysis),
+/// so that noise wrecked the wake cadence: IO ran at ~161 cb/s instead of 250,
+/// a chronic ~3.5% feed deficit that drained the TX cushion every ~400 ms. The
+/// smooth software-accumulator path paced a perfect 250 cb/s in the same log.
+///
+/// The PLL therefore publishes a grid timeline — sampleTime advances by exactly
+/// one buffer period per tick, hostTicks by the rate-disciplined (q8) period —
+/// and uses the raw hw anchor only to slew phase, bounded per tick, the way
+/// Apple's audio families filter takeTimeStamp jitter rather than republishing
+/// raw interrupt times.
+struct ZtsAnchorPll {
+    bool     valid{false};
+    uint64_t sampleTime{0};      // published sample-time (grid)
+    uint64_t hostTicks{0};       // published host time (smooth, slewed)
+    double   hostFrac{0.0};      // sub-tick accumulator for the period advance
+    uint64_t lastHwHostTicks{0}; // freshness: slew only when the anchor moved
+
+    /// Per-tick phase gain: correct 1/32 of the measured error each tick. The
+    /// real disciplining need is tiny (~tens of ppm), so a low gain keeps the
+    /// residual publish jitter at ~1/32 of the raw anchor noise.
+    static constexpr double kPhaseGain = 1.0 / 32.0;
+    /// Hard slew bound per tick as a fraction of the period — keeps hostTicks
+    /// strictly monotonic (advance is always >= 99% of a period).
+    static constexpr double kMaxSlewFractionOfPeriod = 0.01;
+    /// If the anchor disagrees by more than this many periods, it restarted
+    /// (e.g. stream re-prime reset the device sample clock): re-seed instead
+    /// of slewing toward a bogus target for minutes.
+    static constexpr double kReseedThresholdPeriods = 50.0;
+
+    void Reset() noexcept {
+        valid = false;
+        sampleTime = 0;
+        hostTicks = 0;
+        hostFrac = 0.0;
+        lastHwHostTicks = 0;
+    }
+
+    /// Advance the published timeline by one buffer period and, when a fresh
+    /// hw anchor is available, slew phase toward it. Returns true when the
+    /// published pair is valid (seeded); false means the caller must fall back
+    /// (no hw anchor seen yet).
+    /// @param periodFrames    zero-timestamp buffer period in frames
+    /// @param ticksPerBuffer  rate-corrected host ticks per period (q8 path)
+    /// @param haveAnchor      raw hw anchor readable this tick
+    /// @param hwSample        raw anchor device sample-time
+    /// @param hwHost          raw anchor host ticks (capture instant)
+    [[nodiscard]] bool Tick(uint32_t periodFrames, double ticksPerBuffer,
+                            bool haveAnchor, uint64_t hwSample,
+                            uint64_t hwHost) noexcept {
+        if (!valid) {
+            if (!haveAnchor) {
+                return false;
+            }
+            sampleTime = hwSample;
+            hostTicks = hwHost;
+            hostFrac = 0.0;
+            lastHwHostTicks = hwHost;
+            valid = true;
+            return true;
+        }
+
+        const double exact = ticksPerBuffer + hostFrac;
+        const auto step = static_cast<uint64_t>(exact);
+        hostFrac = exact - static_cast<double>(step);
+        sampleTime += periodFrames;
+        hostTicks += step;
+
+        if (haveAnchor && hwHost != lastHwHostTicks && periodFrames > 0) {
+            lastHwHostTicks = hwHost;
+            // Project the raw anchor onto the published sample-time and compare
+            // host times there: err > 0 means we publish behind the hardware.
+            const double ticksPerFrame = ticksPerBuffer / periodFrames;
+            const double hwHostAtSample = static_cast<double>(hwHost)
+                + (static_cast<double>(sampleTime) - static_cast<double>(hwSample))
+                  * ticksPerFrame;
+            const double err = hwHostAtSample - static_cast<double>(hostTicks);
+
+            // Sample-axis staleness guard (HW log 2026-06-10_22-22-09): if ticks
+            // arrive slower than one grid period each, the published pair stays
+            // ON the device line — the projected host error above cannot see it —
+            // while the pair recedes into the past. The raw anchor is captured
+            // "now", so the grid sample must stay within the same threshold of it.
+            const double sampleGap = static_cast<double>(sampleTime)
+                - static_cast<double>(hwSample);
+            const double maxSampleGap = kReseedThresholdPeriods
+                * static_cast<double>(periodFrames);
+
+            if (const double reseed = kReseedThresholdPeriods * ticksPerBuffer;
+                err > reseed || err < -reseed
+                || sampleGap > maxSampleGap || sampleGap < -maxSampleGap) {
+                sampleTime = hwSample;
+                hostTicks = hwHost;
+                hostFrac = 0.0;
+                return true;
+            }
+
+            double corr = err * kPhaseGain;
+            const double maxSlew = ticksPerBuffer * kMaxSlewFractionOfPeriod;
+            if (corr > maxSlew) corr = maxSlew;
+            if (corr < -maxSlew) corr = -maxSlew;
+            if (corr >= 0.0) {
+                hostTicks += static_cast<uint64_t>(corr);
+            } else {
+                hostTicks -= static_cast<uint64_t>(-corr);
+            }
+        }
+        return true;
+    }
+};
+
 } // namespace ASFW::Timing

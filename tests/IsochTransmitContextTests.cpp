@@ -9,11 +9,15 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <memory>
 #include <vector>
 
 #include "../ASFWDriver/Isoch/Transmit/IsochTransmitContext.hpp"
 #include "../ASFWDriver/Isoch/Config/AudioConstants.hpp"
+#include "../ASFWDriver/Isoch/Config/AudioTxProfiles.hpp"
+#include "../ASFWDriver/Isoch/Memory/IsochDMAMemoryManager.hpp"
 #include "../ASFWDriver/Shared/TxSharedQueue.hpp"
+#include "../ASFWDriver/Hardware/HardwareInterface.hpp"
 
 using namespace ASFW::Isoch;
 using namespace ASFW::Encoding;
@@ -246,4 +250,151 @@ TEST(IsochTransmitContext, NoUnderrunsWithPrefilledBuffer) {
     // 8 packets in blocking mode => 6 DATA packets => 6 * 8 = 48 frames consumed.
     EXPECT_EQ(assembler.underrunCount(), 0);
     EXPECT_EQ(assembler.bufferFillLevel(), 512 - 48);
+}
+
+// ============================================================================
+// Inject priming gate (standing cushion, 2026-06-10)
+// ============================================================================
+//
+// InjectNearHw must not drain the assembler ring until it holds the adaptive
+// fill target of REAL frames; until then the DMA ring keeps its Phase-2 silent
+// CIP packets. When the ring later runs dry, the gate re-arms so the cushion is
+// rebuilt instead of the level settling at one CoreAudio burst (the 22-17-26
+// underrun garble).
+
+namespace {
+
+constexpr uint32_t kGateTestChannels = 2;
+constexpr uint32_t kGateTestQueueCapacity = 2048;  // power of two, > target 768
+
+struct TxInjectHarness {
+    ::ASFW::Driver::HardwareInterface hw;
+    std::shared_ptr<Memory::IsochDMAMemoryManager> mem;
+    Tx::IsochTxDmaRing ring;
+    IsochAudioTxPipeline pipeline;
+    std::vector<uint8_t> queueStorage;
+    ASFW::Shared::TxSharedQueueSPSC producer;
+
+    bool Setup() {
+        Memory::IsochMemoryConfig config;
+        config.numDescriptors = 1024;
+        config.packetSizeBytes = 1024;
+        config.descriptorAlignment = 4096;   // TX slab requires 4K-aligned descriptor base
+        config.payloadPageAlignment = 4096;
+
+        mem = Memory::IsochDMAMemoryManager::Create(config);
+        if (!mem || !mem->Initialize(hw)) return false;
+        if (ring.SetupRings(*mem) != kIOReturnSuccess) return false;
+
+        const uint64_t bytes = ASFW::Shared::TxSharedQueueSPSC::RequiredBytes(
+            kGateTestQueueCapacity, kGateTestChannels);
+        queueStorage.resize(bytes);
+        if (!ASFW::Shared::TxSharedQueueSPSC::InitializeInPlace(
+                queueStorage.data(), bytes, kGateTestQueueCapacity, kGateTestChannels)) {
+            return false;
+        }
+
+        pipeline.SetSharedTxQueue(queueStorage.data(), bytes);
+        if (pipeline.Configure(/*sid=*/0x3F, /*streamModeRaw=*/1,
+                               kGateTestChannels, /*requestedAm824Slots=*/0) != kIOReturnSuccess) {
+            return false;
+        }
+        if (!producer.Attach(queueStorage.data(), bytes)) return false;
+
+        ring.ResetForStart();
+        pipeline.ResetForStart();
+        return ring.Prime(pipeline).packetsAssembled == Tx::Layout::kNumPackets;
+    }
+
+    // CoreAudio-producer stand-in: nonzero interleaved frames into the shared queue.
+    uint32_t Produce(uint32_t frames) {
+        std::vector<int32_t> buf(static_cast<size_t>(frames) * kGateTestChannels, 0x00123400);
+        return producer.Write(buf.data(), frames);
+    }
+};
+
+} // namespace
+
+TEST(IsochInjectPrimingGate, PrePrimeDoesNotSilencePad) {
+    TxInjectHarness h;
+    ASSERT_TRUE(h.Setup());
+
+    // Empty queue at Start: pre-prime must leave the ring EMPTY (the old one-shot
+    // silence pad would have filled it to 768 and defeated the gate).
+    h.pipeline.PrePrimeFromSharedQueue();
+    EXPECT_EQ(h.pipeline.BufferFillLevel(), 0u);
+    EXPECT_TRUE(h.pipeline.IsInjectPriming());
+
+    // Frames already queued at Start transfer as REAL frames (count toward gate).
+    ASSERT_EQ(h.Produce(100), 100u);
+    h.pipeline.PrePrimeFromSharedQueue();
+    EXPECT_EQ(h.pipeline.BufferFillLevel(), 100u);
+}
+
+TEST(IsochInjectPrimingGate, HoldsBelowTargetThenOpensAtTarget) {
+    TxInjectHarness h;
+    ASSERT_TRUE(h.Setup());
+    const uint32_t target = Config::kTxBufferProfile.legacyRbTargetFrames;
+
+    // Below target: inject must HOLD — no ring drain, no frames read.
+    ASSERT_EQ(h.Produce(256), 256u);
+    h.pipeline.OnRefillTickPreHW();
+    ASSERT_EQ(h.pipeline.BufferFillLevel(), 256u);
+
+    h.pipeline.InjectNearHw(0, h.ring.Slab());
+    EXPECT_TRUE(h.pipeline.IsInjectPriming());
+    EXPECT_EQ(h.pipeline.BufferFillLevel(), 256u);
+    EXPECT_EQ(h.pipeline.RTCounters().injectFramesRead.load(), 0u);
+
+    // At target: the gate opens and injection drains real frames. (Advance the
+    // HW index past the held call's cursor so the window exposes new slots.)
+    ASSERT_EQ(h.Produce(target - 256), target - 256);
+    h.pipeline.OnRefillTickPreHW();
+    ASSERT_EQ(h.pipeline.BufferFillLevel(), target);
+
+    h.pipeline.InjectNearHw(8, h.ring.Slab());
+    EXPECT_FALSE(h.pipeline.IsInjectPriming());
+    EXPECT_LT(h.pipeline.BufferFillLevel(), target);
+    EXPECT_GT(h.pipeline.RTCounters().injectFramesRead.load(), 0u);
+}
+
+TEST(IsochInjectPrimingGate, RearmsWhenRingRunsDryAndRecompletes) {
+    TxInjectHarness h;
+    ASSERT_TRUE(h.Setup());
+    const uint32_t target = Config::kTxBufferProfile.legacyRbTargetFrames;
+
+    ASSERT_EQ(h.Produce(target), target);
+    h.pipeline.OnRefillTickPreHW();
+    h.pipeline.InjectNearHw(0, h.ring.Slab());
+    ASSERT_FALSE(h.pipeline.IsInjectPriming());
+
+    // Producer stalls; HW keeps consuming. Walk hwPacketIndex forward so each
+    // call drains the next window slice until the ring runs dry -> re-arm.
+    uint32_t hwIdx = 0;
+    bool rearmed = false;
+    for (int i = 0; i < 64 && !rearmed; ++i) {
+        hwIdx = (hwIdx + 8) % Tx::Layout::kNumPackets;
+        h.pipeline.InjectNearHw(hwIdx, h.ring.Slab());
+        rearmed = h.pipeline.IsInjectPriming();
+    }
+    EXPECT_TRUE(rearmed);
+    EXPECT_GE(h.pipeline.RTCounters().injectPrimingRearms.load(), 1u);
+
+    // While re-armed and below target, further calls must not drain.
+    const uint32_t fillAfterRearm = h.pipeline.BufferFillLevel();
+    hwIdx = (hwIdx + 8) % Tx::Layout::kNumPackets;
+    h.pipeline.InjectNearHw(hwIdx, h.ring.Slab());
+    EXPECT_TRUE(h.pipeline.IsInjectPriming());
+    EXPECT_EQ(h.pipeline.BufferFillLevel(), fillAfterRearm);
+
+    // Producer resumes: once the ring re-banks the target, the gate re-opens.
+    ASSERT_EQ(h.Produce(target), target);
+    h.pipeline.OnRefillTickPreHW();
+    while (h.pipeline.BufferFillLevel() < target) {
+        ASSERT_GT(h.Produce(target), 0u);
+        h.pipeline.OnRefillTickPreHW();
+    }
+    hwIdx = (hwIdx + 8) % Tx::Layout::kNumPackets;
+    h.pipeline.InjectNearHw(hwIdx, h.ring.Slab());
+    EXPECT_FALSE(h.pipeline.IsInjectPriming());
 }

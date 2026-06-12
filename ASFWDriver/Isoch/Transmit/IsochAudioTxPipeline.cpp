@@ -323,6 +323,7 @@ void IsochAudioTxPipeline::ResetForStart() noexcept {
     counters_.underrunSilencedPackets.store(0, std::memory_order_relaxed);
     counters_.audioInjectCursorResets.store(0, std::memory_order_relaxed);
     counters_.audioInjectMissedPackets.store(0, std::memory_order_relaxed);
+    counters_.injectPrimingRearms.store(0, std::memory_order_relaxed);
     counters_.rbLowEvents.store(0, std::memory_order_relaxed);
     counters_.txqLowEvents.store(0, std::memory_order_relaxed);
 
@@ -337,6 +338,7 @@ void IsochAudioTxPipeline::ResetForStart() noexcept {
     adaptiveFill_.lastCombinedUnderruns = 0;
 
     audioWriteIndex_ = 0;
+    injectPriming_ = true;
 
     dbcTracker_.lastDbc = 0;
     dbcTracker_.lastDataBlockCount = 0;
@@ -414,11 +416,22 @@ void IsochAudioTxPipeline::PrePrimeFromSharedQueue() noexcept {
         if (written < read) break;
     }
 
-    ASFW_LOG(Isoch, "IT: Pre-prime transferred %u frames to assembler (fill=%u limit=%u hit=%{public}s)",
+    // No silence padding here (removed 2026-06-10). The one-shot silence-pad
+    // cushion (log 22-17-26) drained out during the startup gap: inject consumed
+    // the padded frames before CoreAudio produced anything, so the steady-state
+    // level fell back to one CoreAudio burst and the trough kept hitting 0. The
+    // standing cushion now lives in InjectNearHw's priming gate: injection holds
+    // (silent CIP from the DMA ring's Phase-2 refill stays on the wire) until
+    // the ring banks legacyRbTargetFrames of REAL frames, which permanently
+    // phase-delays consumption behind production. Padding the ring here would
+    // satisfy that gate with silence and defeat it.
+    ASFW_LOG(Isoch, "IT: Pre-prime transferred %u frames "
+             "(fill=%u limit=%u hit=%{public}s; inject priming gate armed, target=%u)",
              totalTransferred,
              assembler_.bufferFillLevel(),
              startupPrimeLimitFrames,
-             primeLimitHit ? "YES" : "NO");
+             primeLimitHit ? "YES" : "NO",
+             adaptiveFill_.currentTarget);
 }
 
 // Fix #24: Diagnostic counter for OnRefillTickPreHW
@@ -560,6 +573,37 @@ void IsochAudioTxPipeline::OnPollTick1ms() noexcept {
                 adaptiveFill_.cleanWindows = 0;
             }
 
+            // Per-second TX-rate evidence at all three buffer boundaries, so the
+            // underrun source (which side is short) is measurable rather than guessed:
+            //   caIn   = frames CoreAudio produced into the shared queue
+            //   qDrain = frames consumed out of the shared queue (pump side)
+            //   pumpMv = frames the pump moved queue -> assembler ring
+            //   injRd  = frames inject pulled assembler ring -> packets
+            //   silPkt = silenced/underrun packets (left silence on the wire)
+            // Healthy steady state: caIn == qDrain == injRd ~= 48000, silPkt == 0,
+            // and rbFill parked near target.
+            {
+                static uint64_t sLastCaIn = 0, sLastQDrain = 0, sLastPump = 0,
+                                sLastInject = 0, sLastSil = 0;
+                const uint64_t caIn   = sharedTxQueue_.WriteIndexFrames();
+                const uint64_t qDrain = sharedTxQueue_.ReadIndexFrames();
+                const uint64_t pump   = counters_.legacyPumpMovedFrames.load(std::memory_order_relaxed);
+                const uint64_t inject = counters_.injectFramesRead.load(std::memory_order_relaxed);
+                const uint64_t sil    = counters_.underrunSilencedPackets.load(std::memory_order_relaxed)
+                                      + counters_.exitZeroRefill.load(std::memory_order_relaxed);
+                ASFW_LOG(Isoch,
+                         "TXRATE: caIn=%llu qDrain=%llu pumpMv=%llu injRd=%llu silPkt=%llu | "
+                         "rbFill=%u txFill=%u target=%u sytLead=%d (per ~1s)",
+                         caIn - sLastCaIn, qDrain - sLastQDrain, pump - sLastPump,
+                         inject - sLastInject, sil - sLastSil,
+                         assembler_.bufferFillLevel(),
+                         sharedTxQueue_.FillLevelFrames(),
+                         adaptiveFill_.currentTarget,
+                         lastSytLeadTicks_.load(std::memory_order_relaxed));
+                sLastCaIn = caIn; sLastQDrain = qDrain; sLastPump = pump;
+                sLastInject = inject; sLastSil = sil;
+            }
+
             adaptiveFill_.windowTickCount = 0;
             adaptiveFill_.underrunsInWindow = 0;
         }
@@ -578,7 +622,24 @@ uint16_t IsochAudioTxPipeline::ComputeDataSyt(uint32_t transmitCycle) noexcept {
         return Encoding::SYTGenerator::kNoInfo;
     }
 
+    // SYT advances exactly nominal (cycle-locked) — the CycleCorr rate
+    // correction's single home is the zts anchor PLL. Feeding it here as well
+    // ramped SYT-vs-cycle phase unboundedly on our rigid cadence, wrapping the
+    // 16-cycle SYT window every ~26 s (periodic ticks, HW 2026-06-11_22-26-05).
     const uint16_t txSyt = sytGenerator_.computeDataSYT(transmitCycle, assembler_.samplesPerDataPacket());
+
+    // SYTLEAD diagnostic: presentation lead of this SYT over its transmit cycle,
+    // in the 16-cycle tick domain. Cycle-locked SYT ⇒ constant (±1 from the
+    // sub-cycle cadence pattern). A sawtooth ramping 0→49152 over ~26 s is the
+    // double-correction bug. Surfaced in the TXRATE window line.
+    if (txSyt != Encoding::SYTGenerator::kNoInfo) {
+        const int32_t sytTicks = ((txSyt >> 12) & 0xF) * 3072 + (txSyt & 0xFFF);
+        const int32_t cycTicks = static_cast<int32_t>((transmitCycle & 0xF) * 3072);
+        int32_t lead = sytTicks - cycTicks;
+        if (lead < 0) lead += 16 * 3072;
+        lastSytLeadTicks_.store(lead, std::memory_order_relaxed);
+    }
+
     MaybeApplyExternalSyncDiscipline(txSyt);
     return txSyt;
 }
@@ -706,6 +767,26 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
     // Target: write real audio up to kAudioWriteAhead packets ahead of HW
     const uint32_t audioTarget = (hwPacketIndex + Tx::Layout::kAudioWriteAhead) % numPackets;
 
+    // Standing-cushion priming gate (2026-06-10, non-zero-copy path): while the
+    // assembler ring holds fewer than target REAL frames, hold injection — the
+    // slots entering the window keep the cadence-correct silent CIP packets the
+    // DMA ring's Phase-2 refill wrote, so the wire stays valid. Consumption of
+    // real data only starts once production is a full cushion ahead; from then
+    // on the level rides at ~target instead of at CoreAudio's write-ahead, and
+    // burst jitter can no longer drive the trough to 0 (the 22-17-26 garble).
+    if (!zeroCopySync && injectPriming_) {
+        const uint32_t rbFillNow = assembler_.bufferFillLevel();
+        if (rbFillNow < adaptiveFill_.currentTarget) {
+            audioWriteIndex_ = audioTarget; // keep cursor in step; slots stay silent
+            return;
+        }
+        injectPriming_ = false;
+        ASFW_LOG(Isoch, "IT: inject priming COMPLETE rbFill=%u target=%u rearms=%llu "
+                 "(standing real-frame cushion banked; starting injection)",
+                 rbFillNow, adaptiveFill_.currentTarget,
+                 counters_.injectPrimingRearms.load(std::memory_order_relaxed));
+    }
+
     // If audio cursor fell behind HW (scheduling stall), reset to HW position.
     const uint32_t distBehind = (hwPacketIndex + numPackets - audioWriteIndex_) % numPackets;
     if (distBehind > 0 && distBehind < numPackets / 2) {
@@ -796,11 +877,36 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
             framesRead = assembler_.ringBuffer().read(samples, framesPerPacket);
         }
 
+        // Per-second TX-rate diagnostic: count real frames pulled from the source
+        // buffer at the inject (assembler->packet) boundary.
+        counters_.injectFramesRead.fetch_add(framesRead, std::memory_order_relaxed);
+
         if (framesRead < framesPerPacket) {
             const size_t samplesRead = static_cast<size_t>(framesRead) * pcmChannels;
             const size_t totalSamples = static_cast<size_t>(framesPerPacket) * pcmChannels;
             std::memset(&samples[samplesRead], 0,
                         (totalSamples - samplesRead) * sizeof(int32_t));
+            // Non-zero-copy partial read = the same silence-fill the zero-copy path
+            // records at :827. Count it here too so TXRATE's silPkt is honest in the
+            // non-zero-copy mode actually in use (it was previously blind here while
+            // assembler underrunCount still climbed → IT: UNDERRUN).
+            counters_.underrunSilencedPackets.fetch_add(1, std::memory_order_relaxed);
+
+            // Ring ran dry: re-arm the priming gate so the standing cushion is
+            // rebuilt (one bounded ~target/48k silence hold) instead of limping
+            // along at one-burst depth with scattered silence memsets (= garble).
+            if (!zeroCopySync) {
+                injectPriming_ = true;
+                const uint64_t rearms =
+                    counters_.injectPrimingRearms.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (rearms <= 8 || (rearms % 64) == 0) {
+                    ASFW_LOG(Isoch, "IT: inject priming RE-ARMED (ring dry: framesRead=%u/%u "
+                             "rbFill=%u) rearms=%llu",
+                             framesRead, framesPerPacket,
+                             assembler_.bufferFillLevel(), rearms);
+                }
+                break; // leave remaining window slots as Phase-2 silence
+            }
         }
 
         uint8_t* payloadVirt = slab.PayloadPtr(idx);

@@ -28,6 +28,7 @@ void ResetClockSync(ClockSyncState& clockSync) {
     clockSync.wasSaturated = false;
     clockSync.driftDirection = 0;
     clockSync.monotoneDriftTicks = 0;
+    clockSync.ztsAnchorPll.Reset();
 }
 
 uint64_t RoundWithFraction(double& fractionalTicks, double currentTicksPerBuffer) {
@@ -404,25 +405,56 @@ void HandleClockTimerTick(AudioClockEngineState& state, uint64_t time) {
     const uint32_t q8 = state.rxQueueValid ? state.rxQueueReader->CorrHostNanosPerSampleQ8() : 0;
     const uint64_t hostTicksPerBuffer = detail::ComputeHostTicksPerBuffer(state, q8, rxPllReady);
 
-    // Apple-faithful path: anchor CoreAudio's zero timestamp to the real hardware
-    // (cycle-timer, host-uptime) pair the RX poll captured at the isoch interrupt,
-    // instead of accumulating a free-running software timer. Use it only when the
-    // anchor is valid AND its sample-time has advanced past the last published one
-    // (monotonicity / freshness); otherwise fall back to the software accumulator
-    // (e.g. RX starved, or before the first poll has run).
+    // Apple-faithful path, PLL-smoothed (2026-06-10, HW log 21-22-25): the raw
+    // RX-poll (cycle-timer sample-time, host-uptime) anchor pair is correct in
+    // RATE (slope = 48001.5 fps, the real device clock) but carries up to ~2.7ms
+    // of capture-instant phase noise per publish. Republishing it raw made the
+    // HAL's anchor-scheduled IO wakes fire at ~161/s instead of 250/s — a ~3.5%
+    // feed deficit that drained the TX cushion every ~400ms (the residual Local-
+    // mode stutter). The ZtsAnchorPll publishes a smooth grid timeline (sample
+    // += period, host += q8-disciplined period) and only SLEWS phase toward the
+    // raw anchor, bounded per tick. Falls back to the plain accumulator until
+    // the first anchor arrives; a frozen anchor (RX stopped) simply stops the
+    // slew, which IS the accumulator behavior that paced a perfect 250 cb/s.
     uint64_t hwSampleTime = 0;
     uint64_t hwHostTicks = 0;
     const bool haveHwAnchor = state.rxQueueValid &&
         state.rxQueueReader->ReadHwZeroTimestampAnchor(hwSampleTime, hwHostTicks);
     bool usedHwAnchor = false;
 
-    if (haveHwAnchor && (currentHostTime == 0 || hwSampleTime > currentSampleTime)) {
-        currentSampleTime = hwSampleTime;
-        currentHostTime = hwHostTicks;
+    const double ticksPerBuffer = state.clockSync->currentTicksPerBuffer > 0.0
+        ? state.clockSync->currentTicksPerBuffer
+        : static_cast<double>(hostTicksPerBuffer);
+
+    const bool anchorFresh = haveHwAnchor &&
+        hwHostTicks != state.clockSync->ztsAnchorPll.lastHwHostTicks;
+
+    // Advance one grid period per elapsed timer beat (HW log 2026-06-10_22-22-09:
+    // crediting exactly ONE period per delivered callback while deliveries lagged
+    // the grid made the published timeline run ~15% slow in wall terms — still
+    // rate-consistent, so audio played, but the anchor receded from "now" at
+    // ~0.15 s/s). The raw anchor is offered only on the last beat so the phase
+    // slew applies once, against the fully advanced grid.
+    const uint32_t elapsedPeriods = state.elapsedPeriods > 0 ? state.elapsedPeriods : 1;
+    auto& pll = state.clockSync->ztsAnchorPll;
+    bool pllValid = false;
+    if (!pll.valid) {
+        pllValid = pll.Tick(state.ioBufferPeriodFrames, ticksPerBuffer,
+                            haveHwAnchor, hwSampleTime, hwHostTicks);
+    } else {
+        for (uint32_t beat = 0; beat < elapsedPeriods; ++beat) {
+            const bool lastBeat = (beat + 1 == elapsedPeriods);
+            pllValid = pll.Tick(state.ioBufferPeriodFrames, ticksPerBuffer,
+                                lastBeat && haveHwAnchor, hwSampleTime, hwHostTicks);
+        }
+    }
+    if (pllValid) {
+        currentSampleTime = pll.sampleTime;
+        currentHostTime = pll.hostTicks;
         usedHwAnchor = true;
     } else if (currentHostTime != 0) {
-        currentSampleTime += state.ioBufferPeriodFrames;
-        currentHostTime += hostTicksPerBuffer;
+        currentSampleTime += static_cast<uint64_t>(elapsedPeriods) * state.ioBufferPeriodFrames;
+        currentHostTime += static_cast<uint64_t>(elapsedPeriods) * hostTicksPerBuffer;
     } else {
         currentSampleTime = 0;
         currentHostTime = time;
@@ -436,12 +468,30 @@ void HandleClockTimerTick(AudioClockEngineState& state, uint64_t time) {
     // owns re-arm, so a stop/start can't leave the timer un-armed.)
     *state.hostTicksPerBuffer = hostTicksPerBuffer;
 
+    // Anchor-freshness probe (2026-06-09 HAL cadence analysis):
+    // the CoreAudio HAL derives the device rate from deltas (robust to publish cadence),
+    // but schedules each IO wake as `cycle_anchor - 1 cycle` in *host* time. So the
+    // zero-timestamp we publish must read as a RECENT PAST anchor: `host - mach_now`
+    // should be <= 0 (a small negative, ~one cycle behind). A large POSITIVE lead means
+    // our published host runs AHEAD of real mach time -> the HAL's wake lands in the
+    // future -> the IO thread sleeps -> the ~130x feed throttle seen in log 20-39-12.
+    // Also report timer lateness (mach_now - scheduled `time`) to catch the accumulator
+    // path over-advancing host when the timer fires off-cadence.
+    const uint64_t machNow = mach_absolute_time();
+    const int64_t hostLeadTicks = static_cast<int64_t>(currentHostTime) - static_cast<int64_t>(machNow);
+    const int64_t timerLateTicks = static_cast<int64_t>(machNow) - static_cast<int64_t>(time);
+
     ASFW_LOG_RL(Audio, "zts/anchor", 1000, OS_LOG_TYPE_DEFAULT,
-                "zts/anchor: src=%{public}s sample=%llu host=%llu q8=%u",
-                usedHwAnchor ? "hw" : "accum",
+                "zts/anchor: src=%{public}s sample=%llu host=%llu q8=%u "
+                "lead=%lld cyc=%llu late=%lld n=%u",
+                usedHwAnchor ? (anchorFresh ? "hw-pll" : "hw-coast") : "accum",
                 currentSampleTime,
                 currentHostTime,
-                q8);
+                q8,
+                static_cast<long long>(hostLeadTicks),
+                static_cast<unsigned long long>(hostTicksPerBuffer),
+                static_cast<long long>(timerLateTicks),
+                elapsedPeriods);
 
     detail::LogPeriodicMetrics(state, time, localEncodingActive, rxFill, rxPllReady, q8);
 
