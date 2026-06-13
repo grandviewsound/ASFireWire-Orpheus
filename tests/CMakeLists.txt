@@ -175,6 +175,27 @@ target_include_directories(CompletionRefactorPlanTests PRIVATE
 
 gtest_discover_tests(CompletionRefactorPlanTests)
 
+# Watchdog Coordinator Tests - deadline-anchored re-arm math (no compounding drift)
+add_executable(WatchdogCoordinatorTests
+    "${ASFW_TESTS_DIR}/WatchdogCoordinatorTests.cpp"
+)
+
+target_link_libraries(WatchdogCoordinatorTests
+    PRIVATE
+        GTest::gtest_main
+)
+
+target_compile_definitions(WatchdogCoordinatorTests
+    PRIVATE
+        ASFW_HOST_TEST
+)
+
+target_include_directories(WatchdogCoordinatorTests PRIVATE
+    ${ASFW_COMMON_INCLUDES}
+)
+
+gtest_discover_tests(WatchdogCoordinatorTests)
+
 # Gap Count Optimizer Tests - Bus reset storm fix
 add_executable(GapCountOptimizerTests
     "${ASFW_TESTS_DIR}/GapCountOptimizerTests.cpp"

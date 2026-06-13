@@ -79,6 +79,7 @@ void WatchdogCoordinator::Reset() {
     Stop();
     action_.reset();
     timer_.reset();
+    nextDeadline_ = 0;
     isochLogDivider_ = 0;
     itLogDivider_ = 0;
 }
@@ -88,9 +89,15 @@ void WatchdogCoordinator::Schedule(uint64_t delayUsec) {
         return;
     }
 
+    // Deadline-anchored re-arm. The old `WakeAtTime(now + delta)` sampled `now`
+    // after HandleTick ran, folding ~0.65 ms of handler work + delivery lag into
+    // every tick (the 1 ms watchdog effectively ran ~1.65 ms). Anchoring the next
+    // deadline on the previous one makes that lag a constant phase offset so the
+    // tick cadence holds at the intended period.
     const uint64_t now = mach_absolute_time();
-    const uint64_t delta = MicrosecondsToMachTicks(delayUsec);
-    (void)timer_->WakeAtTime(kIOTimerClockMachAbsoluteTime, now + delta, 0);
+    const uint64_t period = MicrosecondsToMachTicks(delayUsec);
+    nextDeadline_ = ComputeNextDeadline(nextDeadline_, now, period);
+    (void)timer_->WakeAtTime(kIOTimerClockMachAbsoluteTime, nextDeadline_, 0);
 }
 
 void WatchdogCoordinator::HandleTick(ControllerCore* controller,
