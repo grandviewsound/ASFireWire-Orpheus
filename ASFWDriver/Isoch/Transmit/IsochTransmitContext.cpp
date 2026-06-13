@@ -449,10 +449,12 @@ void IsochTransmitContext::LogStatistics() const noexcept {
     const bool dead = (ctrl & ContextControl::kDead) != 0;
     const uint32_t eventCode = (ctrl & ContextControl::kEventCodeMask) >> ContextControl::kEventCodeShift;
 
-    ASFW_LOG(Isoch, "IT: run=%d active=%d dead=%d evt=0x%02x pkts=%llu IRQ=%llu | CmdPtr=0x%08x Ctrl=0x%08x",
+    ASFW_LOG(Isoch, "IT: run=%d active=%d dead=%d evt=0x%02x pkts=%llu IRQ=%llu wdKicks=%llu maxRefillUs=%u | CmdPtr=0x%08x Ctrl=0x%08x",
              run, active, dead, eventCode,
              packetsAssembled_,
              interruptCount_.load(std::memory_order_relaxed),
+             irqWatchdogKicks_.load(std::memory_order_relaxed),
+             maxRefillLatencyUs_.load(std::memory_order_relaxed),
              cmdPtr, ctrl);
 }
 
