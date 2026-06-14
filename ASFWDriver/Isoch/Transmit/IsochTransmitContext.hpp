@@ -154,6 +154,29 @@ private:
     uint64_t lastInterruptCountSeen_{0};
     uint32_t irqStallTicks_{0};
 
+    // DIAG (strippable): ticks elapsed since the IT completion IRQ counter last
+    // advanced. SEPARATE from irqStallTicks_ on purpose: irqStallTicks_ is reset
+    // to 0 by the watchdog-refill branch every ~2 ticks, so it can never reach the
+    // death-diagnostic threshold. This counter is reset ONLY when a real IRQ
+    // arrives, so it measures the TRUE freeze duration even while the watchdog is
+    // carrying refills.
+    uint32_t irqDeathTicks_{0};
+
+    // DIAG (strippable): when the IT completion IRQ counter stops advancing for a
+    // sustained window (the soak-reproducible "IRQ death"), snapshot the OHCI
+    // interrupt registers so we can tell host-side ack/re-arm failure from a
+    // hardware stop. true while an episode is being reported (one-shot + periodic).
+    bool irqStallDiagActive_{false};
+
+    // DIAG (strippable): poll/watchdog cadence telemetry. Measures the wall-clock
+    // interval between Poll() invocations (driven by the watchdog timer) to
+    // validate the deadline-anchored re-arm: target ~1000us, max bounded.
+    uint64_t lastPollTicks_{0};
+    uint32_t pollDtMinUs_{0xFFFFFFFFU};
+    uint32_t pollDtMaxUs_{0};
+    uint64_t pollDtSumUs_{0};
+    uint64_t pollDtCount_{0};
+
     // 1F: Refill Latency Histogram (buckets: <50us, 50-200us, 200-500us, >500us)
     std::atomic<uint64_t> latencyBucket0_{0};
     std::atomic<uint64_t> latencyBucket1_{0};

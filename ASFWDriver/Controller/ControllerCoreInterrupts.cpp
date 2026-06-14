@@ -182,7 +182,10 @@ void ControllerCore::HandleInterrupt(const InterruptSnapshot& snapshot) {
     if (toAck != 0U) {
         hw.ClearIntEvents(toAck);
     }
-    hw.ClearIsoXmitEvents(snapshot.isoXmitEvent);
+    // NOTE: IsoXmitEvent is intentionally NOT cleared here. Clearing the stale wide-read
+    // `snapshot.isoXmitEvent` races the hardware (write-1-to-clear loses completions set in the
+    // read→clear window, latching bit0 and freezing the IT IRQ). The IT path in
+    // InterruptDispatcher does an Apple-faithful fresh-read → clear → re-check drain instead.
     hw.ClearIsoRecvEvents(snapshot.isoRecvEvent);
 }
 

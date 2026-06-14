@@ -268,13 +268,66 @@ void IsochTransmitContext::Poll() noexcept {
     if (state_ != State::Running) return;
     ++tickCount_;
 
+    // DIAG: measure the interval between watchdog-driven Poll() calls so we can
+    // confirm the deadline-anchored re-arm holds the cadence near 1ms.
+    const uint64_t pollNow = mach_absolute_time();
+    if (lastPollTicks_ != 0) {
+        const uint64_t dtNs = ASFW::Timing::hostTicksToNanos(pollNow - lastPollTicks_);
+        const uint32_t dtUs = static_cast<uint32_t>(dtNs / 1000);
+        if (dtUs < pollDtMinUs_) pollDtMinUs_ = dtUs;
+        if (dtUs > pollDtMaxUs_) pollDtMaxUs_ = dtUs;
+        pollDtSumUs_ += dtUs;
+        ++pollDtCount_;
+    }
+    lastPollTicks_ = pollNow;
+
     // IRQ-stall watchdog
     const uint64_t irqNow = interruptCount_.load(std::memory_order_relaxed);
     if (irqNow != lastInterruptCountSeen_) {
         lastInterruptCountSeen_ = irqNow;
         irqStallTicks_ = 0;
+        // Only a real IRQ advance resets the death counter; the watchdog refill
+        // below must NOT (it would mask the freeze it is compensating for).
+        irqDeathTicks_ = 0;
+        if (irqStallDiagActive_) {
+            ASFW_LOG_V0(Isoch, "IT IRQ-DIAG: IRQ resumed (IRQ=%llu) after a stall episode",
+                        interruptCount_.load(std::memory_order_relaxed));
+            irqStallDiagActive_ = false;
+        }
     } else {
         ++irqStallTicks_;
+        ++irqDeathTicks_;
+    }
+
+    // DIAG: a real IRQ death sustains for hundreds of ms (healthy IT IRQ rate is
+    // ~1000/s, so any tick without an IRQ is already abnormal; we only flag a
+    // *sustained* stall to avoid noise from normal coalescing). When it crosses
+    // the threshold, snapshot the OHCI interrupt registers. The single line below
+    // discriminates the failure: isochTx still asserted + IsoXmitEvent bit set =>
+    // host lost the MSI re-arm edge (we acked the wrong/stale value); isochTx clear
+    // while descriptors keep completing => hardware stopped asserting; IsoXmitMask
+    // or IntMask isochTx bit cleared => the interrupt got masked off mid-run.
+    constexpr uint32_t kIrqStallDiagThresholdTicks = 200;  // ~200ms with zero IT IRQs
+    if (hardware_ && irqDeathTicks_ >= kIrqStallDiagThresholdTicks &&
+        (!irqStallDiagActive_ || (irqDeathTicks_ % 1000) == 0)) {
+        irqStallDiagActive_ = true;
+        const uint32_t intEvent = hardware_->Read(Register32::kIntEvent);
+        const uint32_t intMask = hardware_->Read(Register32::kIntMaskSet);
+        const uint32_t isoXmitEvent = hardware_->Read(Register32::kIsoXmitEvent);
+        const uint32_t isoXmitMask = hardware_->Read(Register32::kIsoXmitIntMaskSet);
+        const uint32_t ctrl = hardware_->Read(
+            static_cast<Register32>(DMAContextHelpers::IsoXmitContextControl(contextIndex_)));
+        const bool isochTxAsserted = (intEvent & IntEventBits::kIsochTx) != 0;
+        // packetsAssembled_ in the same line proves whether DMA is still advancing
+        // while the IRQ is frozen (it was, in the soak) — i.e. host-side lost edge,
+        // not a hardware stop.
+        ASFW_LOG_V0(Isoch,
+                    "IT IRQ-DIAG: STALL %u ticks IRQ=%llu pkts=%llu wdKicks=%llu | "
+                    "IntEvent=0x%08x isochTx=%d IntMask=0x%08x IsoXmitEvent=0x%08x "
+                    "IsoXmitMask=0x%08x Ctrl=0x%08x",
+                    irqDeathTicks_, interruptCount_.load(std::memory_order_relaxed),
+                    packetsAssembled_, irqWatchdogKicks_.load(std::memory_order_relaxed),
+                    intEvent, isochTxAsserted ? 1 : 0, intMask, isoXmitEvent, isoXmitMask, ctrl);
     }
 
     constexpr uint32_t kIrqStallThresholdTicks = 2;

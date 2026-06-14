@@ -37,24 +37,41 @@ void InterruptDispatcher::HandleSnapshot(const InterruptSnapshot& snap, Controll
 
     // ===== ISOCHRONOUS TRANSMIT INTERRUPT =====
     // Per OHCI §9.2: kIsochTx (bit 6) indicates IT context completion.
-    // Similar to IR, we read IsoXmitEvent, clear it, and process.
-    if ((snap.intEvent & IntEventBits::kIsochTx) && snap.isoXmitEvent != 0) {
-        // DEBUG: Sample interrupt rate
-        static uint32_t txIrqCtr = 0;
-        if ((++txIrqCtr % 100) == 0) {
-            ASFW_LOG_V3(Controller, "[IRQ] IsoTx Fired! Count=%u IsoTxEvent=0x%08x", txIrqCtr,
-                        snap.isoXmitEvent);
-        }
+    //
+    // Apple-faithful drain (AppleFWOHCI_DCLProgram::handleInterrupt, FWOHCI_IR.md:338):
+    // re-read IsoXmitEvent FRESH, clear it, process, then re-check in a loop. We must NOT
+    // clear the stale wide-read `snap.isoXmitEvent` captured back in
+    // CaptureInterruptSnapshot: a completion landing in that read→clear window is lost by the
+    // write-1-to-clear, which latches IsoXmitEvent bit0 = 1, keeps the IntEvent.isochTx summary
+    // asserted, and the MSI edge never re-fires — the IT IRQ freezes permanently while DMA runs
+    // (reproduced HW soak 2026-06-14: IRQ stuck at 58818, IsoXmitEvent=0x1 for the whole run).
+    // The main IntEvent (incl. isochTx) is already acked ahead of us in ControllerCore::
+    // HandleInterrupt(), so this matches Linux ohci.c ack-first ordering.
+    if (snap.intEvent & IntEventBits::kIsochTx) {
+        // Single IT context; completions coalesce into bit0, so a small bound suffices while
+        // still letting us drain anything HW sets while we were processing.
+        unsigned int safety = 8;
+        uint32_t xmitEvent = hardware.Read(Register32::kIsoXmitEvent); // fresh read
+        while (xmitEvent != 0 && safety-- > 0) {
+            // Ack the bits we just observed (flushed, so the clear lands before the re-read).
+            hardware.ClearIsoXmitEvents(xmitEvent);
 
-        // Clear event bits to acknowledge
-        hardware.Write(Register32::kIsoXmitIntEventClear, snap.isoXmitEvent);
+            // DEBUG: Sample interrupt rate
+            static uint32_t txIrqCtr = 0;
+            if ((++txIrqCtr % 100) == 0) {
+                ASFW_LOG_V3(Controller, "[IRQ] IsoTx Fired! Count=%u IsoTxEvent=0x%08x", txIrqCtr,
+                            xmitEvent);
+            }
 
-        // Context 0 is our single IT context
-        if ((snap.isoXmitEvent & 0x01) && isoch.TransmitContext()) {
-            // Process IT directly in ISR context for lowest latency.
-            // IT RefillRing is fast (atomic assemble + mem writes).
-            // DispatchAsync adds latency which might cause underruns if buffers are small.
-            isoch.TransmitContext()->HandleInterrupt();
+            // Context 0 is our single IT context. Process directly in ISR context for lowest
+            // latency (IT RefillRing is a fast atomic assemble + mem writes; DispatchAsync would
+            // add latency that risks underruns with small buffers).
+            if ((xmitEvent & 0x01) && isoch.TransmitContext()) {
+                isoch.TransmitContext()->HandleInterrupt();
+            }
+
+            // Re-check: catch completions HW set during processing before we leave the ISR.
+            xmitEvent = hardware.Read(Register32::kIsoXmitEvent);
         }
     }
 
