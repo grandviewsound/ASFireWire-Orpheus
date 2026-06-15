@@ -44,10 +44,18 @@ std::unique_ptr<IDeviceProtocol> DeviceProtocolFactory::Create(
         return std::make_unique<BeBoB::BeBoBProtocol>(busOps, busInfo, nodeId);
     }
 
-    // Unknown device
-    ASFW_LOG(Audio, "DeviceProtocolFactory: no protocol for vendor=0x%06x model=0x%06x",
+    // U1 — generic AV/C-audio backend for any unrecognized device. The BeBoB
+    // protocol is the standard AV/C + CMP + stream-format implementation; its
+    // capabilities are no longer hardcoded — they come from device discovery
+    // (U2), so it serves as the device-agnostic default. Callers (DeviceRegistry)
+    // only reach this path for AV/C audio-candidate devices, so attaching the
+    // generic backend here is safe; a recognized device still hits its explicit
+    // entry above first.
+    ASFW_LOG(Audio,
+             "DeviceProtocolFactory: no explicit profile for vendor=0x%06x model=0x%06x "
+             "— using generic AV/C-audio backend",
              vendorId, modelId);
-    return nullptr;
+    return std::make_unique<BeBoB::BeBoBProtocol>(busOps, busInfo, nodeId);
 }
 
 } // namespace ASFW::Audio

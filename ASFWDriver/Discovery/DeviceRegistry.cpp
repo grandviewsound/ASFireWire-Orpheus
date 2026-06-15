@@ -94,9 +94,30 @@ DeviceRecord& DeviceRegistry::UpsertFromROM(const ConfigROM& rom, const LinkPoli
     } else {
         device.kind = ClassifyDevice(rom);
         device.isAudioCandidate = IsAudioCandidate(rom);
+
+#if !defined(ASFW_HOST_TEST)
+        // U1 — generic device path. An unrecognized device that the ROM marks as
+        // an AV/C audio candidate gets the generic AV/C-audio backend (factory
+        // fallback) instead of being dropped. Capabilities come from discovery
+        // (U2), so no per-model profile is required. Tightly gated on
+        // audio-candidacy so non-audio FireWire devices are never bound.
+        if (!device.protocol && device.isAudioCandidate &&
+            device.kind == DeviceKind::AV_C && busOps && busInfo) {
+            ASFW_LOG(Discovery,
+                     "U1: generic AV/C-audio backend for unrecognized device "
+                     "GUID=0x%016llx vendor=0x%06x model=0x%06x node=%u",
+                     guid, device.vendorId, device.modelId, rom.nodeId);
+            device.protocol = Audio::DeviceProtocolFactory::Create(
+                device.vendorId, device.modelId, *busOps, *busInfo, rom.nodeId);
+            if (device.protocol) {
+                ASFW_LOG(Discovery, "✅ Generic protocol created: %{public}s",
+                         device.protocol->GetName());
+                device.protocol->Initialize();
+            }
+        }
+#endif
     }
 
-    // TODO: Generic AV/C devices should work purely via MusicSubunit discovery; vendor protocols are only for extra controls.
     // TODO: Generic DICE/TCAT discovery (non-hardcoded vendor/model) is not implemented yet.
     
     device.gen = rom.gen;

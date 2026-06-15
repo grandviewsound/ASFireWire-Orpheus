@@ -81,15 +81,30 @@ struct PlugChannelSummary {
     }
 
     const auto& fmt = *plug.currentFormat;
-    if (fmt.totalChannels > 0) {
-        return fmt.totalChannels;
+
+    // U2 — count AUDIO (non-MIDI) channels only. AM824 streams carry an embedded
+    // MIDI-conformant data channel alongside the PCM/IEC60958 channels, so the
+    // device's reported total (e.g. Orpheus 11 in / 13 out = DBS 11/13) is
+    // 1 more than the audio width CoreAudio should publish (10 / 12). Summing
+    // only non-MIDI blocks yields the device-driven audio width generically —
+    // no per-model override needed. (Per-block formatCode is the same field the
+    // channel-position map already keys off of.)
+    uint32_t audioChannels = 0;
+    bool sawBlocks = false;
+    for (const auto& block : fmt.channelFormats) {
+        sawBlocks = true;
+        if (block.formatCode == ASFW::Protocols::AVC::StreamFormats::StreamFormatCode::kMIDI) {
+            continue;
+        }
+        audioChannels += block.channelCount;
+    }
+    if (sawBlocks) {
+        return audioChannels;
     }
 
-    uint32_t sum = 0;
-    for (const auto& block : fmt.channelFormats) {
-        sum += block.channelCount;
-    }
-    return sum;
+    // Degraded: no per-block format info — fall back to the reported total
+    // (may include the MIDI channel; corrected once block detail is available).
+    return fmt.totalChannels;
 }
 
 [[nodiscard]] PlugChannelSummary SummarizePlugChannels(
@@ -908,33 +923,49 @@ void AVCDiscovery::HandleInitializedUnit(uint64_t guid, const std::shared_ptr<AV
              vendorId, modelId,
              startOrder.inputBeforeOutput ? "input-first" : "output-first",
              startOrder.reason);
+    // U2 — device-driven channel publish. The audio (non-MIDI) widths from plug
+    // discovery are authoritative for ANY device; the host-side input (capture)
+    // maps to the device's OUTPUT plug width and vice-versa. Fall back to the
+    // aggregate width only if a direction reported nothing.
     uint32_t publishedAggregateChannels = channelCount;
     uint32_t publishedInputChannels =
         (plugSummary.outputAudioMaxChannels > 0) ? plugSummary.outputAudioMaxChannels : channelCount;
     uint32_t publishedOutputChannels =
         (plugSummary.inputAudioMaxChannels > 0) ? plugSummary.inputAudioMaxChannels : channelCount;
 
-    if (IsPrismOrpheus(vendorId, modelId)) {
-        publishedAggregateChannels = ASFW::Audio::BeBoB::kOrpheusInputAudioChannels;
-        publishedInputChannels = ASFW::Audio::BeBoB::kOrpheusOutputAudioChannels;
-        publishedOutputChannels = ASFW::Audio::BeBoB::kOrpheusInputAudioChannels;
+    // Safety net: if discovery yielded no audio width at all, fall back to the
+    // proven Orpheus profile for the proven device so we never regress it.
+    if (publishedInputChannels == 0 || publishedOutputChannels == 0) {
+        if (IsPrismOrpheus(vendorId, modelId)) {
+            publishedAggregateChannels = ASFW::Audio::BeBoB::kOrpheusInputAudioChannels;
+            publishedInputChannels = ASFW::Audio::BeBoB::kOrpheusOutputAudioChannels;
+            publishedOutputChannels = ASFW::Audio::BeBoB::kOrpheusInputAudioChannels;
+            ASFW_LOG(Audio,
+                     "AVCDiscovery: discovery yielded no audio width — Orpheus profile fallback "
+                     "(in=%u out=%u aggregate=%u)",
+                     publishedInputChannels, publishedOutputChannels, publishedAggregateChannels);
+        }
+    }
 
-        // Match Apple's naming: "Orpheus (0818)" where suffix is last 2 GUID bytes as decimal
+    // Cosmetic: match Apple's "Orpheus (NNNN)" name for the proven device. Any
+    // other device keeps its discovered ROM/capability name (deviceName above) —
+    // the channel counts are fully device-driven now (no per-model override).
+    if (IsPrismOrpheus(vendorId, modelId)) {
         uint16_t deviceNum = static_cast<uint16_t>(guid & 0xFFFF);
         char nameBuf[64];
         snprintf(nameBuf, sizeof(nameBuf), "Orpheus (%04u)", deviceNum);
         deviceName = nameBuf;
-
-        ASFW_LOG(Audio,
-                 "AVCDiscovery: Applying Orpheus overrides "
-                 "name=%{public}s rawIn=%u rawOut=%u publishedIn=%u publishedOut=%u aggregate=%u",
-                 deviceName.c_str(),
-                 plugSummary.outputAudioMaxChannels,
-                 plugSummary.inputAudioMaxChannels,
-                 publishedInputChannels,
-                 publishedOutputChannels,
-                 publishedAggregateChannels);
     }
+
+    ASFW_LOG(Audio,
+             "AVCDiscovery: device-driven channel publish name=%{public}s "
+             "discIn(devOut)=%u discOut(devIn)=%u publishedIn=%u publishedOut=%u aggregate=%u",
+             deviceName.c_str(),
+             plugSummary.outputAudioMaxChannels,
+             plugSummary.inputAudioMaxChannels,
+             publishedInputChannels,
+             publishedOutputChannels,
+             publishedAggregateChannels);
 
     ASFW_LOG(Audio,
              "AVCDiscovery: Publishing audio configuration for GUID=%llx: %{public}s, %u channels, %zu sample rates",
