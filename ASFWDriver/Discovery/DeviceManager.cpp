@@ -273,6 +273,8 @@ std::shared_ptr<FWDevice> DeviceManager::UpsertDevice(
         auto device = it->second;
         if (device) {
             if (!device->IsTerminated()) {
+                // F6: device seen again — clear its missed-scan reap counter.
+                missedScans_.erase(guid);
                 // Always update gen/nodeId and fire resume notification on re-discovery.
                 // After every bus reset the Orpheus resets its PCR p2p count to 0 and
                 // may change node number. We must reconnect CMP and refresh FCP routing
@@ -334,8 +336,12 @@ void DeviceManager::MarkDeviceLost(Guid64 guid)
     // Suspend policy: BeBoB and other AV/C audio devices perform mandatory bus
     // resets after SetFormat. Immediately terminating the device kills the audio
     // driver. Suspend it instead so it can be resumed when it reappears in the
-    // next generation scan. TerminateDevice() is still available for explicit
-    // permanent removal (e.g. physical unplug detected via timeout).
+    // next generation scan.
+    //
+    // F6 — reaping: a device absent from many consecutive full scans is
+    // genuinely unplugged (not mid-reset). Count consecutive misses and, past
+    // kMaxMissedScansBeforeTerminate, permanently TerminateDevice so a removed
+    // device isn't left Suspended forever (Apple terminateDevice on node-gone).
     IOLockLock(mutex_);
 
     auto it = devicesByGuid_.find(guid);
@@ -345,20 +351,37 @@ void DeviceManager::MarkDeviceLost(Guid64 guid)
     }
 
     auto device = it->second;
-    if (!device || !device->IsReady()) {
+    if (!device || device->IsTerminated()) {
         IOLockUnlock(mutex_);
         return;
     }
 
-    device->Suspend();
-
-    for (const auto& unit : device->GetUnits()) {
-        if (unit && !unit->IsTerminated()) {
-            NotifyUnitSuspended(unit);
-        }
+    const uint32_t missed = ++missedScans_[guid];
+    if (missed >= kMaxMissedScansBeforeTerminate) {
+        ASFW_LOG(Discovery,
+                 "Device missing %u consecutive scans — terminating (GUID=0x%016llx)",
+                 missed, guid);
+        IOLockUnlock(mutex_);
+        TerminateDevice(guid);  // takes mutex_ itself; erases from primary map
+        IOLockLock(mutex_);
+        missedScans_.erase(guid);
+        IOLockUnlock(mutex_);
+        return;
     }
 
-    NotifyDeviceSuspended(device);
+    // First miss (Ready → Suspended); later misses below the threshold no-op
+    // beyond bumping the counter.
+    if (device->IsReady()) {
+        device->Suspend();
+
+        for (const auto& unit : device->GetUnits()) {
+            if (unit && !unit->IsTerminated()) {
+                NotifyUnitSuspended(unit);
+            }
+        }
+
+        NotifyDeviceSuspended(device);
+    }
 
     IOLockUnlock(mutex_);
 }
@@ -403,6 +426,7 @@ void DeviceManager::TerminateDevice(Guid64 guid)
 
     // Remove from primary map
     devicesByGuid_.erase(it);
+    missedScans_.erase(guid);  // F6: drop the reap counter with the device
 
     IOLockUnlock(mutex_);
 }

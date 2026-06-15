@@ -25,6 +25,7 @@ struct BusResetMetrics {
     uint64_t lastResetCompletion{0};
     uint32_t resetCount{0};
     uint32_t abortCount{0};
+    uint32_t resetStormCount{0};  ///< B14a: times a reset-storm back-off was applied
     std::optional<std::string> lastFailureReason;
 };
 

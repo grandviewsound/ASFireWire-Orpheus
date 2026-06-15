@@ -114,12 +114,6 @@ inline bool IsSuccess(AVCResult result) {
            result == AVCResult::kChanged;
 }
 
-/// Check if result indicates retry might succeed
-inline bool ShouldRetry(AVCResult result) {
-    return result == AVCResult::kInTransition ||
-           result == AVCResult::kBusReset;
-}
-
 /// Convert AV/C ctype to AVCResult
 inline AVCResult CTypeToResult(uint8_t ctype) {
     switch (ctype) {
@@ -227,13 +221,20 @@ constexpr uint32_t kFCPTimeoutAfterInterim = 10000;
 /// duplicate CONTROL command may corrupt device state).
 constexpr uint8_t kFCPMaxRetries = 4;
 
-/// Gap 5.5 — Apple's AM824AVC::AVCCommand RE-SENDS an AVC command that returns
-/// IN_TRANSITION (0x0B, "device state is changing") until a final response,
-/// rather than failing. We mirror that with a bounded re-send. Unlike the
-/// timeout case, a 0x0B response means the target explicitly DID NOT act on the
-/// command (it's transitioning), so re-sending is safe (no duplicate-CONTROL
-/// hazard). Each retry is a full FCP round-trip, providing natural spacing.
+/// Gap 5.5 / A6 — Apple's AM824AVC::AVCCommand RE-SENDS an AVC command that
+/// returns IN_TRANSITION (0x0B, "device state is changing") until a final
+/// response, rather than failing. We mirror that with a bounded re-send. Unlike
+/// the timeout case, a 0x0B response means the target explicitly DID NOT act on
+/// the command (it's transitioning), so re-sending is safe (no duplicate-CONTROL
+/// hazard).
 constexpr uint8_t kFCPInTransitionRetries = 4;
+
+/// A6 — spacing between IN_TRANSITION (0x0B) re-sends. An FCP round-trip is
+/// sub-millisecond, so back-to-back re-sends can exhaust all retries inside a
+/// single (tens-of-ms) device transition window and then fail. Space them so the
+/// 4 retries span the transition: 4 × 20ms ≈ 80ms of coverage, well inside the
+/// 1000ms initial FCP timeout. (Apple's AVCCommand spaces 0x0B retries via IOSleep.)
+constexpr uint32_t kFCPInTransitionRetryDelayMs = 20;
 
 //==============================================================================
 // Plug Types (for PCR/CMP)

@@ -93,6 +93,14 @@ private:
     static GenNodeKey MakeKey(Generation gen, uint8_t nodeId);
     std::map<GenNodeKey, Guid64> genNodeToGuid_;
 
+    // F6 — consecutive full-scans each device has been missing. First miss
+    // suspends (BeBoB devices bus-reset after SetFormat and must survive); a
+    // device absent for too many scans is genuinely unplugged → terminate so we
+    // don't leak a stale Suspended object (Apple terminateDevice on node-gone).
+    // Reset on re-discovery (UpsertDevice).
+    static constexpr uint32_t kMaxMissedScansBeforeTerminate = 8;
+    std::map<Guid64, uint32_t> missedScans_;
+
     std::set<IDeviceObserver*> deviceObservers_;
     std::set<IUnitObserver*> unitObservers_;
 

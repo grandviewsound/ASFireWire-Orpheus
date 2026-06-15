@@ -684,3 +684,34 @@ TEST(BusResetCoordinatorTests, StableAcceptedGenerationCommitsGapAfterSuccessful
     ASSERT_TRUE(rig.publishedTopologies.back().gapCountConsistent);
     EXPECT_EQ(rig.publishedTopologies.back().gapCount, 21U);
 }
+
+// B14a — a burst of bus-reset edges inside the storm window applies the
+// bounded back-off (mitigation counter increments), mirroring Apple's
+// handleBusResetInt ≥11-reset throttle.
+TEST(BusResetCoordinatorTests, RapidResetBurstTriggersStormMitigation) {
+    BusResetTestRig rig;
+    rig.Initialize();
+    rig.SetLocalNode(0U);
+
+    // 11 reset edges with no time advance → all inside the 2 s window.
+    for (int i = 0; i < 11; ++i) {
+        rig.StartResetCycle();
+    }
+
+    EXPECT_GE(rig.coordinator.Metrics().resetStormCount, 1U);
+}
+
+// B14a — resets spaced beyond the storm window must NOT trip mitigation
+// (a normal device re-enumerating, not a storm).
+TEST(BusResetCoordinatorTests, SpacedResetsDoNotTriggerStormMitigation) {
+    BusResetTestRig rig;
+    rig.Initialize();
+    rig.SetLocalNode(0U);
+
+    for (int i = 0; i < 11; ++i) {
+        rig.StartResetCycle();
+        rig.AdvanceMs(2001U);  // beyond the 2 s storm window → window resets
+    }
+
+    EXPECT_EQ(rig.coordinator.Metrics().resetStormCount, 0U);
+}

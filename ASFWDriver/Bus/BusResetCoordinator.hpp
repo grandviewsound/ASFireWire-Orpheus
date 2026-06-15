@@ -256,6 +256,17 @@ class BusResetCoordinator {
     uint64_t busResetClearTime_{0};
     TopologyReadyCallback topologyCallback_;
 
+    // B14a — reset-storm mitigation. A flaky cable/device can emit bus resets
+    // faster than the bus can settle; without a throttle we re-handle every edge
+    // (CPU thrash, never converges). Mirrors AppleFWOHCI handleBusResetInt's
+    // ≥11-reset mitigation: once too many resets land inside a short window we
+    // apply a bounded back-off before processing the next edge.
+    static constexpr uint32_t kResetStormThreshold = 11;
+    static constexpr uint64_t kResetStormWindowNs = 2'000'000'000ULL;  // 2 s
+    static constexpr uint32_t kResetStormBackoffMs = 200;
+    uint64_t stormWindowStart_{0};
+    uint32_t stormWindowCount_{0};
+
     std::atomic<bool> deferredRunScheduled_{false};
     HardwareInterface* hardware_{nullptr};
     Async::IAsyncControllerPort* asyncSubsystem_{nullptr};

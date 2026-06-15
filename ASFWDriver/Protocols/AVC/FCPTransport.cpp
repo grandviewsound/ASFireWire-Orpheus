@@ -359,12 +359,19 @@ void FCPTransport::OnFCPResponse(uint16_t srcNodeID,
         const uint8_t opcode = response.length > 2 ? response.data[2] : 0xFFu;
         if (pending_->inTransitionRetriesLeft > 0) {
             pending_->inTransitionRetriesLeft--;
+            // A6: cancel the in-flight timeout and re-send after a spacing delay
+            // (not immediately) so the bounded retries span the device's
+            // transition window instead of hammering it sub-millisecond. The
+            // delayed-retry block reschedules the full timeout via RetryCommand.
+            pending_->timeoutToken = ++nextTimeoutToken_;
+            const uint64_t retryToken = pending_->timeoutToken;
             ASFW_LOG(FCP,
                      "FCPTransport: IN_TRANSITION (0x0B) subunit=0x%02x opcode=0x%02x "
-                     "— re-sending (%u retries left)",
-                     subunit, opcode, pending_->inTransitionRetriesLeft);
+                     "— re-sending in %ums (%u retries left)",
+                     subunit, opcode, config_.inTransitionRetryDelayMs,
+                     pending_->inTransitionRetriesLeft);
             IOLockUnlock(lock_);
-            RetryCommand();
+            ScheduleDelayedRetry(config_.inTransitionRetryDelayMs, retryToken);
             return;
         }
         ASFW_LOG(FCP,
@@ -490,6 +497,36 @@ void FCPTransport::ScheduleTimeout(uint32_t timeoutMs) {
         if (shouldFire) {
             OnCommandTimeout();
         }
+    });
+}
+
+void FCPTransport::ScheduleDelayedRetry(uint32_t delayMs, uint64_t token) {
+    auto queue = timeoutQueue_;
+    if (!queue) {
+        // No queue to defer on — fall back to an immediate re-send.
+        RetryCommand();
+        return;
+    }
+
+    queue->DispatchAsync(^{
+        IOLockLock(lock_);
+        bool stillPending = (pending_ && pending_->timeoutToken == token);
+        IOLockUnlock(lock_);
+        if (!stillPending) {
+            return;  // completed / cancelled / superseded during the wait
+        }
+
+        IOSleep(static_cast<uint64_t>(delayMs));
+
+        IOLockLock(lock_);
+        stillPending = (pending_ && pending_->timeoutToken == token);
+        IOLockUnlock(lock_);
+        if (!stillPending) {
+            return;
+        }
+
+        // RetryCommand re-submits the write and reschedules the full timeout.
+        RetryCommand();
     });
 }
 

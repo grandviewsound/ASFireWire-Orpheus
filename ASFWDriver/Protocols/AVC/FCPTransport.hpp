@@ -113,6 +113,10 @@ struct FCPTransportConfig {
     /// Gap 5.5 — bounded re-sends on an IN_TRANSITION (0x0B) response.
     uint8_t inTransitionRetries{kFCPInTransitionRetries};
 
+    /// A6 — spacing (ms) between IN_TRANSITION (0x0B) re-sends so the bounded
+    /// retries span the device's transition window rather than hammering it.
+    uint32_t inTransitionRetryDelayMs{kFCPInTransitionRetryDelayMs};
+
     /// Allow bus reset retry (default: false, fail on reset)
     bool allowBusResetRetry{false};
 };
@@ -187,6 +191,11 @@ private:
     void CompleteCommand(FCPStatus status, const FCPFrame& response);
 
     void ScheduleTimeout(uint32_t timeoutMs);
+
+    /// A6 — re-send the pending command after `delayMs`, guarded by `token`
+    /// (the command's current timeout token): the retry fires only if the same
+    /// command is still pending and untouched. Used to space IN_TRANSITION re-sends.
+    void ScheduleDelayedRetry(uint32_t delayMs, uint64_t token);
 
     void CancelTimeout();
 

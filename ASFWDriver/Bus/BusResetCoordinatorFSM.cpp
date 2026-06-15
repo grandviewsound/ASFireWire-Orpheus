@@ -23,6 +23,34 @@ constexpr uint32_t kSelfIDTimeoutMs = 1000;
 namespace ASFW::Driver {
 
 void BusResetCoordinator::BeginNewResetCycle() {
+    // B14a — reset-storm mitigation: count reset edges within a rolling window;
+    // if the bus is resetting faster than it can settle, apply a bounded
+    // back-off before processing this edge so we don't CPU-thrash. The back-off
+    // is bounded and self-clearing (the window resets), so the FSM always
+    // proceeds — it just slows under a genuine storm.
+    {
+        const uint64_t now = MonotonicNow();
+        if (now - stormWindowStart_ > kResetStormWindowNs) {
+            stormWindowStart_ = now;
+            stormWindowCount_ = 0;
+        }
+        ++stormWindowCount_;
+        if (stormWindowCount_ >= kResetStormThreshold) {
+            ++metrics_.resetStormCount;
+            ASFW_LOG(BusReset,
+                     "⚠️ Reset storm: %u resets within %llums — backing off %ums "
+                     "(storm #%u)",
+                     stormWindowCount_, kResetStormWindowNs / 1'000'000ULL,
+                     kResetStormBackoffMs, metrics_.resetStormCount);
+            // Bounded throttle. IOSleep is a no-op under ASFW_HOST_TEST, so the
+            // back-off is real on hardware but instant in unit tests.
+            IOSleep(kResetStormBackoffMs);
+            // Start a fresh window after the back-off so we re-measure the rate.
+            stormWindowStart_ = MonotonicNow();
+            stormWindowCount_ = 0;
+        }
+    }
+
     pendingBusResetEdge_ = false;
     selfIdLatch_.Reset();
     stopFlushIssued_ = false;
