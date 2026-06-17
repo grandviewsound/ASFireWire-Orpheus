@@ -49,6 +49,11 @@ struct ClockSyncState {
     // Zero-timestamp anchor PLL: publishes a smooth grid timeline phase-slewed
     // toward the raw RX-poll hw anchor (see ZtsAnchorPll in TimingUtils.hpp).
     Timing::ZtsAnchorPll ztsAnchorPll{};
+
+    // AppleUSBAudio-faithful alternative: publishes the anchor from a least-
+    // squares fit over a history ring of raw (sample,host) pairs + EMA jitter
+    // bound (see ZtsAnchorFit). Selected at the publish site by kUseAnchorFit.
+    Timing::ZtsAnchorFit ztsAnchorFit{};
 };
 
 struct AudioClockEngineState {

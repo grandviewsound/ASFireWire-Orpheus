@@ -294,4 +294,142 @@ struct ZtsAnchorPll {
     }
 };
 
+/// AppleUSBAudio-faithful anchor smoother (RE 2026-06-14, AppleUSBAudioEngine:
+/// (frame,host) history regression + applyOffsetAmountToFilter + EMA jitter
+/// bound). Where ZtsAnchorPll slews toward the *single latest* raw anchor — so
+/// each tick re-injects that sample's full capture jitter — ZtsAnchorFit
+/// publishes the anchor from a least-squares line fitted over a ring of recent
+/// raw (sample,host) pairs. One fitted line yields BOTH the rate (slope) and the
+/// phase (intercept), self-consistently, and averages the per-sample capture
+/// noise away. An EMA jitter bound (alpha = 1/256, matching Apple's
+/// updateMaxTimestampJitter) rejects outliers and detects true discontinuities.
+struct ZtsAnchorFit {
+    static constexpr int    kCapacity    = 128;        // Apple uses up to 1024; 128 ~= 1.4s @ ~512 fr/tick
+    static constexpr int    kWarmup      = 16;         // min samples before the fit is trusted
+    static constexpr double kJitterAlpha = 1.0 / 256.0;// EMA gain == AppleUSBAudio updateMaxTimestampJitter
+    static constexpr double kOutlierK    = 6.0;        // |residual| > K*bound  => drop (don't pollute the fit)
+    static constexpr double kReseedK     = 24.0;       // sustained |residual| > K*bound => clock restarted
+    static constexpr int    kReseedRun   = 4;          // consecutive reseed-level residuals before reseeding
+
+    bool     valid{false};
+    uint64_t sampleTime{0};        // published grid sample axis (authoritative, advanced by caller)
+    uint64_t hostTicks{0};         // published host time (from the fitted line)
+    double   hostFrac{0.0};        // sub-tick accumulator for the warmup fallback advance
+    uint64_t lastHwHostTicks{0};   // freshness: only act on a moved raw anchor
+
+    // Jitter bound in HOST TICKS. Floor is timebase-dependent (~10us) so the
+    // engine sets it once at Start; tests set it directly. EMA-tracked above it.
+    double   jitterFloorTicks{0.0};
+    double   jitterBound{0.0};
+    int      outlierRun{0};
+
+    // Raw anchor ring (absolute values; the fit is computed centered on the ring
+    // mean, so magnitudes stay within double precision regardless of run length).
+    uint64_t ringSample[kCapacity]{};
+    uint64_t ringHost[kCapacity]{};
+    int      count{0};
+    int      head{0};
+    double   slope{0.0};           // last fitted ticks-per-frame (the device rate)
+
+    void Reset() noexcept {
+        valid = false; sampleTime = 0; hostTicks = 0; hostFrac = 0.0;
+        lastHwHostTicks = 0; jitterBound = 0.0; outlierRun = 0;
+        count = 0; head = 0; slope = 0.0;
+        // jitterFloorTicks intentionally preserved across Reset (timebase constant).
+    }
+
+    void Push(uint64_t s, uint64_t h) noexcept {
+        ringSample[head] = s; ringHost[head] = h;
+        head = (head + 1) % kCapacity;
+        if (count < kCapacity) ++count;
+    }
+
+    /// Centered ordinary least squares over the ring. Returns slope b and the
+    /// ring means (mf, mh); the published line is host = mh + b*(sample - mf).
+    [[nodiscard]] bool FitLine(double& b, double& mf, double& mh) const noexcept {
+        if (count < kWarmup) return false;
+        const double n = static_cast<double>(count);
+        double sf = 0.0, sh = 0.0;
+        for (int k = 0; k < count; ++k) {
+            sf += static_cast<double>(ringSample[k]);
+            sh += static_cast<double>(ringHost[k]);
+        }
+        mf = sf / n; mh = sh / n;
+        double sff = 0.0, sfh = 0.0;
+        for (int k = 0; k < count; ++k) {
+            const double df = static_cast<double>(ringSample[k]) - mf;
+            const double dh = static_cast<double>(ringHost[k]) - mh;
+            sff += df * df; sfh += df * dh;
+        }
+        if (sff <= 0.0) return false;
+        b = sfh / sff;
+        return true;
+    }
+
+    /// @param periodFrames           zero-timestamp buffer period in frames
+    /// @param fallbackTicksPerBuffer q8-corrected period, used only until warm
+    /// @param haveAnchor             raw hw anchor readable this tick
+    /// @param hwSample / hwHost      raw anchor pair (device sample, capture host)
+    [[nodiscard]] bool Tick(uint32_t periodFrames, double fallbackTicksPerBuffer,
+                            bool haveAnchor, uint64_t hwSample,
+                            uint64_t hwHost) noexcept {
+        if (!valid) {
+            if (!haveAnchor) return false;
+            Push(hwSample, hwHost);
+            sampleTime = hwSample; hostTicks = hwHost; hostFrac = 0.0;
+            lastHwHostTicks = hwHost; jitterBound = jitterFloorTicks;
+            valid = true;
+            return true;
+        }
+
+        sampleTime += periodFrames;
+
+        const bool fresh = haveAnchor && hwHost != lastHwHostTicks && periodFrames > 0;
+        if (fresh) {
+            lastHwHostTicks = hwHost;
+            double b = 0.0, mf = 0.0, mh = 0.0;
+            if (FitLine(b, mf, mh)) {
+                const double predict = mh + b * (static_cast<double>(hwSample) - mf);
+                const double resid = static_cast<double>(hwHost) - predict;
+                const double aresid = resid < 0.0 ? -resid : resid;
+                const double bound = jitterBound > jitterFloorTicks ? jitterBound : jitterFloorTicks;
+                if (aresid > kReseedK * bound) {
+                    if (++outlierRun > kReseedRun) {
+                        // True discontinuity (e.g. re-prime reset the device sample
+                        // clock): drop stale history and re-seed on this anchor.
+                        count = 0; head = 0; outlierRun = 0;
+                        Push(hwSample, hwHost);
+                        sampleTime = hwSample; hostTicks = hwHost; hostFrac = 0.0;
+                        jitterBound = jitterFloorTicks;
+                        return true;
+                    }
+                } else {
+                    outlierRun = 0;
+                    if (aresid <= kOutlierK * bound) {
+                        Push(hwSample, hwHost);
+                        jitterBound += (aresid - jitterBound) * kJitterAlpha;
+                        if (jitterBound < jitterFloorTicks) jitterBound = jitterFloorTicks;
+                    }
+                    // between kOutlierK and kReseedK: transient noise — reject, hold bound.
+                }
+            } else {
+                Push(hwSample, hwHost); // still warming up
+            }
+        }
+
+        double b = 0.0, mf = 0.0, mh = 0.0;
+        if (FitLine(b, mf, mh)) {
+            slope = b;
+            const double host = mh + b * (static_cast<double>(sampleTime) - mf);
+            hostTicks = host < 0.0 ? 0u : static_cast<uint64_t>(host);
+        } else {
+            const double exact = fallbackTicksPerBuffer + hostFrac;
+            const auto step = static_cast<uint64_t>(exact);
+            hostFrac = exact - static_cast<double>(step);
+            hostTicks += step;
+        }
+        return true;
+    }
+};
+
 } // namespace ASFW::Timing

@@ -297,3 +297,146 @@ TEST(ZtsAnchorPll, ResetReturnsToFallback) {
     EXPECT_FALSE(pll.valid);
     EXPECT_FALSE(pll.Tick(kPeriodFrames, kTicksPerBuffer, false, 0, 0));
 }
+
+// --- Zero-timestamp anchor history-fit (AppleUSBAudio-faithful) -------------
+
+namespace {
+
+using ASFW::Timing::ZtsAnchorFit;
+
+// ~10us floor in the tests' 24 MHz-equivalent tick scale (kTicksPerFrame = 500
+// ticks/frame -> 24e6 ticks/s -> 10us = 240 ticks). Set explicitly because the
+// real value is timebase-derived (the engine sets it; the struct defaults to 0).
+constexpr double kFitFloorTicks = 240.0;
+
+} // namespace
+
+TEST(ZtsAnchorFit, FallsBackUntilFirstAnchorThenSeedsRaw) {
+    ZtsAnchorFit fit;
+    fit.jitterFloorTicks = kFitFloorTicks;
+    EXPECT_FALSE(fit.Tick(kPeriodFrames, kTicksPerBuffer, false, 0, 0));
+    ASSERT_TRUE(fit.Tick(kPeriodFrames, kTicksPerBuffer, true, 96000, 5'000'000));
+    EXPECT_TRUE(fit.valid);
+    EXPECT_EQ(fit.sampleTime, 96000u);
+    EXPECT_EQ(fit.hostTicks, 5'000'000u);
+}
+
+TEST(ZtsAnchorFit, WarmupAdvancesOnGridThenFits) {
+    ZtsAnchorFit fit;
+    fit.jitterFloorTicks = kFitFloorTicks;
+    ASSERT_TRUE(fit.Tick(kPeriodFrames, kTicksPerBuffer, true, 0, 1'000'000));
+    // Before warmup completes the publish rides the q8 grid (no fit yet).
+    for (uint32_t k = 1; k < ZtsAnchorFit::kWarmup - 1; ++k) {
+        const uint64_t hwSample = static_cast<uint64_t>(k) * kPeriodFrames;
+        const uint64_t hwHost = 1'000'000u + static_cast<uint64_t>(k * kTicksPerBuffer);
+        ASSERT_TRUE(fit.Tick(kPeriodFrames, kTicksPerBuffer, true, hwSample, hwHost));
+        EXPECT_EQ(fit.hostTicks, 1'000'000u + static_cast<uint64_t>(k * kTicksPerBuffer));
+    }
+    // Once enough samples land, the fit takes over and recovers the rate.
+    for (uint32_t k = ZtsAnchorFit::kWarmup - 1; k <= 64; ++k) {
+        const uint64_t hwSample = static_cast<uint64_t>(k) * kPeriodFrames;
+        const uint64_t hwHost = 1'000'000u + static_cast<uint64_t>(k * kTicksPerBuffer);
+        ASSERT_TRUE(fit.Tick(kPeriodFrames, kTicksPerBuffer, true, hwSample, hwHost));
+    }
+    EXPECT_NEAR(fit.slope, kTicksPerFrame, 1e-6);
+}
+
+// The whole point vs ZtsAnchorPll: publishing from the FITTED line makes the
+// per-tick host delta smooth even when the raw anchor host carries large white
+// jitter (raw deltas would swing by +/- 2*amplitude).
+TEST(ZtsAnchorFit, SmoothsJitteryAnchorIntoConstantDeltas) {
+    ZtsAnchorFit fit;
+    fit.jitterFloorTicks = kFitFloorTicks;
+    constexpr int64_t kJitter = 2000;  // ~83us p-p on the capture host
+    ASSERT_TRUE(fit.Tick(kPeriodFrames, kTicksPerBuffer, true, 0, 10'000'000));
+    uint64_t prevHost = fit.hostTicks;
+    for (uint32_t k = 1; k <= 400; ++k) {
+        const uint64_t hwSample = static_cast<uint64_t>(k) * kPeriodFrames;
+        const uint64_t hwHost = 10'000'000u
+            + static_cast<uint64_t>(static_cast<int64_t>(k * kTicksPerBuffer)
+                                    + PairNoise(k, kJitter));
+        ASSERT_TRUE(fit.Tick(kPeriodFrames, kTicksPerBuffer, true, hwSample, hwHost));
+        if (k > ZtsAnchorFit::kCapacity) {  // fully warmed, ring saturated
+            const double delta = static_cast<double>(fit.hostTicks)
+                - static_cast<double>(prevHost);
+            // Published deltas hug the true period to a tiny fraction of the raw
+            // jitter — they lie on the slowly-moving fitted line, not the samples.
+            EXPECT_NEAR(delta, kTicksPerBuffer, static_cast<double>(kJitter) / 4.0)
+                << "published host delta tracked raw jitter at tick " << k;
+        }
+        prevHost = fit.hostTicks;
+    }
+}
+
+TEST(ZtsAnchorFit, TracksRealRateOffset) {
+    ZtsAnchorFit fit;
+    fit.jitterFloorTicks = kFitFloorTicks;
+    const double deviceTicksPerBuffer = kTicksPerBuffer * (1.0 - 500e-6);  // -500 ppm
+    const double deviceTicksPerFrame = deviceTicksPerBuffer / kPeriodFrames;
+    ASSERT_TRUE(fit.Tick(kPeriodFrames, kTicksPerBuffer, true, 0, 10'000'000));
+    for (uint32_t k = 1; k <= 300; ++k) {
+        const uint64_t hwSample = static_cast<uint64_t>(k) * kPeriodFrames;
+        const uint64_t hwHost = 10'000'000u
+            + static_cast<uint64_t>(static_cast<double>(k) * deviceTicksPerBuffer);
+        ASSERT_TRUE(fit.Tick(kPeriodFrames, kTicksPerBuffer, true, hwSample, hwHost));
+    }
+    EXPECT_NEAR(fit.slope, deviceTicksPerFrame, deviceTicksPerFrame * 1e-4);
+    // Published anchor sits on the real device line, not the nominal grid.
+    const double ideal = 10'000'000.0
+        + static_cast<double>(fit.sampleTime) * deviceTicksPerFrame;
+    EXPECT_NEAR(static_cast<double>(fit.hostTicks), ideal, kTicksPerBuffer);
+}
+
+TEST(ZtsAnchorFit, RejectsLoneOutlierWithoutChasingIt) {
+    ZtsAnchorFit fit;
+    fit.jitterFloorTicks = kFitFloorTicks;
+    ASSERT_TRUE(fit.Tick(kPeriodFrames, kTicksPerBuffer, true, 0, 10'000'000));
+    for (uint32_t k = 1; k <= 200; ++k) {
+        const uint64_t hwSample = static_cast<uint64_t>(k) * kPeriodFrames;
+        const uint64_t hwHost = 10'000'000u + static_cast<uint64_t>(k * kTicksPerBuffer);
+        ASSERT_TRUE(fit.Tick(kPeriodFrames, kTicksPerBuffer, true, hwSample, hwHost));
+    }
+    const int countBefore = fit.count;
+    const double slopeBefore = fit.slope;
+    // A single anchor with a host time ~1ms (>> kReseedK*bound) off the line.
+    const uint32_t kOut = 201;
+    const uint64_t outSample = static_cast<uint64_t>(kOut) * kPeriodFrames;
+    const uint64_t outHost = 10'000'000u + static_cast<uint64_t>(kOut * kTicksPerBuffer)
+                             + 1'000'000u;
+    ASSERT_TRUE(fit.Tick(kPeriodFrames, kTicksPerBuffer, true, outSample, outHost));
+    EXPECT_EQ(fit.count, countBefore) << "outlier polluted the fit history";
+    EXPECT_NEAR(fit.slope, slopeBefore, slopeBefore * 1e-3) << "outlier bent the fit";
+    EXPECT_TRUE(fit.valid);
+}
+
+TEST(ZtsAnchorFit, ReseedsOnSustainedDiscontinuity) {
+    ZtsAnchorFit fit;
+    fit.jitterFloorTicks = kFitFloorTicks;
+    ASSERT_TRUE(fit.Tick(kPeriodFrames, kTicksPerBuffer, true, 0, 10'000'000));
+    for (uint32_t k = 1; k <= 200; ++k) {
+        const uint64_t hwSample = static_cast<uint64_t>(k) * kPeriodFrames;
+        const uint64_t hwHost = 10'000'000u + static_cast<uint64_t>(k * kTicksPerBuffer);
+        ASSERT_TRUE(fit.Tick(kPeriodFrames, kTicksPerBuffer, true, hwSample, hwHost));
+    }
+    // Device clock restarts: host jumps by a large constant offset and stays there.
+    constexpr uint64_t kStep = 5'000'000u;
+    bool reseeded = false;
+    for (uint32_t k = 201; k <= 201 + ZtsAnchorFit::kReseedRun + 2; ++k) {
+        const uint64_t hwSample = static_cast<uint64_t>(k) * kPeriodFrames;
+        const uint64_t hwHost = 10'000'000u + static_cast<uint64_t>(k * kTicksPerBuffer) + kStep;
+        ASSERT_TRUE(fit.Tick(kPeriodFrames, kTicksPerBuffer, true, hwSample, hwHost));
+        if (fit.count == 1) reseeded = true;  // ring dropped to the lone reseed sample
+    }
+    EXPECT_TRUE(reseeded) << "sustained discontinuity never triggered a reseed";
+    EXPECT_TRUE(fit.valid);
+}
+
+TEST(ZtsAnchorFit, ResetReturnsToFallback) {
+    ZtsAnchorFit fit;
+    fit.jitterFloorTicks = kFitFloorTicks;
+    ASSERT_TRUE(fit.Tick(kPeriodFrames, kTicksPerBuffer, true, 100, 200));
+    fit.Reset();
+    EXPECT_FALSE(fit.valid);
+    EXPECT_EQ(fit.count, 0);
+    EXPECT_FALSE(fit.Tick(kPeriodFrames, kTicksPerBuffer, false, 0, 0));
+}

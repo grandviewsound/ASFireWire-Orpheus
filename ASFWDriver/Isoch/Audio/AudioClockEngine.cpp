@@ -29,6 +29,7 @@ void ResetClockSync(ClockSyncState& clockSync) {
     clockSync.driftDirection = 0;
     clockSync.monotoneDriftTicks = 0;
     clockSync.ztsAnchorPll.Reset();
+    clockSync.ztsAnchorFit.Reset();
 }
 
 uint64_t RoundWithFraction(double& fractionalTicks, double currentTicksPerBuffer) {
@@ -322,6 +323,13 @@ void PrepareClockEngineForStart(AudioClockEngineState& state) {
     state.clockSync->currentTicksPerBuffer = hostTicksPerBuffer;
     detail::ResetClockSync(*state.clockSync);
 
+    // Seed the AppleUSBAudio-style fit's jitter floor at ~10us in host ticks
+    // (ns -> ticks is *denom/numer, same conversion used for the period above).
+    state.clockSync->ztsAnchorFit.Reset();
+    state.clockSync->ztsAnchorFit.jitterFloorTicks =
+        10000.0 * static_cast<double>(timebaseInfo.denom)
+                / static_cast<double>(timebaseInfo.numer);
+
     if (state.txQueueValid && state.txQueueWriter) {
         state.txQueueWriter->ProducerSetZeroCopyPhaseFrames(0);
         state.txQueueWriter->ProducerRequestConsumerResync();
@@ -426,8 +434,15 @@ void HandleClockTimerTick(AudioClockEngineState& state, uint64_t time) {
         ? state.clockSync->currentTicksPerBuffer
         : static_cast<double>(hostTicksPerBuffer);
 
+    // A/B: ZtsAnchorFit (AppleUSBAudio-faithful history-fit + EMA jitter bound,
+    // 2026-06-14 RE) vs the older single-target ZtsAnchorPll. Flip this one line
+    // to compare both anchor strategies on the same hardware/log.
+    constexpr bool kUseAnchorFit = true;
+
     const bool anchorFresh = haveHwAnchor &&
-        hwHostTicks != state.clockSync->ztsAnchorPll.lastHwHostTicks;
+        hwHostTicks != (kUseAnchorFit
+                            ? state.clockSync->ztsAnchorFit.lastHwHostTicks
+                            : state.clockSync->ztsAnchorPll.lastHwHostTicks);
 
     // Advance one grid period per elapsed timer beat (HW log 2026-06-10_22-22-09:
     // crediting exactly ONE period per delivered callback while deliveries lagged
@@ -436,28 +451,44 @@ void HandleClockTimerTick(AudioClockEngineState& state, uint64_t time) {
     // ~0.15 s/s). The raw anchor is offered only on the last beat so the phase
     // slew applies once, against the fully advanced grid.
     const uint32_t elapsedPeriods = state.elapsedPeriods > 0 ? state.elapsedPeriods : 1;
-    auto& pll = state.clockSync->ztsAnchorPll;
-    bool pllValid = false;
-    if (!pll.valid) {
-        pllValid = pll.Tick(state.ioBufferPeriodFrames, ticksPerBuffer,
-                            haveHwAnchor, hwSampleTime, hwHostTicks);
-    } else {
-        for (uint32_t beat = 0; beat < elapsedPeriods; ++beat) {
-            const bool lastBeat = (beat + 1 == elapsedPeriods);
-            pllValid = pll.Tick(state.ioBufferPeriodFrames, ticksPerBuffer,
-                                lastBeat && haveHwAnchor, hwSampleTime, hwHostTicks);
+
+    // Advance the selected anchor: seed on the first tick, otherwise advance one
+    // grid period per elapsed beat and offer the raw anchor only on the last beat
+    // (so the slew/fit-publish applies once against the fully advanced grid).
+    // Both ZtsAnchorPll and ZtsAnchorFit share the same Tick() signature and the
+    // {valid, sampleTime, hostTicks} surface, so the loop body is identical.
+    auto advanceAnchor = [&](auto& anchor) -> bool {
+        bool ok = false;
+        if (!anchor.valid) {
+            ok = anchor.Tick(state.ioBufferPeriodFrames, ticksPerBuffer,
+                             haveHwAnchor, hwSampleTime, hwHostTicks);
+        } else {
+            for (uint32_t beat = 0; beat < elapsedPeriods; ++beat) {
+                const bool lastBeat = (beat + 1 == elapsedPeriods);
+                ok = anchor.Tick(state.ioBufferPeriodFrames, ticksPerBuffer,
+                                 lastBeat && haveHwAnchor, hwSampleTime, hwHostTicks);
+            }
         }
-    }
-    if (pllValid) {
-        currentSampleTime = pll.sampleTime;
-        currentHostTime = pll.hostTicks;
-        usedHwAnchor = true;
-    } else if (currentHostTime != 0) {
-        currentSampleTime += static_cast<uint64_t>(elapsedPeriods) * state.ioBufferPeriodFrames;
-        currentHostTime += static_cast<uint64_t>(elapsedPeriods) * hostTicksPerBuffer;
-    } else {
-        currentSampleTime = 0;
-        currentHostTime = time;
+        if (ok) {
+            currentSampleTime = anchor.sampleTime;
+            currentHostTime = anchor.hostTicks;
+            usedHwAnchor = true;
+        }
+        return ok;
+    };
+
+    const bool anchorValid = kUseAnchorFit
+        ? advanceAnchor(state.clockSync->ztsAnchorFit)
+        : advanceAnchor(state.clockSync->ztsAnchorPll);
+
+    if (!anchorValid) {
+        if (currentHostTime != 0) {
+            currentSampleTime += static_cast<uint64_t>(elapsedPeriods) * state.ioBufferPeriodFrames;
+            currentHostTime += static_cast<uint64_t>(elapsedPeriods) * hostTicksPerBuffer;
+        } else {
+            currentSampleTime = 0;
+            currentHostTime = time;
+        }
     }
 
     state.audioDevice->UpdateCurrentZeroTimestamp(currentSampleTime, currentHostTime);
@@ -484,7 +515,9 @@ void HandleClockTimerTick(AudioClockEngineState& state, uint64_t time) {
     ASFW_LOG_RL(Audio, "zts/anchor", 1000, OS_LOG_TYPE_DEFAULT,
                 "zts/anchor: src=%{public}s sample=%llu host=%llu q8=%u "
                 "lead=%lld cyc=%llu late=%lld n=%u",
-                usedHwAnchor ? (anchorFresh ? "hw-pll" : "hw-coast") : "accum",
+                usedHwAnchor
+                    ? (anchorFresh ? (kUseAnchorFit ? "hw-fit" : "hw-pll") : "hw-coast")
+                    : "accum",
                 currentSampleTime,
                 currentHostTime,
                 q8,
