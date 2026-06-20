@@ -31,7 +31,15 @@
 #include <cstring>
 #include <utility>
 
-static constexpr bool kEnableZeroCopyOutputPath = false;  // temporary A/B gate
+// Direct-mapped ("zero-copy") output path gate. Now a SHARED constant so the
+// engine side (here) and the transport side (AVCAudioBackend) cannot disagree —
+// a split (engine on, transport off) is exactly what produced the 2026-06-16
+// silence (producer wrote the shared buffer; consumer drained the unfed legacy
+// queue). The transport side (AVCAudioBackend) now plumbs the same nub buffer
+// down to the assembler, and AudioClockEngine couples the anchor to the
+// assembler read position. See AudioConstants.hpp + the jun17 RE report.
+static constexpr bool kEnableZeroCopyOutputPath =
+    ASFW::Isoch::Config::kEnableZeroCopyOutputPath;
 
 // Report only hardware/presentation pipeline latency to HAL.
 // Software queue/ring buffering should not be baked into device latency fields.

@@ -6,6 +6,7 @@
 //
 
 #include <gtest/gtest.h>
+#include <array>
 #include "Isoch/Encoding/PacketAssembler.hpp"
 
 using namespace ASFW::Encoding;
@@ -466,4 +467,71 @@ TEST(PacketAssemblerTests, NonBlockingModeProduces48kSamplesPerSecond) {
     }
 
     EXPECT_EQ(totalSamples, 48000u);
+}
+
+//==============================================================================
+// Zero-copy monotonic consume counter (anchor coupling — jun17)
+//
+// The clock engine samples zeroCopyTotalReadFrames() (paired with a host time)
+// to publish the zero-timestamp anchor — the AppleUSBAudio getCurrentSampleFrame
+// analog. It MUST be monotonic and survive buffer wrap (the modulo read position
+// wraps; the total must not), and reset cleanly between streams.
+//==============================================================================
+
+TEST(PacketAssemblerTests, ZeroCopyTotalReadAdvancesMonotonicallyPastWrap) {
+    constexpr uint32_t kChannels = 2;
+    PacketAssembler assembler(kChannels, 0x02);
+
+    // Small source so the modulo read position wraps repeatedly while the
+    // monotonic total keeps climbing.
+    constexpr uint32_t kCapacityFrames = 16;
+    std::array<int32_t, kCapacityFrames * kChannels> src{};
+    for (size_t i = 0; i < src.size(); ++i) {
+        src[i] = static_cast<int32_t>(i);
+    }
+    assembler.setZeroCopySource(src.data(), kCapacityFrames);
+    EXPECT_EQ(assembler.zeroCopyTotalReadFrames(), 0u);
+
+    const uint32_t framesPerData = assembler.samplesPerDataPacket();
+    ASSERT_GT(framesPerData, 0u);
+
+    uint64_t expectedTotal = 0;
+    uint64_t lastTotal = 0;
+    for (int cycle = 0; cycle < 64; ++cycle) {
+        const bool isData = assembler.nextIsData();
+        assembler.assembleNext(0);
+        if (isData) {
+            expectedTotal += framesPerData;
+        }
+        EXPECT_GE(assembler.zeroCopyTotalReadFrames(), lastTotal);  // never decreases
+        lastTotal = assembler.zeroCopyTotalReadFrames();
+    }
+
+    EXPECT_EQ(assembler.zeroCopyTotalReadFrames(), expectedTotal);
+    // Total far exceeds capacity (wrapped) while the modulo position stays in range.
+    EXPECT_GT(assembler.zeroCopyTotalReadFrames(), static_cast<uint64_t>(kCapacityFrames));
+    EXPECT_LT(assembler.zeroCopyReadPosition(), kCapacityFrames);
+}
+
+TEST(PacketAssemblerTests, ZeroCopyTotalReadResetsBetweenStreams) {
+    constexpr uint32_t kChannels = 2;
+    PacketAssembler assembler(kChannels, 0x02);
+    std::array<int32_t, 16 * kChannels> src{};
+    assembler.setZeroCopySource(src.data(), 16);
+
+    for (int i = 0; i < 8; ++i) {
+        assembler.assembleNext(0);
+    }
+    EXPECT_GT(assembler.zeroCopyTotalReadFrames(), 0u);
+
+    assembler.reset();
+    EXPECT_EQ(assembler.zeroCopyTotalReadFrames(), 0u);
+
+    // Re-arming the source also re-zeroes the monotonic counter.
+    for (int i = 0; i < 8; ++i) {
+        assembler.assembleNext(0);
+    }
+    EXPECT_GT(assembler.zeroCopyTotalReadFrames(), 0u);
+    assembler.setZeroCopySource(src.data(), 16);
+    EXPECT_EQ(assembler.zeroCopyTotalReadFrames(), 0u);
 }

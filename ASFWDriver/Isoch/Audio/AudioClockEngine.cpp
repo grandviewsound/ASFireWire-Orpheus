@@ -424,10 +424,37 @@ void HandleClockTimerTick(AudioClockEngineState& state, uint64_t time) {
     // raw anchor, bounded per tick. Falls back to the plain accumulator until
     // the first anchor arrives; a frozen anchor (RX stopped) simply stops the
     // slew, which IS the accumulator behavior that paced a perfect 250 cb/s.
+    // Anchor source selection (2026-06-17, jun17 AppleUSBAudio data-path RE):
+    //
+    // Legacy path → RX device anchor (cycle-timer sample, host uptime): correct
+    // RATE but the published anchor tracks the *device* clock, not how fast we
+    // actually drain CoreAudio's buffer, so phase jitter between the two over-
+    // feeds the TX ring (run-1 zc/disc + overruns 231→612).
+    //
+    // Direct-mapped path → couple the anchor to the assembler's REAL read
+    // position in the shared buffer, exactly as AppleUSBAudio publishes
+    // getCurrentSampleFrame (DMA read-head) paired with takeTimeStamp (host
+    // uptime at that position). We sample (totalFramesConsumed, mach_now) here
+    // and feed it through the SAME ztsAnchorFit (history-fit + EMA jitter bound)
+    // that smooths the RX anchor — the fit is source-agnostic because its grid
+    // sample axis is seeded from hwSample and advances at periodFrames/tick,
+    // which the consume position also does. CoreAudio then paces its feed to the
+    // wire-drain rate, not the device clock. Gated until consumption actually
+    // starts (totalRead>0) so the pre-stream zeros never pollute the fit ring.
     uint64_t hwSampleTime = 0;
     uint64_t hwHostTicks = 0;
-    const bool haveHwAnchor = state.rxQueueValid &&
-        state.rxQueueReader->ReadHwZeroTimestampAnchor(hwSampleTime, hwHostTicks);
+    bool haveHwAnchor = false;
+    if (state.zeroCopyEnabled && state.packetAssembler->isZeroCopyEnabled()) {
+        const uint64_t consumed = state.packetAssembler->zeroCopyTotalReadFrames();
+        if (consumed > 0) {
+            hwSampleTime = consumed;
+            hwHostTicks = mach_absolute_time();
+            haveHwAnchor = true;
+        }
+    } else {
+        haveHwAnchor = state.rxQueueValid &&
+            state.rxQueueReader->ReadHwZeroTimestampAnchor(hwSampleTime, hwHostTicks);
+    }
     bool usedHwAnchor = false;
 
     const double ticksPerBuffer = state.clockSync->currentTicksPerBuffer > 0.0
@@ -512,11 +539,16 @@ void HandleClockTimerTick(AudioClockEngineState& state, uint64_t time) {
     const int64_t hostLeadTicks = static_cast<int64_t>(currentHostTime) - static_cast<int64_t>(machNow);
     const int64_t timerLateTicks = static_cast<int64_t>(machNow) - static_cast<int64_t>(time);
 
+    // src tags: zc-fit = anchor coupled to the assembler read position (direct-
+    // mapped, the AppleUSBAudio getCurrentSampleFrame coupling); hw-fit/hw-pll =
+    // RX device anchor; *-coast = fit held (no fresh anchor); accum = fallback.
+    const bool zcAnchorMode = state.zeroCopyEnabled && state.packetAssembler->isZeroCopyEnabled();
     ASFW_LOG_RL(Audio, "zts/anchor", 1000, OS_LOG_TYPE_DEFAULT,
                 "zts/anchor: src=%{public}s sample=%llu host=%llu q8=%u "
                 "lead=%lld cyc=%llu late=%lld n=%u",
                 usedHwAnchor
-                    ? (anchorFresh ? (kUseAnchorFit ? "hw-fit" : "hw-pll") : "hw-coast")
+                    ? (anchorFresh ? (zcAnchorMode ? "zc-fit" : (kUseAnchorFit ? "hw-fit" : "hw-pll"))
+                                   : (zcAnchorMode ? "zc-coast" : "hw-coast"))
                     : "accum",
                 currentSampleTime,
                 currentHostTime,

@@ -49,6 +49,20 @@ inline constexpr uint32_t kMaxAudioSampleRateHz = 192000;
     return kTxQueueCapacityFrames;          // ≤ 48k family (base, HW-proven) → 4096
 }
 
+/// Direct-mapped ("zero-copy") output path master gate. SHARED contract between
+/// the two halves that must agree or audio goes silent:
+///   • engine side (ASFWAudioDriver): hands CoreAudio the nub's shared output
+///     buffer instead of a private buffer (MapZeroCopyOutputFromNub), and
+///   • transport side (AVCAudioBackend → IsochService → IsochAudioTxPipeline):
+///     points the PacketAssembler at that SAME buffer (setZeroCopySource), and
+///   • clock side (AudioClockEngine): publishes the zero-timestamp anchor from
+///     the assembler's real read position (the AppleUSBAudio
+///     getCurrentSampleFrame/takeTimeStamp coupling) instead of the RX anchor.
+/// When false, every half falls back to the legacy CoreAudio→shared-TX-queue
+/// copy path (the jun14 last-known-good). See
+/// research/ida/usbaudio_output_datapath_2026-06-17.md.
+inline constexpr bool kEnableZeroCopyOutputPath = true;
+
 /// Worst-case shared-queue depth (192 kHz family) — the provisioning ceiling.
 inline constexpr uint32_t kMaxQueueCapacityFrames = QueueCapacityFramesForRate(kMaxAudioSampleRateHz);
 

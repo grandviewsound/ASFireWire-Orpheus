@@ -9,6 +9,7 @@
 #include "../../Protocols/AVC/AVCDefs.hpp"
 #include "../../Protocols/AVC/IAVCDiscovery.hpp"
 #include "../../IRM/IRMTypes.hpp"   // CalculateBandwidthUnits / BandwidthUnitsRequest
+#include "../../Isoch/Config/AudioConstants.hpp"  // kEnableZeroCopyOutputPath (shared gate)
 
 #include <DriverKit/IOLib.h>
 #include <DriverKit/IOBufferMemoryDescriptor.h>
@@ -794,6 +795,38 @@ IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
             }
         }
 
+        // Direct-mapped output: hand the IT pipeline the SAME nub buffer the
+        // audio engine maps to CoreAudio, so the PacketAssembler reads CoreAudio's
+        // frames in place (no intermediate shared-TX-queue copy). The buffer is
+        // nub-owned (controller-side address space), so the IT DMA can read it
+        // directly. Gated on the shared flag so engine + transport never split
+        // (a split = the 2026-06-16 silence). If the engine hasn't mapped the
+        // buffer yet (null/zero), fall through to nullptr → StartTransmit keeps
+        // the legacy shared-TX-queue path. See jun17 RE report.
+        void*    zeroCopyBase   = nullptr;
+        uint64_t zeroCopyBytes  = 0;
+        uint32_t zeroCopyFrames = 0;
+        if (ASFW::Isoch::Config::kEnableZeroCopyOutputPath) {
+            if (ASFWAudioNub* nub = publisher_.GetNub(guid)) {
+                zeroCopyBase   = nub->GetOutputAudioLocalMapping();
+                zeroCopyBytes  = nub->GetOutputAudioBytes();
+                zeroCopyFrames = nub->GetOutputAudioFrameCapacity();
+                if (zeroCopyBase == nullptr || zeroCopyBytes == 0 || zeroCopyFrames == 0) {
+                    zeroCopyBase = nullptr;
+                    zeroCopyBytes = 0;
+                    zeroCopyFrames = 0;
+                    ASFW_LOG(Audio,
+                             "AVCAudioBackend: zero-copy gated ON but nub buffer not ready "
+                             "(base=%p bytes=%llu frames=%u) — using shared TX queue",
+                             zeroCopyBase, zeroCopyBytes, zeroCopyFrames);
+                } else {
+                    ASFW_LOG(Audio,
+                             "AVCAudioBackend: zero-copy wiring nub buffer base=%p bytes=%llu frames=%u",
+                             zeroCopyBase, zeroCopyBytes, zeroCopyFrames);
+                }
+            }
+        }
+
         const kern_return_t krTx = isoch_.StartTransmit(itChannel,
                                                         hardware_,
                                                         sid,
@@ -802,9 +835,9 @@ IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
                                                         am824Slots,
                                                         txMem,
                                                         txBytes,
-                                                        nullptr,
-                                                        0,
-                                                        0,
+                                                        zeroCopyBase,
+                                                        zeroCopyBytes,
+                                                        zeroCopyFrames,
                                                         config.hostOutputIsochChannelPositions.data(),
                                                         static_cast<uint32_t>(
                                                             config.hostOutputIsochChannelPositions.size()));

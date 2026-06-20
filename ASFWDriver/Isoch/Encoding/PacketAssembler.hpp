@@ -148,6 +148,7 @@ public:
         nonBlockingCadence_.reset();
         dbcGen_.reset();
         zeroCopyReadPos_ = 0;
+        zeroCopyTotalRead_.store(0, std::memory_order_relaxed);
         zeroCopyEnabled_ = false;
         zeroCopyBase_ = nullptr;
         zeroCopyCapacity_ = 0;
@@ -188,6 +189,7 @@ public:
         zeroCopyBase_ = base;
         zeroCopyCapacity_ = frameCapacity;
         zeroCopyReadPos_ = 0;
+        zeroCopyTotalRead_.store(0, std::memory_order_relaxed);
         zeroCopyEnabled_ = (base != nullptr && frameCapacity > 0);
     }
     
@@ -196,6 +198,13 @@ public:
     
     /// Get zero-copy read position (for diagnostics)
     uint32_t zeroCopyReadPosition() const noexcept { return zeroCopyReadPos_; }
+
+    /// Monotonic total frames consumed from the zero-copy buffer since the last
+    /// reset (the getCurrentSampleFrame analog; pairs with a host timestamp at
+    /// the clock engine to anchor the zero-timestamp). Never wraps.
+    uint64_t zeroCopyTotalReadFrames() const noexcept {
+        return zeroCopyTotalRead_.load(std::memory_order_relaxed);
+    }
 
     /// Force zero-copy read position (used to synchronize with shared counters).
     void setZeroCopyReadPosition(uint32_t framePos) noexcept {
@@ -266,6 +275,7 @@ public:
         dbcGen_.reset();
         ringBuffer_.reset();
         zeroCopyReadPos_ = 0;  // Reset zero-copy read position
+        zeroCopyTotalRead_.store(0, std::memory_order_relaxed);
     }
     
     /// Reset with specific initial DBC value.
@@ -275,6 +285,7 @@ public:
         dbcGen_.reset(initialDbc);
         ringBuffer_.reset();
         zeroCopyReadPos_ = 0;  // Reset zero-copy read position
+        zeroCopyTotalRead_.store(0, std::memory_order_relaxed);
     }
     
 private:
@@ -305,6 +316,7 @@ private:
                 }
             }
             zeroCopyReadPos_ = (zeroCopyReadPos_ + framesPerPacket) % zeroCopyCapacity_;
+            zeroCopyTotalRead_.fetch_add(framesPerPacket, std::memory_order_relaxed);
             framesRead = framesPerPacket;
         } else {
             // Fallback: Read from ring buffer (old path)
@@ -430,6 +442,13 @@ private:
     const int32_t* zeroCopyBase_{nullptr};
     uint32_t zeroCopyCapacity_{0};
     mutable uint32_t zeroCopyReadPos_{0}; // mutable for read position tracking
+    // Monotonic total frames consumed from the zero-copy buffer (never wraps).
+    // This is the AppleUSBAudio getCurrentSampleFrame analog: the clock engine
+    // samples it (paired with a host timestamp) to publish the zero-timestamp
+    // anchor, so CoreAudio's feed paces to the assembler's REAL drain rate
+    // instead of the RX device clock. Written on the IT DMA thread (assemble),
+    // read on the clock-timer thread → atomic. See jun17 RE report.
+    mutable std::atomic<uint64_t> zeroCopyTotalRead_{0};
     bool zeroCopyEnabled_{false};
     StreamMode streamMode_{StreamMode::kBlocking};
     

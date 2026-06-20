@@ -241,6 +241,23 @@ kern_return_t IsochAudioTxPipeline::Configure(uint8_t sid,
 
     assembler_.reconfigureAM824(queueChannels, am824Slots, sid);
 
+    // reconfigureAM824 wipes the assembler's zero-copy source as part of its
+    // state reset. In IsochService bring-up SetZeroCopyOutputBuffer runs BEFORE
+    // Configure, so without this re-apply the assembler silently falls back to
+    // its (unfed) ring buffer at runtime — isZeroCopyEnabled() reads false even
+    // though config logged ENABLED, and every output data packet is silenced
+    // (2026-06-18 total-silence root cause). The pipeline still holds the wired
+    // buffer, so restore it onto the freshly reconfigured assembler.
+    if (zeroCopyEnabled_ && zeroCopyAudioBase_ && zeroCopyFrameCapacity_ > 0) {
+        assembler_.setZeroCopySource(
+            reinterpret_cast<const int32_t*>(zeroCopyAudioBase_),
+            zeroCopyFrameCapacity_);
+        ASFW_LOG(Isoch,
+                 "IT: re-applied zero-copy source after reconfigure base=%p frames=%u assembler=%{public}s",
+                 zeroCopyAudioBase_, zeroCopyFrameCapacity_,
+                 assembler_.isZeroCopyEnabled() ? "ENABLED" : "fallback");
+    }
+
     outputChannelMapActive_ = false;
     if (outputChannelMapCount_ != 0) {
         bool validMap = outputChannelMapCount_ == queueChannels;
