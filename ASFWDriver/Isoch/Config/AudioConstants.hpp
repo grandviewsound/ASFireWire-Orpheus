@@ -63,6 +63,15 @@ inline constexpr uint32_t kMaxAudioSampleRateHz = 192000;
 /// research/ida/usbaudio_output_datapath_2026-06-17.md.
 inline constexpr bool kEnableZeroCopyOutputPath = true;
 
+/// DIAGNOSTIC, default OFF. One-shot probe of the device-side rate-change path
+/// (phase 1 of the clock/rate selector). When true, bring-up sends an
+/// ExtStreamFormat CONTROL at kProbeRateSwitchTargetHz, STATUS-reads what the
+/// device reports back, then restores 48 kHz — proving whether the device
+/// cleanly accepts a sample-rate switch before the AMS-driven handler is wired.
+/// The subsequent normal bring-up reprograms 48 kHz, so streaming is unaffected.
+inline constexpr bool kProbeRateSwitch = false;
+inline constexpr uint32_t kProbeRateSwitchTargetHz = 96000;
+
 /// Worst-case shared-queue depth (192 kHz family) — the provisioning ceiling.
 inline constexpr uint32_t kMaxQueueCapacityFrames = QueueCapacityFramesForRate(kMaxAudioSampleRateHz);
 

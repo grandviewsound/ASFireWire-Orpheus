@@ -18,6 +18,17 @@ constexpr uint32_t kSPro24DspModelId  = 0x000008;
 // Prism Sound Orpheus (BeBoB/BridgeCo DM1500) — Linux firewire-bebob always uses CIP_BLOCKING.
 constexpr uint32_t kPrismSoundVendorId = 0x001198;
 constexpr uint32_t kOrpheusModelId     = 0x010048;
+
+// Orpheus post-reset stabilization delay before AV/C discovery.
+//
+// History: was 5000 ms — a band-aid added when early AV/C commands appeared to
+// fail. That symptom was almost certainly the AR-WAKE drop bug silently dropping
+// the device's FCP responses, NOT the device being un-ready: Apple attaches the
+// same Orpheus in ~1.3 s with NO blanket wait, and the device answers in 1–2 ms
+// once responses aren't dropped. Reduced to 1000 ms (small settle margin vs
+// Apple's zero). If a cold attach regresses (early discovery FCP timeouts), raise
+// back toward 2000–5000 ms — the test data reveals the real settle requirement.
+constexpr uint32_t kOrpheusInitDelayMs = 1000;
 } // namespace
 
 std::optional<Model::StreamMode> LookupForcedStreamMode(
@@ -43,6 +54,16 @@ std::optional<Model::StreamMode> LookupForcedStreamMode(
     // BridgeCo devices expect blocking cadence (8 data blocks/packet).
     if (vendorId == kPrismSoundVendorId && modelId == kOrpheusModelId) {
         return Model::StreamMode::kBlocking;
+    }
+
+    return std::nullopt;
+}
+
+std::optional<uint32_t> LookupInitDelayMs(
+    uint32_t vendorId,
+    uint32_t modelId) noexcept {
+    if (vendorId == kPrismSoundVendorId && modelId == kOrpheusModelId) {
+        return kOrpheusInitDelayMs;
     }
 
     return std::nullopt;

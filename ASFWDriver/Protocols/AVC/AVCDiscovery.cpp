@@ -68,8 +68,14 @@ ASFW::Audio::Model::StreamMode ResolveStreamMode(
 }
 
 struct PlugChannelSummary {
-    uint32_t inputAudioMaxChannels{0};   // Subunit input audio stream width
-    uint32_t outputAudioMaxChannels{0};  // Subunit output audio stream width
+    uint32_t inputAudioMaxChannels{0};   // Subunit input audio stream width (PCM, non-MIDI)
+    uint32_t outputAudioMaxChannels{0};  // Subunit output audio stream width (PCM, non-MIDI)
+    // U3 — full AM824 data-block size (DBS) of the plug that won the audio-width
+    // max, i.e. PCM + the MIDI-conformant data block. This is the device's own
+    // declared wire slot count (Orpheus: 11 in / 13 out). Feeds the runtime caps
+    // so the AM824 marshalling DBS is device-driven, not hardcoded.
+    uint32_t inputAudioMaxTotalChannels{0};
+    uint32_t outputAudioMaxTotalChannels{0};
     uint32_t inputAudioPlugs{0};
     uint32_t outputAudioPlugs{0};
 };
@@ -120,12 +126,22 @@ struct PlugChannelSummary {
             continue;
         }
 
+        // Full DBS (PCM + MIDI) for this plug — the device's declared wire width.
+        const uint32_t totalChannels =
+            plug.currentFormat.has_value() ? plug.currentFormat->totalChannels : channels;
+
         if (plug.IsInput()) {
             ++summary.inputAudioPlugs;
-            summary.inputAudioMaxChannels = std::max(summary.inputAudioMaxChannels, channels);
+            if (channels > summary.inputAudioMaxChannels) {
+                summary.inputAudioMaxChannels = channels;
+                summary.inputAudioMaxTotalChannels = std::max(totalChannels, channels);
+            }
         } else if (plug.IsOutput()) {
             ++summary.outputAudioPlugs;
-            summary.outputAudioMaxChannels = std::max(summary.outputAudioMaxChannels, channels);
+            if (channels > summary.outputAudioMaxChannels) {
+                summary.outputAudioMaxChannels = channels;
+                summary.outputAudioMaxTotalChannels = std::max(totalChannels, channels);
+            }
         }
     }
     return summary;
@@ -402,20 +418,8 @@ void LogIsochChannelPositionMap(const char* label, const std::vector<uint8_t>& m
 constexpr uint32_t kAVCSpecID = 0x00A02D;
 constexpr uint32_t kDuetPrefetchTimeoutMs = 1200;
 
-/// Post-reset stabilization delay before AV/C discovery (Prism Sound Orpheus).
-///
-/// History: was 5000 ms — a band-aid added when early AV/C commands appeared to
-/// fail. That symptom was almost certainly the AR-WAKE drop bug (fixes 64–67)
-/// silently dropping the device's FCP responses, NOT the device being un-ready:
-/// Apple attaches the same Orpheus in ~1.3 s with NO blanket wait, and the
-/// device answers in 1–2 ms once responses aren't dropped. With AR-WAKE fixed,
-/// this delay is the dominant remaining attach-time cost (~5 s of ~13 s).
-///
-/// Reduced to 1000 ms (keeps a small settle margin vs Apple's zero). PENDING HW
-/// CONFIRMATION: if a cold attach regresses (early discovery FCP timeouts /
-/// CMD-A verification timeout), raise this back toward 2000–5000 ms — the test
-/// data reveals the device's real settle requirement.
-constexpr uint32_t kOrpheusInitDelayMs = 1000;
+// Per-device post-reset init delay now lives in the quirk table
+// (Audio::Quirks::LookupInitDelayMs) so the discovery flow stays device-agnostic.
 constexpr uint32_t kClassIdPhantomPower = static_cast<uint32_t>('phan');
 constexpr uint32_t kClassIdPhaseInvert = static_cast<uint32_t>('phsi');
 constexpr uint32_t kScopeInput = static_cast<uint32_t>('inpt');
@@ -554,16 +558,15 @@ void AVCDiscovery::OnUnitPublished(std::shared_ptr<Discovery::FWUnit> unit) {
     // time to finish booting before we send SUBUNIT_INFO, UNIT_INFO, etc.
     const uint32_t vid = device->GetVendorID();
     const uint32_t mid = device->GetModelID();
-    const bool needsInitDelay =
-        (vid == Audio::DeviceProtocolFactory::kPrismSoundVendorId &&
-         mid == Audio::DeviceProtocolFactory::kOrpheusModelId);
+    const uint32_t initDelayMs = Audio::Quirks::LookupInitDelayMs(vid, mid).value_or(0);
+    const bool needsInitDelay = initDelayMs > 0;
 
-    auto initWork = [this, avcUnit, guid, needsInitDelay]() {
+    auto initWork = [this, avcUnit, guid, needsInitDelay, initDelayMs]() {
         if (needsInitDelay) {
             ASFW_LOG(Audio,
-                     "AVCDiscovery: Orpheus detected — waiting %ums for device to stabilize before AVC discovery GUID=%llx",
-                     kOrpheusInitDelayMs, guid);
-            IOSleep(kOrpheusInitDelayMs);
+                     "AVCDiscovery: device init-delay quirk — waiting %ums to stabilize before AVC discovery GUID=%llx",
+                     initDelayMs, guid);
+            IOSleep(initDelayMs);
 
             // Enable bus-reset retry: the bus may still be settling after the
             // delay, so allow FCP to retry across generation changes.
@@ -979,6 +982,15 @@ void AVCDiscovery::HandleInitializedUnit(uint64_t guid, const std::shared_ptr<AV
     audioDeviceConfig.channelCount = publishedAggregateChannels;
     audioDeviceConfig.inputChannelCount = publishedInputChannels;
     audioDeviceConfig.outputChannelCount = publishedOutputChannels;
+    // U3 — device-driven AM824 DBS (wire slot count, PCM + MIDI). Same direction
+    // inversion as the published channel counts (device output = host input). Fall
+    // back to the PCM width when the device didn't declare a MIDI block (DBS == PCM).
+    audioDeviceConfig.inputAm824Slots =
+        (plugSummary.outputAudioMaxTotalChannels > 0) ? plugSummary.outputAudioMaxTotalChannels
+                                                      : publishedInputChannels;
+    audioDeviceConfig.outputAm824Slots =
+        (plugSummary.inputAudioMaxTotalChannels > 0) ? plugSummary.inputAudioMaxTotalChannels
+                                                     : publishedOutputChannels;
     audioDeviceConfig.midiInputPorts  = mutableCaps.maxMidiInputPorts.value_or(0);
     audioDeviceConfig.midiOutputPorts = mutableCaps.maxMidiOutputPorts.value_or(0);
     audioDeviceConfig.unitIsoInputPlugCount = avcUnit->GetCachedPlugCounts().isoInputPlugs;
@@ -1010,6 +1022,30 @@ void AVCDiscovery::HandleInitializedUnit(uint64_t guid, const std::shared_ptr<AV
         !playbackUnitIso.empty() ? playbackUnitIso : playbackSubunit;
     audioDeviceConfig.capture48kRawFormatBlock =
         !captureUnitIso.empty() ? captureUnitIso : captureSubunit;
+
+    // Per-rate ExtendedStreamFormat blocks for the runtime rate-change path
+    // (device-side half). Same unit-iso-preferred / subunit-fallback selection
+    // as the 48k blocks above, repeated for every advertised rate so the device
+    // can later be commanded to any of them.
+    for (uint32_t rateHz : sampleRates) {
+        const std::vector<uint8_t> pbUnit =
+            FindRawUnitIsochFormatBlockForRate(*avcUnit, /*wantInput=*/true, rateHz);
+        const std::vector<uint8_t> pbSub =
+            FindRawFormatBlockForRate(musicSubunit->GetPlugs(), /*wantInput=*/true, rateHz);
+        const std::vector<uint8_t> capUnit =
+            FindRawUnitIsochFormatBlockForRate(*avcUnit, /*wantInput=*/false, rateHz);
+        const std::vector<uint8_t> capSub =
+            FindRawFormatBlockForRate(musicSubunit->GetPlugs(), /*wantInput=*/false, rateHz);
+
+        ASFW::Audio::Model::ASFWAudioDevice::RateFormatBlocks entry;
+        entry.rateHz = rateHz;
+        entry.playbackRawFormatBlock = !pbUnit.empty() ? pbUnit : pbSub;
+        entry.captureRawFormatBlock = !capUnit.empty() ? capUnit : capSub;
+        audioDeviceConfig.perRateFormatBlocks.push_back(std::move(entry));
+    }
+    ASFW_LOG(Audio,
+             "AVCDiscovery: cached per-rate ExtStreamFormat blocks for %zu rates GUID=%llx",
+             audioDeviceConfig.perRateFormatBlocks.size(), guid);
 
     // Diagnostic: byte 3 of BOTH candidate sources, so a single attach confirms
     // the unit-vs-subunit divergence regardless of which block is used.
@@ -1359,17 +1395,14 @@ void AVCDiscovery::OnUnitResumed(std::shared_ptr<Discovery::FWUnit> unit) {
             IOLockUnlock(lock_);
         }
 
-        // Determine stabilization delay: Orpheus needs longer (5s) due to
-        // hardware initialization window; other devices use 500ms.
+        // Determine stabilization delay: devices with an init-delay quirk (e.g.
+        // Orpheus) need their longer hardware-init window; others use 500ms.
         auto device = avcUnit->GetDevice();
         uint32_t delayMs = 500;
         if (device) {
-            const uint32_t vid = device->GetVendorID();
-            const uint32_t mid = device->GetModelID();
-            if (vid == Audio::DeviceProtocolFactory::kPrismSoundVendorId &&
-                mid == Audio::DeviceProtocolFactory::kOrpheusModelId) {
-                delayMs = kOrpheusInitDelayMs;
-            }
+            delayMs = Audio::Quirks::LookupInitDelayMs(
+                          device->GetVendorID(), device->GetModelID())
+                          .value_or(500);
         }
 
         auto rescanWork = [this, avcUnit, guid, delayMs]() {
@@ -1585,6 +1618,14 @@ FCPTransport* AVCDiscovery::GetFCPTransportForNodeID(uint16_t nodeID) {
     IOLockUnlock(lock_);
 
     return result;
+}
+
+uint8_t AVCDiscovery::GetDeviceSpeedCode(uint16_t nodeID) const {
+    // FwSpeed enum values (S100=0..S800=3) are exactly the CMP/isoch speed codes.
+    // busInfo_ resolves it from the latest Self-ID topology snapshot.
+    const uint16_t nodeNumber = static_cast<uint16_t>(nodeID & 0x3Fu);
+    const auto speed = busInfo_.GetSpeed(ASFW::FW::NodeId{static_cast<uint8_t>(nodeNumber)});
+    return static_cast<uint8_t>(speed);
 }
 
 //==============================================================================

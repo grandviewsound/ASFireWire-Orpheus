@@ -22,7 +22,8 @@ namespace ASFW::Audio {
 namespace {
 
 constexpr uint8_t kInvalidIsochChannel = 0xFF;
-constexpr uint8_t kConnectionSpeed  = 2; // S400 — Orpheus max link speed
+constexpr uint8_t kConnectionSpeed  = 2; // S400 — fallback floor when the device
+                                         // link speed can't be derived (see U5).
 // The backend must never impose a shorter wait than the transport's own AV/C
 // completion window. Under the current Apple-like cold-attach sequence, the
 // Orpheus can answer CMD A near the end of the FCP transport window.
@@ -191,8 +192,10 @@ void AVCAudioBackend::AllocateItBandwidth(uint16_t payloadQuadlets,
     }
     // Worst case = one max-size data packet every isochronous cycle (8000 Hz).
     // payloadQuadlets already = AM824 data blocks + 2 CIP quadlets (the on-wire payload).
-    // TODO(universality): derive speedMbps from the negotiated connection speed rather
-    // than hard-coding S400 (current Orpheus connection speed; see kConnectionSpeed).
+    // The CMP connect speed is now derived per device (U5), but the bandwidth-unit
+    // estimate keeps the S400 worst case on purpose: at a higher link speed it
+    // over-reserves (safe); only a genuine S200 device would under-reserve, which
+    // none of the supported devices are. Revisit if an S200 device appears.
     const uint32_t pktBytes   = static_cast<uint32_t>(payloadQuadlets) * 4U;
     const uint32_t bitsPerSec = pktBytes * 8U * 8000U;
     const uint32_t bwUnits = ASFW::IRM::CalculateBandwidthUnits(
@@ -394,6 +397,33 @@ IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
         record->protocol->UpdateDiscoveredStreamFormatBlocks(
             config.playback48kRawFormatBlock,
             config.capture48kRawFormatBlock);
+
+        // U3 — hand the protocol the device-driven caps recovered by discovery
+        // (PCM widths from U2 + AM824 DBS slots) so a generic BeBoB device no
+        // longer depends on the hardcoded Orpheus topology. Direction mirrors the
+        // published counts: config.input* = device→host (host input/capture).
+        AudioStreamRuntimeCaps discoveredCaps{};
+        discoveredCaps.hostInputPcmChannels   = config.inputChannelCount;
+        discoveredCaps.hostOutputPcmChannels  = config.outputChannelCount;
+        discoveredCaps.deviceToHostAm824Slots = config.inputAm824Slots;
+        discoveredCaps.hostToDeviceAm824Slots = config.outputAm824Slots;
+        discoveredCaps.sampleRateHz           = config.currentSampleRate;
+        record->protocol->SetDiscoveredAudioCaps(discoveredCaps);
+
+        // Rate-change path (device-side): hand the protocol the per-rate
+        // ExtStreamFormat blocks so it can command the device to any advertised
+        // rate later. Converted here to keep the protocol independent of the
+        // audio Model layer.
+        std::vector<ASFW::Audio::RateStreamFormat> rateBlocks;
+        rateBlocks.reserve(config.perRateFormatBlocks.size());
+        for (const auto& entry : config.perRateFormatBlocks) {
+            ASFW::Audio::RateStreamFormat rf;
+            rf.rateHz = entry.rateHz;
+            rf.playbackRawFormatBlock = entry.playbackRawFormatBlock;
+            rf.captureRawFormatBlock = entry.captureRawFormatBlock;
+            rateBlocks.push_back(std::move(rf));
+        }
+        record->protocol->UpdateDiscoveredRateFormatBlocks(rateBlocks);
     }
 
     cmpClient_->SetDeviceNode(static_cast<uint8_t>(record->nodeId),
@@ -414,6 +444,20 @@ IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
              guid,
              record->nodeId);
     IOSleep(appleSettleDelayMs);
+
+    // Rate-change probe (phase 1, diagnostic, gated OFF). Device is settled and
+    // we're before any CMP/stream programming, so commanding a different rate
+    // here and restoring 48k is safe — the normal bring-up below reprograms 48k.
+    if (ASFW::Isoch::Config::kProbeRateSwitch && record->protocol) {
+        const uint32_t target = ASFW::Isoch::Config::kProbeRateSwitchTargetHz;
+        ASFW_LOG(Audio, "AVCAudioBackend: RATE-PROBE begin target=%uHz GUID=0x%016llx",
+                 target, guid);
+        const IOReturn upKr = record->protocol->SetSampleRate(target);
+        ASFW_LOG(Audio, "AVCAudioBackend: RATE-PROBE SetSampleRate(%u) kr=0x%x", target, upKr);
+        const IOReturn backKr = record->protocol->SetSampleRate(48000);
+        ASFW_LOG(Audio, "AVCAudioBackend: RATE-PROBE restore SetSampleRate(48000) kr=0x%x", backKr);
+        ASFW_LOG(Audio, "AVCAudioBackend: RATE-PROBE end (check STATUS rateField lines above)");
+    }
 
     // AppleFWAudio::StartAllDirectionStreams starts the primary stream object
     // and then walks a stream collection for any additional streams of the
@@ -704,10 +748,24 @@ IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
         irChannel = kInvalidIsochChannel;
     };
 
+    // U5 — derive the isoch connection speed from the device's negotiated link
+    // speed (Self-ID topology) instead of hardcoding S400. S100 (code 0) doubles
+    // as the "unknown" sentinel and no real FireWire-audio device runs at S100,
+    // so floor to S400 there; honor a genuine S200/S400/S800.
+    uint8_t connectionSpeed = kConnectionSpeed;
+    if (avcDiscovery_) {
+        const uint8_t derived = avcDiscovery_->GetDeviceSpeedCode(record->nodeId);
+        connectionSpeed = (derived >= 1) ? derived : kConnectionSpeed;
+        ASFW_LOG(Audio,
+                 "AVCAudioBackend: isoch connection speed derived=%u used=%u "
+                 "(S400 floor on S100/unknown) node=0x%04x GUID=0x%016llx",
+                 derived, connectionSpeed, record->nodeId, guid);
+    }
+
     auto connectOPCR = [&]() -> IOReturn {
         std::atomic<bool> done{false};
         std::atomic<ASFW::CMP::CMPStatus> status{ASFW::CMP::CMPStatus::Failed};
-        cmpClient_->ConnectOPCR(0, irChannel, kConnectionSpeed,
+        cmpClient_->ConnectOPCR(0, irChannel, connectionSpeed,
                                 [&done, &status](ASFW::CMP::CMPStatus s) {
             status.store(s, std::memory_order_release);
             done.store(true, std::memory_order_release);
@@ -758,7 +816,7 @@ IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
     auto connectIPCR = [&]() -> IOReturn {
         std::atomic<bool> done{false};
         std::atomic<ASFW::CMP::CMPStatus> status{ASFW::CMP::CMPStatus::Failed};
-        cmpClient_->ConnectIPCR(0, itChannel, kConnectionSpeed,
+        cmpClient_->ConnectIPCR(0, itChannel, connectionSpeed,
                                 [&done, &status](ASFW::CMP::CMPStatus s) {
             status.store(s, std::memory_order_release);
             done.store(true, std::memory_order_release);
@@ -840,7 +898,8 @@ IOReturn AVCAudioBackend::BringUpPipeline(uint64_t guid) noexcept {
                                                         zeroCopyFrames,
                                                         config.hostOutputIsochChannelPositions.data(),
                                                         static_cast<uint32_t>(
-                                                            config.hostOutputIsochChannelPositions.size()));
+                                                            config.hostOutputIsochChannelPositions.size()),
+                                                        config.currentSampleRate);
         if (krTx != kIOReturnSuccess) {
             ASFW_LOG_ERROR(Audio,
                            "AVCAudioBackend: StartTransmit failed GUID=0x%016llx kr=0x%x",

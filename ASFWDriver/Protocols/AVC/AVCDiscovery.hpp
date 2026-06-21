@@ -73,6 +73,8 @@ public:
 
     FCPTransport* GetFCPTransportForNodeID(uint16_t nodeID) override;
 
+    [[nodiscard]] uint8_t GetDeviceSpeedCode(uint16_t nodeID) const override;
+
     void OnBusReset(uint32_t newGeneration);
 
     void SetTransmitRingBufferOnNubs(void* ringBuffer);

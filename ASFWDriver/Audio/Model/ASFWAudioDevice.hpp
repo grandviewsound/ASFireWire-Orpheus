@@ -40,6 +40,12 @@ struct ASFWAudioDevice {
     uint32_t channelCount{2};
     uint32_t inputChannelCount{2};
     uint32_t outputChannelCount{2};
+    // U3 — device-declared AM824 wire slot count (DBS = PCM + MIDI) per direction.
+    // Pairs with input/outputChannelCount (the PCM-only audio width); the runtime
+    // caps the protocol hands the isoch marshaller are derived from these instead
+    // of being hardcoded per model. 0 = unknown (caps falls back to PCM width).
+    uint32_t inputAm824Slots{0};
+    uint32_t outputAm824Slots{0};
     uint32_t midiInputPorts{0};
     uint32_t midiOutputPorts{0};
     uint32_t unitIsoInputPlugCount{0};
@@ -50,6 +56,16 @@ struct ASFWAudioDevice {
     std::string outputPlugName{"Output"};
     std::vector<uint8_t> playback48kRawFormatBlock{};
     std::vector<uint8_t> capture48kRawFormatBlock{};
+    // Per-rate ExtendedStreamFormat CONTROL blocks, one entry per advertised
+    // rate, used to command the device to a new sample rate at runtime (the
+    // device-side half of the clock/rate-change path). Empty blocks mean the
+    // device didn't expose that rate's format (caller falls back / skips).
+    struct RateFormatBlocks {
+        uint32_t rateHz{0};
+        std::vector<uint8_t> playbackRawFormatBlock{};  // iPCR (host->device)
+        std::vector<uint8_t> captureRawFormatBlock{};   // oPCR (device->host)
+    };
+    std::vector<RateFormatBlocks> perRateFormatBlocks{};
     // AppleFWAudioStream keeps a per-channel "position in isoch stream" table.
     // Host output is the map from CoreAudio playback channel index to AM824 slot.
     std::vector<uint8_t> hostOutputIsochChannelPositions{};

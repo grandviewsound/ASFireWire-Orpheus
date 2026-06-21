@@ -6,6 +6,9 @@
 //
 
 #include <gtest/gtest.h>
+
+#include <cstdlib>
+
 #include "Isoch/Encoding/BlockingCadence48k.hpp"
 
 using namespace ASFW::Encoding;
@@ -184,4 +187,66 @@ TEST(BlockingCadenceTests, MatchesFireBugPattern) {
     EXPECT_TRUE(cadence.isDataPacket());  cadence.advance();  // D
     EXPECT_TRUE(cadence.isDataPacket());  cadence.advance();  // D
     EXPECT_TRUE(cadence.isDataPacket());  cadence.advance();  // D
+}
+
+//==============================================================================
+// U6 — multi-rate cadence (Bresenham). One bus second (8000 cycles) must carry
+// EXACTLY `rate` frames at every supported rate, including the fractional 44.1
+// family where the per-cycle frame count never settles to an integer pattern.
+//==============================================================================
+
+TEST(BlockingCadenceTests, ExactFramesPerSecondAtAllRates) {
+    struct Case { uint32_t rate; uint32_t spp; };
+    // samplesPerPacket = 8 (<=48k) / 16 (88.2-96k) / 32 (176.4-192k) per Apple.
+    const Case cases[] = {
+        {44100, 8}, {48000, 8},
+        {88200, 16}, {96000, 16},
+        {176400, 32}, {192000, 32},
+    };
+
+    for (const Case c : cases) {
+        BlockingCadence48k cadence;
+        cadence.configure(c.rate, c.spp);
+
+        // One bus second: within one packet of the exact rate. The 44.1 family
+        // can't hit an exact integer in a single second (44100 isn't a multiple
+        // of 8 frames/packet) — the few-frame remainder carries into next second.
+        uint64_t oneSecond = 0;
+        for (int i = 0; i < 8000; ++i) {
+            oneSecond += cadence.samplesThisCycle();
+            cadence.advance();
+        }
+        EXPECT_LE(std::llabs(static_cast<long long>(oneSecond) - c.rate), c.spp)
+            << "rate=" << c.rate << " spp=" << c.spp << " oneSecond=" << oneSecond;
+
+        // Two bus seconds: EXACT for every supported rate (the remainder closes).
+        cadence.reset();
+        uint64_t totalSamples = 0;
+        for (int i = 0; i < 16000; ++i) {
+            totalSamples += cadence.samplesThisCycle();
+            cadence.advance();
+        }
+        EXPECT_EQ(totalSamples, 2ULL * c.rate) << "rate=" << c.rate << " spp=" << c.spp;
+
+        // Every DATA packet carries exactly samplesPerPacket frames (or 0).
+        cadence.reset();
+        for (int i = 0; i < 64; ++i) {
+            const uint32_t s = cadence.samplesThisCycle();
+            EXPECT_TRUE(s == 0 || s == c.spp) << "rate=" << c.rate << " s=" << s;
+            cadence.advance();
+        }
+    }
+}
+
+TEST(BlockingCadenceTests, ConfigureFortyEightKMatchesDefaultPattern) {
+    // configure(48000, 8) must be identical to the default-constructed 48k state.
+    BlockingCadence48k def;
+    BlockingCadence48k cfg;
+    cfg.configure(48000, 8);
+    for (int i = 0; i < 256; ++i) {
+        ASSERT_EQ(def.isDataPacket(), cfg.isDataPacket()) << "cycle " << i;
+        ASSERT_EQ(def.samplesThisCycle(), cfg.samplesThisCycle()) << "cycle " << i;
+        def.advance();
+        cfg.advance();
+    }
 }

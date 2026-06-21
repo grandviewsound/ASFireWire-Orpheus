@@ -28,6 +28,15 @@ struct AudioStreamRuntimeCaps {
     uint32_t sampleRateHz{0};
 };
 
+/// Per-rate ExtendedStreamFormat CONTROL blocks for the runtime rate-change
+/// path. Kept independent of the audio Model layer; the backend converts the
+/// device config into these before handing them to the protocol.
+struct RateStreamFormat {
+    uint32_t rateHz{0};
+    std::vector<uint8_t> playbackRawFormatBlock;  // iPCR (host -> device)
+    std::vector<uint8_t> captureRawFormatBlock;   // oPCR (device -> host)
+};
+
 struct AudioStartOrderHint {
     bool inputBeforeOutput{false};
     const char* reason{"protocol-default"};
@@ -69,6 +78,31 @@ public:
     virtual bool GetRuntimeAudioStreamCaps(AudioStreamRuntimeCaps& outCaps) const {
         (void)outCaps;
         return false;
+    }
+
+    /// Supply device-driven audio caps recovered by generic AV/C discovery
+    /// (channel widths, AM824 DBS slot counts, sample rate). Protocols that
+    /// otherwise hardcode a single model's topology can adopt these so the same
+    /// backend serves any device. Implementations should ignore zero/partial
+    /// caps and keep their existing values. Default: no-op.
+    virtual void SetDiscoveredAudioCaps(const AudioStreamRuntimeCaps& caps) {
+        (void)caps;
+    }
+
+    /// Provide per-rate ExtendedStreamFormat blocks for the runtime rate-change
+    /// path (device-side half). Default: no-op.
+    virtual void UpdateDiscoveredRateFormatBlocks(
+        const std::vector<RateStreamFormat>& rateBlocks) {
+        (void)rateBlocks;
+    }
+
+    /// Command the device to a new audio sample rate (Hz) by re-sending the
+    /// ExtendedStreamFormat CONTROL for that rate, then read back STATUS to
+    /// confirm the device adopted it. Caller is responsible for stopping/
+    /// restarting host isoch streams around this. Default: unsupported.
+    virtual IOReturn SetSampleRate(uint32_t rateHz) {
+        (void)rateHz;
+        return kIOReturnUnsupported;
     }
 
     /// Optional bring-up hook to configure device-side duplex streaming at 48kHz.

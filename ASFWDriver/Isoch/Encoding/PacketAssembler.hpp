@@ -35,15 +35,20 @@ enum class StreamMode : uint8_t {
     kBlocking = 1,
 };
 
-/// Compile-time maximum frames per DATA packet (48k blocking path).
+/// Nominal frames per DATA packet at the 48k family (default/fallback).
 constexpr uint32_t kSamplesPerDataPacket = 8;
+
+/// Compile-time CAPACITY ceiling for fixed packet buffers across all rates
+/// (192 kHz family = 32 frames/packet). Runtime packets use the rate-derived
+/// count (8/16/32); buffers are sized for the max so higher rates can't overflow.
+constexpr uint32_t kMaxSamplesPerDataPacket = kMaxSamplesPerPacket;  // 32
 
 /// CIP header size in bytes
 constexpr uint32_t kCIPHeaderSize = 8;
 
-/// Compile-time max audio payload size (8 frames × max AM824 slots × 4 bytes)
+/// Compile-time max audio payload size (max frames/packet × max AM824 slots × 4)
 constexpr size_t kMaxAudioDataSize =
-    static_cast<size_t>(kSamplesPerDataPacket) * Isoch::Config::kMaxAmdtpDbs * sizeof(uint32_t);
+    static_cast<size_t>(kMaxSamplesPerDataPacket) * Isoch::Config::kMaxAmdtpDbs * sizeof(uint32_t);
 
 /// Compile-time max assembled packet size (CIP header + max audio data)
 constexpr size_t kMaxAssembledPacketSize = kCIPHeaderSize + kMaxAudioDataSize;
@@ -114,16 +119,30 @@ public:
         return static_cast<uint32_t>(kCIPHeaderSize + payloadBytes);
     }
 
-    /// Get DATA packet frame count for the active stream mode (48k paths only).
+    /// Get DATA packet frame count (SYT interval) for the active stream mode and
+    /// sample rate. Blocking: 8/16/32 per the 48k/96k/192k family (U6). Non-blocking
+    /// remains the 48k value (that path is not yet rate-parametrized).
     uint32_t samplesPerDataPacket() const noexcept {
         switch (streamMode_) {
             case StreamMode::kBlocking:
-                return kSamplesPerPacket48k;
+                return blockingSamplesPerPacketForRate(sampleRateHz_);
             case StreamMode::kNonBlocking:
                 return kNonBlockingSamplesPerPacket48k;
         }
         return kSamplesPerDataPacket;
     }
+
+    /// Set the audio sample rate (Hz) and reconfigure the blocking cadence + SYT
+    /// interval accordingly. Default 48 kHz reproduces the original behavior
+    /// exactly. Resets the blocking cadence state.
+    void setSampleRate(uint32_t sampleRateHz) noexcept {
+        sampleRateHz_ = (sampleRateHz != 0) ? sampleRateHz : 48000u;
+        blockingCadence_.configure(sampleRateHz_,
+                                   blockingSamplesPerPacketForRate(sampleRateHz_));
+    }
+
+    /// Active audio sample rate in Hz.
+    uint32_t sampleRateHz() const noexcept { return sampleRateHz_; }
 
     /// Reconfigure channel count, MIDI channels, and SID (resets all state).
     /// Use this instead of assignment since atomics prevent copy/move.
@@ -411,6 +430,7 @@ private:
     uint32_t channelCount_{2};               ///< Number of PCM audio channels
     uint32_t am824SlotCount_{2};             ///< Wire AM824 slots per event (CIP DBS)
     uint32_t midiSlotsPerEvent_{0};          ///< Extra AM824 slots after PCM (MIDI, etc.)
+    uint32_t sampleRateHz_{48000};           ///< Audio sample rate (drives cadence/SYT spp)
     uint64_t currentCycleNumber() const noexcept {
         switch (streamMode_) {
             case StreamMode::kBlocking:

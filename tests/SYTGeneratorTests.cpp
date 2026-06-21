@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+
 #include "../ASFWDriver/Isoch/Encoding/SYTGenerator.hpp"
 
 namespace {
@@ -92,6 +94,58 @@ TEST(SYTGenerator, AdvancesConstant4096PerPacketRegardlessOfTransmitCycle) {
             << "SYT must advance one SYT interval (4096 ticks) per DATA packet "
                "regardless of the transmit-cycle step";
         prev = cur;
+    }
+}
+
+TEST(SYTGenerator, FortyEightKFamilyAdvancesOneSytIntervalPerPacket) {
+    // U6 — at the 48k family the SYT advance per DATA packet is exactly
+    // samplesPerPacket * (24576000/rate), which is constant 4096 ticks because
+    // samplesPerPacket and ticksPerSample scale inversely:
+    //   48k:  8 * 512 = 4096   96k: 16 * 256 = 4096   192k: 32 * 128 = 4096
+    // Each is an exact divisor of the clock, so there is never a remainder.
+    using ASFW::Encoding::SYTGenerator;
+    struct Case { double rate; uint32_t spp; };
+    for (const Case c : {Case{48000.0, 8}, Case{96000.0, 16}, Case{192000.0, 32}}) {
+        SYTGenerator gen;
+        gen.initialize(c.rate, c.spp);
+        gen.reset();
+        int32_t prev = TickIndex(gen.computeDataSYT(0, c.spp));
+        for (int pkt = 0; pkt < 64; ++pkt) {
+            const int32_t cur = TickIndex(gen.computeDataSYT(0, c.spp));
+            EXPECT_EQ(WrapSigned(cur - prev), 4096)
+                << "rate=" << c.rate << " spp=" << c.spp;
+            prev = cur;
+        }
+    }
+}
+
+TEST(SYTGenerator, FractionalRateAdvanceAveragesExactTicksNoDrift) {
+    // U6 — at 44.1 kHz blocking (8 samples/packet) the true advance is
+    // 8 * 24576000 / 44100 = 4458.2313… ticks/packet — non-integer. The
+    // remainder-carrying accumulator must make the SUMMED advance over many
+    // packets match the exact rational total to within one tick (no unbounded
+    // drift). Sum over N packets must equal floor/round of N * 196608000/44100.
+    using ASFW::Encoding::SYTGenerator;
+    SYTGenerator gen;
+    gen.initialize(44100.0, 8);
+    gen.reset();
+
+    constexpr uint64_t kNum = 8ULL * 24576000ULL;  // ticks numerator per packet
+    constexpr uint32_t kRate = 44100;
+    constexpr int kPackets = 44100;  // ~5.5 s of DATA packets
+
+    int32_t prev = TickIndex(gen.computeDataSYT(0, 8));
+    int64_t summed = 0;
+    for (int n = 1; n <= kPackets; ++n) {
+        const int32_t cur = TickIndex(gen.computeDataSYT(0, 8));
+        summed += WrapSigned(cur - prev);
+        prev = cur;
+
+        const int64_t exactTotal =
+            static_cast<int64_t>((kNum * static_cast<uint64_t>(n)) / kRate);
+        // Accumulated SYT advance tracks the exact rational total within 1 tick.
+        ASSERT_LE(std::abs(summed - exactTotal), 1)
+            << "fractional SYT drifted at packet " << n;
     }
 }
 

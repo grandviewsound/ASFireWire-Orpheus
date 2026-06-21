@@ -118,8 +118,20 @@ public:
     IOReturn Shutdown() override;
     const char* GetName() const override { return "Prism Sound Orpheus"; }
 
-    /// Report Orpheus channel topology: asymmetric — 10 PCM in, 12 PCM out.
+    /// Report channel topology. U3: prefer device-driven caps recovered by AV/C
+    /// discovery (so this backend serves any BeBoB device); fall back to the
+    /// known-good Orpheus topology (10 PCM in / 12 PCM out, DBS 11/13) when
+    /// discovery hasn't supplied a complete set. The fallback guarantees Orpheus
+    /// can never regress even if discovery is partial.
     bool GetRuntimeAudioStreamCaps(AudioStreamRuntimeCaps& outCaps) const override {
+        if (mCapsValid_.load(std::memory_order_acquire)) {
+            outCaps.hostInputPcmChannels  = mHostInputPcmChannels_.load(std::memory_order_relaxed);
+            outCaps.hostOutputPcmChannels = mHostOutputPcmChannels_.load(std::memory_order_relaxed);
+            outCaps.deviceToHostAm824Slots = mDeviceToHostAm824Slots_.load(std::memory_order_relaxed);
+            outCaps.hostToDeviceAm824Slots = mHostToDeviceAm824Slots_.load(std::memory_order_relaxed);
+            outCaps.sampleRateHz = mSampleRateHz_.load(std::memory_order_relaxed);
+            return true;
+        }
         outCaps.hostInputPcmChannels = kOrpheusOutputAudioChannels;  // 10 (device→host, DBS=11)
         outCaps.hostOutputPcmChannels = kOrpheusInputAudioChannels;  // 12 (host→device, DBS=13)
         outCaps.deviceToHostAm824Slots = kOrpheusOutputChannels;     // 11 (DBS incl MIDI)
@@ -127,6 +139,11 @@ public:
         outCaps.sampleRateHz = 48000;
         return true;
     }
+
+    /// U3 — adopt device-driven caps from AV/C discovery. Only accepted when the
+    /// core set is fully populated and self-consistent (DBS >= PCM width), so a
+    /// partial/zero discovery never overrides the safe Orpheus fallback.
+    void SetDiscoveredAudioCaps(const AudioStreamRuntimeCaps& caps) override;
 
     /// Pre-CMP Extended Stream Format CONTROL (0xBF/0xC0) at UNIT, iPCR plug.
     /// Mirrors Apple's initHardware-direct SetExtendedStreamFormat call.
@@ -137,6 +154,14 @@ public:
     void UpdateDiscoveredStreamFormatBlocks(
         const std::vector<uint8_t>& playback48kRawFormatBlock,
         const std::vector<uint8_t>& capture48kRawFormatBlock) override;
+
+    /// Store per-rate ExtendedStreamFormat blocks for the rate-change path.
+    void UpdateDiscoveredRateFormatBlocks(
+        const std::vector<RateStreamFormat>& rateBlocks) override;
+
+    /// Command Orpheus to a new sample rate: re-send the ExtendedStreamFormat
+    /// CONTROL (iPCR + oPCR) with that rate's block, then STATUS-verify.
+    IOReturn SetSampleRate(uint32_t rateHz) override;
 
     /// Returns true once stream format setup is complete.
     bool IsFormatDone() const override { return mFormatDone_.load(std::memory_order_acquire); }
@@ -275,6 +300,21 @@ private:
     std::atomic<uint32_t> mFormatSequence_{0};
     std::vector<uint8_t> playback48kRawFormatBlock_{};
     std::vector<uint8_t> capture48kRawFormatBlock_{};
+
+    // Per-rate ExtendedStreamFormat blocks (rate-change path). Written once at
+    // bring-up; read by SetSampleRate. Not atomic — SetSampleRate is driven from
+    // the bring-up/control path, not the realtime isoch threads.
+    std::vector<RateStreamFormat> rateFormatBlocks_{};
+
+    // U3 — device-driven runtime caps from AV/C discovery. mCapsValid_ gates
+    // adoption (false = use the Orpheus fallback). Stored as atomics because
+    // GetRuntimeAudioStreamCaps is a const query reached from multiple threads.
+    std::atomic<bool>     mCapsValid_{false};
+    std::atomic<uint32_t> mHostInputPcmChannels_{0};
+    std::atomic<uint32_t> mHostOutputPcmChannels_{0};
+    std::atomic<uint32_t> mDeviceToHostAm824Slots_{0};
+    std::atomic<uint32_t> mHostToDeviceAm824Slots_{0};
+    std::atomic<uint32_t> mSampleRateHz_{0};
 };
 
 } // namespace ASFW::Audio::BeBoB

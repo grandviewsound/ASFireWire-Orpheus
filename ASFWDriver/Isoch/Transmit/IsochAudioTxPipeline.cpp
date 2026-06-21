@@ -202,7 +202,8 @@ void IsochAudioTxPipeline::SetZeroCopyOutputBuffer(void* base, uint64_t bytes, u
 kern_return_t IsochAudioTxPipeline::Configure(uint8_t sid,
                                               uint32_t streamModeRaw,
                                               uint32_t requestedChannels,
-                                              uint32_t requestedAm824Slots) noexcept {
+                                              uint32_t requestedAm824Slots,
+                                              uint32_t sampleRateHz) noexcept {
     if (!sharedTxQueue_.IsValid()) {
         ASFW_LOG(Isoch, "IT: Configure failed - shared TX queue missing");
         return kIOReturnNotReady;
@@ -240,6 +241,12 @@ kern_return_t IsochAudioTxPipeline::Configure(uint8_t sid,
     }
 
     assembler_.reconfigureAM824(queueChannels, am824Slots, sid);
+
+    // U6 — drive the blocking cadence + SYT interval from the configured sample
+    // rate (8/16/32 frames/packet for the 48k/96k/192k family). 48 kHz keeps the
+    // original behavior exactly. reconfigureAM824 above resets the cadence; this
+    // (re)applies the rate so the reset doesn't drop it.
+    assembler_.setSampleRate(sampleRateHz);
 
     // reconfigureAM824 wipes the assembler's zero-copy source as part of its
     // state reset. In IsochService bring-up SetZeroCopyOutputBuffer runs BEFORE
@@ -362,8 +369,11 @@ void IsochAudioTxPipeline::ResetForStart() noexcept {
     dbcTracker_.firstPacket = true;
     dbcTracker_.discontinuityCount.store(0, std::memory_order_relaxed);
 
-    // SYT generator (cycle-based, Linux approach). TODO: derive rate from stream formats.
-    sytGenerator_.initialize(48000.0, assembler_.samplesPerDataPacket());
+    // SYT generator (cycle-based, Linux approach). Rate-driven (U6): the SYT
+    // interval per DATA packet is samplesPerDataPacket() frames at the configured
+    // rate; SYTGenerator derives ticks/sample (with fractional carry) from it.
+    sytGenerator_.initialize(static_cast<double>(assembler_.sampleRateHz()),
+                             assembler_.samplesPerDataPacket());
     sytGenerator_.reset();
     cycleTrackingValid_ = false;
 }
@@ -848,7 +858,8 @@ void IsochAudioTxPipeline::InjectNearHw(uint32_t hwPacketIndex, Tx::IsochTxDescr
         const bool isData = (reqCount > Encoding::kCIPHeaderSize);
         if (!isData) continue;
 
-        int32_t samples[Encoding::kSamplesPerDataPacket * Config::kMaxPcmChannels] = {};
+        // Capacity sized for the largest rate family (32 frames/packet, U6).
+        int32_t samples[Encoding::kMaxSamplesPerDataPacket * Config::kMaxPcmChannels] = {};
         uint32_t framesRead = 0;
 
         if (zeroCopySync) {

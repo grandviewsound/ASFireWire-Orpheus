@@ -69,7 +69,8 @@ kern_return_t IsochTransmitContext::Configure(uint8_t channel,
                                               uint8_t sid,
                                               uint32_t streamModeRaw,
                                               uint32_t requestedChannels,
-                                              uint32_t requestedAm824Slots) noexcept {
+                                              uint32_t requestedAm824Slots,
+                                              uint32_t sampleRateHz) noexcept {
     if (state_ != State::Unconfigured && state_ != State::Stopped) {
         return kIOReturnBusy;
     }
@@ -79,7 +80,8 @@ kern_return_t IsochTransmitContext::Configure(uint8_t channel,
     channel_ = channel;
     ring_.SetChannel(channel_);
 
-    const kern_return_t krAudio = audio_.Configure(sid, streamModeRaw, requestedChannels, requestedAm824Slots);
+    const kern_return_t krAudio = audio_.Configure(sid, streamModeRaw, requestedChannels,
+                                                   requestedAm824Slots, sampleRateHz);
     if (krAudio != kIOReturnSuccess) {
         return krAudio;
     }

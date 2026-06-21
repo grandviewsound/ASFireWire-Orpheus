@@ -84,7 +84,8 @@ public:
                                 uint64_t zeroCopyBytes,
                                 uint32_t zeroCopyFrames,
                                 const uint8_t* outputChannelMap = nullptr,
-                                uint32_t outputChannelMapCount = 0);
+                                uint32_t outputChannelMapCount = 0,
+                                uint32_t sampleRateHz = 48000);
 
     kern_return_t StopTransmit();
 

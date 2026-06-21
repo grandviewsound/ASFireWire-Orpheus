@@ -8,18 +8,19 @@
 #include "SYTGenerator.hpp"
 #include "../../Logging/Logging.hpp"
 
+#include <cmath>
+
 namespace ASFW::Encoding {
 
 void SYTGenerator::initialize(double sampleRate, uint32_t framesPerPacket) noexcept {
-    // SYT advance per DATA packet = framesPerPacket * ticksPerSample.
-    // Blocking mode:     8 frames/packet → 8 * 512 = 4096 ticks
-    // Non-blocking mode: 6 frames/packet → 6 * 512 = 3072 ticks
-    if (sampleRate == 48000.0) {
-        ticksPerSample_ = kTicksPerSample48k;
-    } else {
-        ASFW_LOG(Isoch, "SYTGenerator: Unsupported rate %.0f Hz, using 48kHz params", sampleRate);
-        ticksPerSample_ = kTicksPerSample48k;
-    }
+    // SYT advance per DATA packet = framesPerPacket * (kClockHz / sampleRate).
+    // ticksPerSample is integer at the 48k family (512/256/128 @ 48/96/192k) and
+    // fractional at the 44.1k family; computeDataSYT carries the remainder so the
+    // advance is exact at any rate. 48k stays byte-identical (remainder == 0).
+    // Supported rates are exact integer-valued doubles (48000.0, 44100.0, …);
+    // lround keeps it robust against any tiny FP representation error.
+    sampleRateHz_ = (sampleRate > 0.0) ? static_cast<uint32_t>(std::lround(sampleRate)) : 48000U;
+    ticksPerSample_ = kClockHz / sampleRateHz_;  // integer part (logging / fast path)
 
     sytOffsetWrap_ = 16 * kTicksPerCycle;  // 49152
 
@@ -34,6 +35,7 @@ void SYTGenerator::initialize(double sampleRate, uint32_t framesPerPacket) noexc
 
 void SYTGenerator::reset() noexcept {
     sytOffsetTicks_ = 0;
+    tickRemainder_ = 0;
     dataPacketCount_ = 0;
     baseCycle_ = 0;
     baseCycleValid_ = false;
@@ -85,7 +87,15 @@ uint16_t SYTGenerator::computeDataSYT(uint32_t transmitCycle, uint32_t samplesIn
     // bounds the phase by adapting cadence (slipping an extra empty packet);
     // we instead slave the HAL sample clock to the bus (zts hw-pll), making the
     // sample axis identical to the cycle axis — the correct advance is nominal.
-    const uint32_t intervalTicks = samplesInPacket * ticksPerSample_;
+    //
+    // Exact advance = samplesInPacket * kClockHz / sampleRateHz_, with the
+    // division remainder carried across packets. At the 48k family this is exact
+    // (remainder stays 0 → identical to the old `samplesInPacket * 512`); at the
+    // 44.1k family it tracks the true fractional ticks-per-sample without drift.
+    const uint64_t exactTicks =
+        static_cast<uint64_t>(samplesInPacket) * kClockHz + tickRemainder_;
+    const uint32_t intervalTicks = static_cast<uint32_t>(exactTicks / sampleRateHz_);
+    tickRemainder_ = static_cast<uint32_t>(exactTicks % sampleRateHz_);
 
     sytOffsetTicks_ += intervalTicks;
     if (sytOffsetTicks_ >= sytOffsetWrap_) {

@@ -428,6 +428,157 @@ void BeBoBProtocol::UpdateDiscoveredStreamFormatBlocks(
              capture48kRawFormatBlock_.size());
 }
 
+void BeBoBProtocol::UpdateDiscoveredRateFormatBlocks(
+    const std::vector<RateStreamFormat>& rateBlocks)
+{
+    rateFormatBlocks_ = rateBlocks;
+    ASFW_LOG(Audio,
+             "BeBoBProtocol: stored per-rate ExtStreamFormat blocks for %zu rates",
+             rateFormatBlocks_.size());
+}
+
+IOReturn BeBoBProtocol::SetSampleRate(uint32_t rateHz)
+{
+    auto* transport = transport_.load(std::memory_order_acquire);
+    if (!transport) {
+        ASFW_LOG_ERROR(Audio, "BeBoBProtocol: SetSampleRate requires FCP transport");
+        return kIOReturnNotReady;
+    }
+
+    // Locate the discovered ExtStreamFormat blocks for the requested rate.
+    const RateStreamFormat* match = nullptr;
+    for (const auto& entry : rateFormatBlocks_) {
+        if (entry.rateHz == rateHz) {
+            match = &entry;
+            break;
+        }
+    }
+    if (match == nullptr) {
+        ASFW_LOG_ERROR(Audio,
+                       "BeBoBProtocol: SetSampleRate(%u) — no discovered format block for that rate",
+                       rateHz);
+        return kIOReturnUnsupported;
+    }
+
+    ASFW_LOG(Audio,
+             "BeBoBProtocol: SetSampleRate(%u) — re-sending ExtStreamFormat CONTROL "
+             "(iPCR playback=%zuB, oPCR capture=%zuB)",
+             rateHz, match->playbackRawFormatBlock.size(),
+             match->captureRawFormatBlock.size());
+
+    struct CommandState {
+        std::atomic<bool> done{false};
+        std::atomic<IOReturn> status{kIOReturnTimeout};
+    };
+
+    // Send one direction's ExtStreamFormat CONTROL at the target rate, blocking.
+    auto submitOne = [&](bool isInput, const std::vector<uint8_t>& rawFormatBlock,
+                         const char* tag) -> IOReturn {
+        if (!RawFormatBlockLooksUsable(rawFormatBlock)) {
+            ASFW_LOG_ERROR(Audio,
+                           "BeBoBProtocol: SetSampleRate(%u) %{public}s block unusable",
+                           rateHz, tag);
+            return kIOReturnUnsupported;
+        }
+        auto state = std::make_shared<CommandState>();
+        auto command = std::make_shared<AVCExtendedStreamFormatCommand>(
+            *transport, isInput, /*plugId=*/0x00, rawFormatBlock);
+        command->Submit([state](AVCResult result) {
+            state->status.store(MapAVCResultToIOReturn(result), std::memory_order_release);
+            state->done.store(true, std::memory_order_release);
+        });
+        for (uint32_t waited = 0; waited < kVendorCommandTimeoutMs; waited += kVendorCommandPollMs) {
+            if (state->done.load(std::memory_order_acquire)) break;
+            IOSleep(kVendorCommandPollMs);
+        }
+        const IOReturn kr = state->status.load(std::memory_order_acquire);
+        ASFW_LOG(Audio, "BeBoBProtocol: SetSampleRate(%u) %{public}s CONTROL result=0x%x",
+                 rateHz, tag, kr);
+        return kr;
+    };
+
+    const IOReturn inputKr = submitOne(/*isInput=*/true, match->playbackRawFormatBlock, "iPCR");
+    const IOReturn outputKr = submitOne(/*isInput=*/false, match->captureRawFormatBlock, "oPCR");
+    if (inputKr != kIOReturnSuccess) {
+        return inputKr;
+    }
+    if (outputKr != kIOReturnSuccess) {
+        return outputKr;
+    }
+
+    // STATUS read-back: ask the device what rate it now reports, so a HW log
+    // proves the device actually adopted the switch (not just ACCEPTED it).
+    auto verifyOne = [&](bool isInput, const char* tag) {
+        auto state = std::make_shared<CommandState>();
+        auto responseOps = std::make_shared<std::vector<uint8_t>>();
+        auto statusCmd = std::make_shared<AVCExtendedStreamFormatCommand>(
+            *transport, isInput, /*plugId=*/0x00);
+        statusCmd->AVCCommand::Submit(
+            [state, responseOps](AVCResult result, const AVCCdb& response) {
+                if (response.operandLength > 0) {
+                    responseOps->assign(response.operands.begin(),
+                                        response.operands.begin() + response.operandLength);
+                }
+                state->status.store(Protocols::AVC::IsSuccess(result) ? kIOReturnSuccess
+                                                                      : MapAVCResultToIOReturn(result),
+                                    std::memory_order_release);
+                state->done.store(true, std::memory_order_release);
+            });
+        for (uint32_t waited = 0; waited < kVendorCommandTimeoutMs; waited += kVendorCommandPollMs) {
+            if (state->done.load(std::memory_order_acquire)) break;
+            IOSleep(kVendorCommandPollMs);
+        }
+        const auto& ops = *responseOps;
+        // operand[5] is the AM824 nominal-rate control field in the Extended
+        // Stream Format response; log it raw so the device's adopted rate is
+        // visible without decoding here.
+        const int rateField = ops.size() > 5 ? static_cast<int>(ops[5]) : -1;
+        ASFW_LOG(Audio,
+                 "BeBoBProtocol: SetSampleRate(%u) STATUS %{public}s ops=%zu rateField=0x%02x",
+                 rateHz, tag, ops.size(), rateField);
+    };
+    verifyOne(/*isInput=*/true, "iPCR");
+    verifyOne(/*isInput=*/false, "oPCR");
+
+    return kIOReturnSuccess;
+}
+
+void BeBoBProtocol::SetDiscoveredAudioCaps(const AudioStreamRuntimeCaps& caps)
+{
+    // Adopt only a complete, self-consistent set. DBS (AM824 wire slots) must be
+    // at least the PCM width — a smaller value means discovery lost the wire
+    // format, in which case the Orpheus fallback is safer than a bad DBS.
+    const bool complete =
+        caps.hostInputPcmChannels > 0 && caps.hostOutputPcmChannels > 0 &&
+        caps.deviceToHostAm824Slots >= caps.hostInputPcmChannels &&
+        caps.hostToDeviceAm824Slots >= caps.hostOutputPcmChannels &&
+        caps.sampleRateHz > 0;
+
+    if (!complete) {
+        ASFW_LOG(Audio,
+                 "BeBoBProtocol: ignoring partial discovered caps "
+                 "(in=%u out=%u dbsIn=%u dbsOut=%u rate=%u) — keeping fallback",
+                 caps.hostInputPcmChannels, caps.hostOutputPcmChannels,
+                 caps.deviceToHostAm824Slots, caps.hostToDeviceAm824Slots,
+                 caps.sampleRateHz);
+        return;
+    }
+
+    mHostInputPcmChannels_.store(caps.hostInputPcmChannels, std::memory_order_relaxed);
+    mHostOutputPcmChannels_.store(caps.hostOutputPcmChannels, std::memory_order_relaxed);
+    mDeviceToHostAm824Slots_.store(caps.deviceToHostAm824Slots, std::memory_order_relaxed);
+    mHostToDeviceAm824Slots_.store(caps.hostToDeviceAm824Slots, std::memory_order_relaxed);
+    mSampleRateHz_.store(caps.sampleRateHz, std::memory_order_relaxed);
+    mCapsValid_.store(true, std::memory_order_release);
+
+    ASFW_LOG(Audio,
+             "BeBoBProtocol: adopted device-driven caps in=%u out=%u "
+             "dbsIn=%u dbsOut=%u rate=%u",
+             caps.hostInputPcmChannels, caps.hostOutputPcmChannels,
+             caps.deviceToHostAm824Slots, caps.hostToDeviceAm824Slots,
+             caps.sampleRateHz);
+}
+
 std::optional<AudioStartOrderHint> BeBoBProtocol::GetAppleStartOrderHint()
 {
     auto* transport = transport_.load(std::memory_order_acquire);

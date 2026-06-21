@@ -59,6 +59,12 @@ private:
     /// 24.576 MHz ticks per 125 us bus cycle
     static constexpr uint32_t kTicksPerCycle = 3072;
 
+    /// IEEE 1394 isoch clock: 24.576 MHz. ticksPerSample = kClockHz / rate.
+    /// Integer at the 48k family (512/256/128) but fractional at the 44.1k family
+    /// (e.g. 557.14 @ 44.1k); computeDataSYT carries the remainder so the SYT
+    /// advance stays drift-free at any rate (U6).
+    static constexpr uint32_t kClockHz = 24576000;
+
     /// Transfer delay (presentation offset ahead of transmit).
     /// Was 0x2E00 (Linux TRANSFER_DELAY) → sub-cycle offset 0xA00. The Apple
     /// golden sniffer capture (research/captures/.../passive_sniffer_run.txt)
@@ -78,8 +84,17 @@ private:
     // Per-rate computed values (set in initialize())
     // =========================================================================
 
-    /// Ticks per sample at the active sample rate. For 48 kHz: 512.
+    /// Ticks per sample at the active sample rate (integer part; for logging and
+    /// the integer-rate fast path). For 48 kHz: 512.
     uint32_t ticksPerSample_{kTicksPerSample48k};
+
+    /// Active sample rate in Hz (set in initialize()). Drives the exact,
+    /// remainder-carrying SYT advance so non-integer rates don't drift.
+    uint32_t sampleRateHz_{48000};
+
+    /// Carried fractional remainder of the SYT advance (units of sampleRateHz_).
+    /// Always 0 at integer-divisor rates (48k family) → byte-identical SYT there.
+    uint32_t tickRemainder_{0};
 
     /// Wrap point for sytOffsetTicks_: 16 * kTicksPerCycle = 49152
     /// Matches the 4-bit cycle field in SYT format

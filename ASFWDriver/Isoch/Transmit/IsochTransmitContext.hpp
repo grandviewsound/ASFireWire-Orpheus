@@ -86,7 +86,8 @@ public:
                             uint8_t sid,
                             uint32_t streamModeRaw = 0,
                             uint32_t requestedChannels = 0,
-                            uint32_t requestedAm824Slots = 0) noexcept;
+                            uint32_t requestedAm824Slots = 0,
+                            uint32_t sampleRateHz = 48000) noexcept;
     kern_return_t Start() noexcept;
     void Stop() noexcept;
     void SyncOutputInputStreams() noexcept;

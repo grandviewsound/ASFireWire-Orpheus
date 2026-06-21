@@ -128,7 +128,8 @@ kern_return_t IsochService::StartTransmit(uint8_t channel,
                                           uint64_t zeroCopyBytes,
                                           uint32_t zeroCopyFrames,
                                           const uint8_t* outputChannelMap,
-                                          uint32_t outputChannelMapCount) {
+                                          uint32_t outputChannelMapCount,
+                                          uint32_t sampleRateHz) {
 
     if (isochTransmitContext_ &&
         isochTransmitContext_->GetState() == ASFW::Isoch::ITState::Running) {
@@ -233,7 +234,8 @@ kern_return_t IsochService::StartTransmit(uint8_t channel,
                                                    sid,
                                                    streamModeRaw,
                                                    pcmChannels,
-                                                   am824Slots);
+                                                   am824Slots,
+                                                   sampleRateHz);
     if (result != kIOReturnSuccess) {
         ASFW_LOG(Controller, "[Isoch] ❌ Failed to Configure IT Context: 0x%x", result);
         isochTransmitContext_->SetZeroCopyOutputBuffer(nullptr, 0, 0);
@@ -353,7 +355,8 @@ kern_return_t IsochService::StartDuplex(const IsochDuplexStartParams& params,
                                             params.zeroCopyBytes,
                                             params.zeroCopyFrames,
                                             params.hostOutputIsochChannelPositions.data(),
-                                            static_cast<uint32_t>(params.hostOutputIsochChannelPositions.size()));
+                                            static_cast<uint32_t>(params.hostOutputIsochChannelPositions.size()),
+                                            params.sampleRateHz);
     if (krTx != kIOReturnSuccess) {
         StopReceive();
         return krTx;
@@ -399,6 +402,8 @@ void IsochService::ReconnectOPCR(ASFW::CMP::CMPClient* cmpClient) {
     const uint8_t ch = irChannel_;
     ASFW_LOG(Controller, "[Isoch] Reconnecting CMP oPCR on channel %u after device resume", ch);
     cmpClient->DisconnectOPCR(0, [cmpClient, ch](ASFW::CMP::CMPStatus) {
+        // TODO(U5): use the per-device derived speed (IAVCDiscovery::GetDeviceSpeedCode)
+        // here too; this post-resume reconnect still assumes S400.
         cmpClient->ConnectOPCR(0, ch, 2 /*S400*/, [](ASFW::CMP::CMPStatus status) {
             if (status == ASFW::CMP::CMPStatus::Success) {
                 ASFW_LOG(Controller, "[Isoch] ✅ CMP oPCR reconnected after device resume");
@@ -433,6 +438,8 @@ void IsochService::ReconnectIPCR(ASFW::CMP::CMPClient* cmpClient) {
     const uint8_t ch = itChannel_;
     ASFW_LOG(Controller, "[Isoch] Reconnecting CMP iPCR on channel %u after device resume", ch);
     cmpClient->DisconnectIPCR(0, [cmpClient, ch](ASFW::CMP::CMPStatus) {
+        // TODO(U5): use the per-device derived speed (IAVCDiscovery::GetDeviceSpeedCode)
+        // here too; this post-resume reconnect still assumes S400.
         cmpClient->ConnectIPCR(0, ch, 2 /*S400*/, [](ASFW::CMP::CMPStatus status) {
             if (status == ASFW::CMP::CMPStatus::Success) {
                 ASFW_LOG(Controller, "[Isoch] ✅ CMP iPCR reconnected after device resume");
